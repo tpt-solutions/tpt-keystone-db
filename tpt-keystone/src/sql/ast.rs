@@ -2,11 +2,65 @@
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Select(SelectStmt),
+    Insert(InsertStmt),
+    Delete(DeleteStmt),
+    Update(UpdateStmt),
+    CreateTable(CreateTableStmt),
+    DropTable(DropTableStmt),
+    CreateIndex(CreateIndexStmt),
     Set(SetStmt),
     Show(ShowStmt),
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsertStmt {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub values: Vec<Vec<Expr>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteStmt {
+    pub table: String,
+    pub where_: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStmt {
+    pub table: String,
+    pub assignments: Vec<(String, Expr)>,
+    pub where_: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateTableStmt {
+    pub table: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnDef {
+    pub name: String,
+    pub col_type: String,
+    pub nullable: bool,
+    pub default: Option<Expr>,
+    pub is_pk: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTableStmt {
+    pub table: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexStmt {
+    pub table: String,
+    pub column: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

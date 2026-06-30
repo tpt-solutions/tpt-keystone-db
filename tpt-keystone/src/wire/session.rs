@@ -1,22 +1,24 @@
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
 use super::codec::{Conn, FrontendMessage};
 use super::messages::{BackendMessage, ErrorInfo, TransactionStatus};
 use crate::executor::execute_query;
+use crate::storage::database::Database;
 
 /// Drive a single client connection from startup through the query loop.
-pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr) {
+pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Database>) {
     info!(%peer, "client connected");
     let mut conn = Conn::new(stream);
 
-    if let Err(e) = run(&mut conn, peer).await {
+    if let Err(e) = run(&mut conn, peer, db).await {
         debug!(%peer, "session ended: {e}");
     }
     info!(%peer, "client disconnected");
 }
 
-async fn run(conn: &mut Conn, peer: std::net::SocketAddr) -> anyhow::Result<()> {
+async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> anyhow::Result<()> {
     // --- Startup handshake ---
     let startup = conn.read_startup().await?;
     debug!(%peer, version = startup.protocol_version, "startup received");
@@ -46,7 +48,7 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr) -> anyhow::Result<()> 
             FrontendMessage::Query(sql) => {
                 let sql = sql.trim().to_string();
                 debug!(%peer, %sql, "query received");
-                handle_simple_query(conn, &sql).await?;
+                handle_simple_query(conn, &sql, db.clone()).await?;
             }
 
             // Extended query protocol — minimal stubs so psql doesn't hang.
@@ -86,7 +88,7 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr) -> anyhow::Result<()> 
     }
 }
 
-async fn handle_simple_query(conn: &mut Conn, sql: &str) -> anyhow::Result<()> {
+async fn handle_simple_query(conn: &mut Conn, sql: &str, db: Arc<Database>) -> anyhow::Result<()> {
     if sql.is_empty() {
         conn.send(&BackendMessage::EmptyQueryResponse);
         conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
@@ -94,7 +96,7 @@ async fn handle_simple_query(conn: &mut Conn, sql: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    match execute_query(sql) {
+    match execute_query(sql, db) {
         Ok(result) => {
             conn.send(&BackendMessage::RowDescription(result.fields));
             for row in result.rows {

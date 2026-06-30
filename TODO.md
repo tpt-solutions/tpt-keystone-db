@@ -8,13 +8,13 @@
 ## Phase 0 — Foundation: Keystone Core
 
 - [x] Cargo workspace + `tpt-keystone` crate
-- [ ] Tokio TCP listener on :5432
-- [ ] PostgreSQL wire protocol v3 (from scratch) — startup handshake
-- [ ] PostgreSQL wire protocol v3 — Simple Query Protocol loop
-- [ ] SQL Lexer (hand-written tokenizer)
-- [ ] SQL AST node types
-- [ ] SQL Parser (recursive-descent)
-- [ ] Expression evaluator (literals + arithmetic)
+- [x] Tokio TCP listener on :5432
+- [x] PostgreSQL wire protocol v3 (from scratch) — startup handshake
+- [x] PostgreSQL wire protocol v3 — Simple Query Protocol loop
+- [x] SQL Lexer (hand-written tokenizer)
+- [x] SQL AST node types
+- [x] SQL Parser (recursive-descent)
+- [x] Expression evaluator (literals + arithmetic)
 
 **Milestone:** `psql` connects and `SELECT 1` returns a result
 
@@ -22,13 +22,13 @@
 
 ## Phase 1 — Keystone: Storage Engine
 
-- [ ] Write-Ahead Log (WAL) with fsync guarantees
-- [ ] MemTable (BTreeMap-based, in-memory write buffer)
-- [ ] SSTable format + bloom filters
-- [ ] LSM-tree compaction (levelled strategy)
-- [ ] MVCC (Multi-Version Concurrency Control)
-- [ ] Transaction manager (BEGIN / COMMIT / ROLLBACK)
-- [ ] B-Tree indexes for primary keys + secondary indexes
+- [x] Write-Ahead Log (WAL) with fsync guarantees
+- [x] MemTable (BTreeMap-based, in-memory write buffer)
+- [x] SSTable format + bloom filters
+- [x] LSM-tree compaction (levelled strategy)
+- [x] MVCC (Multi-Version Concurrency Control)
+- [x] Transaction manager (BEGIN / COMMIT / ROLLBACK)
+- [x] B-Tree indexes for primary keys + secondary indexes
 - [ ] io_uring async I/O integration (Linux NVMe path)
 
 **Milestone:** INSERT rows, restart process, SELECT them back

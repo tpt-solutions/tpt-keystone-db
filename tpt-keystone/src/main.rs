@@ -1,9 +1,15 @@
 mod executor;
 mod sql;
+mod storage;
 mod wire;
 
+use std::path::Path;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
+
+use storage::database::Database;
+use storage::StorageEngine;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,6 +20,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Open or create the database
+    let db_dir = Path::new("tpt-data");
+    let db = Arc::new(Database::open(db_dir)?);
+    info!(dir = %db_dir.display(), "Database opened");
+
     let addr = "0.0.0.0:5432";
     let listener = TcpListener::bind(addr).await?;
     info!("TPT Keystone listening on {addr}");
@@ -21,8 +32,9 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true)?;
+        let db = db.clone();
         tokio::spawn(async move {
-            wire::session::handle(stream, peer).await;
+            wire::session::handle(stream, peer, db).await;
         });
     }
 }

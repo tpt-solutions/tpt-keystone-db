@@ -7,71 +7,20 @@ pub enum Token {
     StringLiteral(String),
 
     // Keywords
-    Select,
-    From,
-    Where,
-    As,
-    And,
-    Or,
-    Not,
-    Null,
-    True,
-    False,
-    Set,
-    Show,
-    Begin,
-    Commit,
-    Rollback,
-    Is,
-    In,
-    Like,
-    Between,
-    Limit,
-    Offset,
-    Order,
-    By,
-    Asc,
-    Desc,
-    Group,
-    Having,
-    Distinct,
-    All,
-    Case,
-    When,
-    Then,
-    Else,
-    End,
-    Cast,
-    Interval,
+    Select, From, Where, As, And, Or, Not, Null, True, False,
+    Set, Show, Begin, Commit, Rollback, Is, In, Like, Between,
+    Limit, Offset, Order, By, Asc, Desc, Group, Having, Distinct, All,
+    Case, When, Then, Else, End, Cast, Interval,
+    Insert, Into, Values, Delete, Update, Create, Table, Drop, Index,
+    If, Exists, Primary, Key, Default,
 
     // Identifiers
     Ident(String),
 
     // Operators & punctuation
-    Star,
-    Plus,
-    Minus,
-    Slash,
-    Percent,
-    Eq,
-    NotEq,
-    Lt,
-    Lte,
-    Gt,
-    Gte,
-    Concat,   // ||
-    Arrow,    // ->
-    LongArrow, // ->>
-    Comma,
-    Dot,
-    Semicolon,
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    Colon,
-    DoubleColon, // ::
-    Dollar(u32), // $1, $2 ...
+    Star, Plus, Minus, Slash, Percent, Eq, NotEq, Lt, Lte, Gt, Gte,
+    Concat, Arrow, LongArrow, Comma, Dot, Semicolon, LParen, RParen,
+    LBracket, RBracket, Colon, DoubleColon, Dollar(u32),
 
     Eof,
 }
@@ -120,22 +69,15 @@ impl<'a> Lexer<'a> {
             if b.is_ascii_whitespace() {
                 self.pos += 1;
             } else if b == b'-' && self.peek2() == Some(b'-') {
-                // Line comment
                 while let Some(b) = self.advance() {
-                    if b == b'\n' {
-                        break;
-                    }
+                    if b == b'\n' { break; }
                 }
             } else if b == b'/' && self.peek2() == Some(b'*') {
-                // Block comment
                 self.pos += 2;
                 loop {
                     match self.advance() {
                         None => break,
-                        Some(b'*') if self.peek() == Some(b'/') => {
-                            self.pos += 1;
-                            break;
-                        }
+                        Some(b'*') if self.peek() == Some(b'/') => { self.pos += 1; break; }
                         _ => {}
                     }
                 }
@@ -153,47 +95,27 @@ impl<'a> Lexer<'a> {
             Some(b) => b,
         };
 
-        // String literal
-        if b == b'\'' {
-            return self.read_string();
-        }
-
-        // Quoted identifier
-        if b == b'"' {
-            return self.read_quoted_ident();
-        }
-
-        // Number
+        if b == b'\'' { return self.read_string(); }
+        if b == b'"' { return self.read_quoted_ident(); }
         if b.is_ascii_digit() || (b == b'.' && self.peek2().map_or(false, |c| c.is_ascii_digit())) {
             return self.read_number();
         }
-
-        // $N parameter
         if b == b'$' && self.peek2().map_or(false, |c| c.is_ascii_digit()) {
             self.pos += 1;
             let n = self.read_digits();
             return Ok(Token::Dollar(n.parse().unwrap_or(0)));
         }
-
-        // Identifier / keyword
         if b.is_ascii_alphabetic() || b == b'_' {
             return self.read_ident_or_keyword();
         }
 
         self.pos += 1;
         let tok = match b {
-            b'*' => Token::Star,
-            b'+' => Token::Plus,
-            b'%' => Token::Percent,
-            b',' => Token::Comma,
-            b'.' => Token::Dot,
-            b';' => Token::Semicolon,
-            b'(' => Token::LParen,
-            b')' => Token::RParen,
-            b'[' => Token::LBracket,
-            b']' => Token::RBracket,
-            b'/' => Token::Slash,
-            b'=' => Token::Eq,
+            b'*' => Token::Star, b'+' => Token::Plus, b'%' => Token::Percent,
+            b',' => Token::Comma, b'.' => Token::Dot, b';' => Token::Semicolon,
+            b'(' => Token::LParen, b')' => Token::RParen,
+            b'[' => Token::LBracket, b']' => Token::RBracket,
+            b'/' => Token::Slash, b'=' => Token::Eq,
             b'!' if self.peek() == Some(b'=') => { self.pos += 1; Token::NotEq }
             b'<' => {
                 if self.peek() == Some(b'=') { self.pos += 1; Token::Lte }
@@ -209,9 +131,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     if self.peek() == Some(b'>') { self.pos += 1; Token::LongArrow }
                     else { Token::Arrow }
-                } else {
-                    Token::Minus
-                }
+                } else { Token::Minus }
             }
             b'|' if self.peek() == Some(b'|') => { self.pos += 1; Token::Concat }
             b':' => {
@@ -224,19 +144,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_string(&mut self) -> anyhow::Result<Token> {
-        self.pos += 1; // opening '
+        self.pos += 1;
         let mut s = String::new();
         loop {
             match self.advance() {
                 None => anyhow::bail!("unterminated string literal"),
                 Some(b'\'') => {
-                    // Escaped '' inside string
-                    if self.peek() == Some(b'\'') {
-                        self.pos += 1;
-                        s.push('\'');
-                    } else {
-                        break;
-                    }
+                    if self.peek() == Some(b'\'') { self.pos += 1; s.push('\''); }
+                    else { break; }
                 }
                 Some(b) => s.push(b as char),
             }
@@ -245,18 +160,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_quoted_ident(&mut self) -> anyhow::Result<Token> {
-        self.pos += 1; // opening "
+        self.pos += 1;
         let mut s = String::new();
         loop {
             match self.advance() {
                 None => anyhow::bail!("unterminated quoted identifier"),
                 Some(b'"') => {
-                    if self.peek() == Some(b'"') {
-                        self.pos += 1;
-                        s.push('"');
-                    } else {
-                        break;
-                    }
+                    if self.peek() == Some(b'"') { self.pos += 1; s.push('"'); }
+                    else { break; }
                 }
                 Some(b) => s.push(b as char),
             }
@@ -268,48 +179,30 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         let mut has_dot = false;
         let mut has_exp = false;
-
         while let Some(b) = self.peek() {
-            if b.is_ascii_digit() {
-                self.pos += 1;
-            } else if b == b'.' && !has_dot && !has_exp {
-                has_dot = true;
-                self.pos += 1;
-            } else if (b == b'e' || b == b'E') && !has_exp {
-                has_exp = true;
-                self.pos += 1;
-                if self.peek() == Some(b'+') || self.peek() == Some(b'-') {
-                    self.pos += 1;
-                }
-            } else {
-                break;
-            }
+            if b.is_ascii_digit() { self.pos += 1; }
+            else if b == b'.' && !has_dot && !has_exp { has_dot = true; self.pos += 1; }
+            else if (b == b'e' || b == b'E') && !has_exp {
+                has_exp = true; self.pos += 1;
+                if self.peek() == Some(b'+') || self.peek() == Some(b'-') { self.pos += 1; }
+            } else { break; }
         }
-
         let s = std::str::from_utf8(&self.src[start..self.pos])?;
-        if has_dot || has_exp {
-            Ok(Token::FloatLiteral(s.parse()?))
-        } else {
-            Ok(Token::IntLiteral(s.parse()?))
-        }
+        if has_dot || has_exp { Ok(Token::FloatLiteral(s.parse()?)) }
+        else { Ok(Token::IntLiteral(s.parse()?)) }
     }
 
     fn read_digits(&mut self) -> String {
         let start = self.pos;
-        while self.peek().map_or(false, |b| b.is_ascii_digit()) {
-            self.pos += 1;
-        }
+        while self.peek().map_or(false, |b| b.is_ascii_digit()) { self.pos += 1; }
         String::from_utf8_lossy(&self.src[start..self.pos]).into_owned()
     }
 
     fn read_ident_or_keyword(&mut self) -> anyhow::Result<Token> {
         let start = self.pos;
         while let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' {
-                self.pos += 1;
-            } else {
-                break;
-            }
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' { self.pos += 1; }
+            else { break; }
         }
         let s = std::str::from_utf8(&self.src[start..self.pos])?;
         Ok(keyword_or_ident(s))
@@ -318,42 +211,23 @@ impl<'a> Lexer<'a> {
 
 fn keyword_or_ident(s: &str) -> Token {
     match s.to_uppercase().as_str() {
-        "SELECT" => Token::Select,
-        "FROM" => Token::From,
-        "WHERE" => Token::Where,
-        "AS" => Token::As,
-        "AND" => Token::And,
-        "OR" => Token::Or,
-        "NOT" => Token::Not,
-        "NULL" => Token::Null,
-        "TRUE" => Token::True,
-        "FALSE" => Token::False,
-        "SET" => Token::Set,
-        "SHOW" => Token::Show,
-        "BEGIN" => Token::Begin,
-        "COMMIT" => Token::Commit,
-        "ROLLBACK" => Token::Rollback,
-        "IS" => Token::Is,
-        "IN" => Token::In,
-        "LIKE" => Token::Like,
-        "BETWEEN" => Token::Between,
-        "LIMIT" => Token::Limit,
-        "OFFSET" => Token::Offset,
-        "ORDER" => Token::Order,
-        "BY" => Token::By,
-        "ASC" => Token::Asc,
-        "DESC" => Token::Desc,
-        "GROUP" => Token::Group,
-        "HAVING" => Token::Having,
-        "DISTINCT" => Token::Distinct,
-        "ALL" => Token::All,
-        "CASE" => Token::Case,
-        "WHEN" => Token::When,
-        "THEN" => Token::Then,
-        "ELSE" => Token::Else,
-        "END" => Token::End,
-        "CAST" => Token::Cast,
-        "INTERVAL" => Token::Interval,
+        "SELECT" => Token::Select, "FROM" => Token::From, "WHERE" => Token::Where,
+        "AS" => Token::As, "AND" => Token::And, "OR" => Token::Or, "NOT" => Token::Not,
+        "NULL" => Token::Null, "TRUE" => Token::True, "FALSE" => Token::False,
+        "SET" => Token::Set, "SHOW" => Token::Show,
+        "BEGIN" => Token::Begin, "COMMIT" => Token::Commit, "ROLLBACK" => Token::Rollback,
+        "IS" => Token::Is, "IN" => Token::In, "LIKE" => Token::Like, "BETWEEN" => Token::Between,
+        "LIMIT" => Token::Limit, "OFFSET" => Token::Offset,
+        "ORDER" => Token::Order, "BY" => Token::By, "ASC" => Token::Asc, "DESC" => Token::Desc,
+        "GROUP" => Token::Group, "HAVING" => Token::Having,
+        "DISTINCT" => Token::Distinct, "ALL" => Token::All,
+        "CASE" => Token::Case, "WHEN" => Token::When, "THEN" => Token::Then,
+        "ELSE" => Token::Else, "END" => Token::End, "CAST" => Token::Cast, "INTERVAL" => Token::Interval,
+        "INSERT" => Token::Insert, "INTO" => Token::Into, "VALUES" => Token::Values,
+        "DELETE" => Token::Delete, "UPDATE" => Token::Update,
+        "CREATE" => Token::Create, "TABLE" => Token::Table, "DROP" => Token::Drop, "INDEX" => Token::Index,
+        "IF" => Token::If, "EXISTS" => Token::Exists,
+        "PRIMARY" => Token::Primary, "KEY" => Token::Key, "DEFAULT" => Token::Default,
         _ => Token::Ident(s.to_string()),
     }
 }
