@@ -1,0 +1,11 @@
+TPT Chronos (Native Time-Series Engine)
+The "InfluxDB Killer"
+Time-series data is exploding. Every IoT sensor, every application metric, every financial tick, every log entry is fundamentally a time-stamped data point. But current solutions force developers to choose: use a relational database and suffer terrible write performance and compression, or adopt a dedicated time-series database (InfluxDB, TimescaleDB) and deal with data duplication, synchronization lag, and the inability to join time-series data with relational data in a single query.
+TPT Chronos makes time-series a first-class citizen of the storage engine. At the byte level, Chronos understands that time-series data is append-heavy, rarely updated, and highly compressible. It implements delta-of-delta encoding and Gorilla compression natively in the storage layer, achieving 10:1 to 20:1 compression ratios on metric data. It partitions data automatically by time windows (hourly, daily, monthly) and supports continuous aggregates—materialized views that update in real-time as new data arrives. Crucially, Chronos allows you to join time-series metrics with relational user data in a single ACID-compliant query, eliminating the need for separate analytics databases.
+By releasing TPT Chronos under Apache 2.0, we give the community a unified platform for both operational and analytical time-series workloads. Whether you're tracking server metrics, stock prices, or industrial sensor telemetry, Chronos provides sub-millisecond inserts, massive compression, and the ability to query historical data alongside current application state—all in one database.
+Tech Stack:
+Core Engine: Rust with time-aware storage pages optimized for append-heavy workloads.
+Compression: Native Gorilla compression, delta-of-delta encoding, and dictionary encoding for massive space savings.
+Partitioning: Automatic time-based partitioning with configurable retention policies and downsampling.
+Continuous Aggregates: Real-time materialized views that update incrementally as new data arrives.
+Query Language: SQL extensions for time-series functions (time_bucket, interpolate, moving_average, etc.).

@@ -1,0 +1,86 @@
+TPT Canvas (The Data-Aware Frontend Framework)
+The "Keystone-Native UI"
+Modern frontend development is a fragmented nightmare of disconnected libraries. Developers building data-rich applications must stitch together React for components, TanStack Query for data fetching, Mapbox for geospatial, D3 for charts, Cytoscape for graphs, and custom WebSocket code for real-time updates. None of these tools understand each other. None of them understand the rich, multi-model data structures that modern databases like TPT Keystone provide. The result is bloated bundles, complex state management, and weeks of boilerplate code just to display a map with a time-series chart next to it.
+TPT Canvas is a next-generation frontend framework built specifically to be the perfect UI layer for TPT Keystone. Written in Rust and compiled to WebAssembly, Canvas provides native, zero-configuration components for all 7 of Keystone's data models. Need to display geospatial data? <Canvas.Map data={keystoneQuery} /> renders an interactive map with clustering, heatmaps, and spatial queries built-in. Need a time-series chart? <Canvas.TimeSeries data={metrics} /> automatically handles downsampling, interpolation, and real-time updates from TPT Flux event streams. Need to visualize a graph? <Canvas.Graph nodes={vertices} edges={relationships} /> renders an interactive force-directed graph with native traversal controls. Every component is deeply type-safe, automatically reactive, and optimized for the specific data type it represents.
+The magic of TPT Canvas lies in its native integration with TPT Keystone's real-time capabilities. When you write a query in Canvas, it automatically establishes a WebSocket connection to TPT Flux, subscribes to relevant events, and updates the UI in real-time with zero manual state management. Change a row in the database, and every connected Canvas UI updates instantly. Insert a new geospatial point, and it appears on the map in milliseconds. Stream a new vector similarity result, and the UI re-renders with the new ranking. Canvas treats the database not as a static data source, but as a live, reactive stream of truth.
+By releasing TPT Canvas under the Apache 2.0 license, we complete the TPT vision: a fully unified, open-source stack from the database to the UI. Developers can build incredibly complex, data-rich applications—real-time dashboards, interactive maps, AI-powered search interfaces, live analytics platforms—in a fraction of the time, with a fraction of the code, and with zero licensing fees. Canvas becomes the natural frontend companion to TPT Keystone, creating a seamless, end-to-end developer experience that no proprietary stack can match.
+Tech Stack:
+Core Framework: Rust compiled to WebAssembly for near-native performance in the browser.
+Rendering: WebGPU for hardware-accelerated rendering of maps, charts, and graphs.
+Reactivity: Native reactive primitives inspired by SolidJS, but optimized for multi-model data streams.
+Keystone Integration: Automatic WebSocket connections to TPT Flux for real-time event streaming and live updates.
+Native Components: Purpose-built components for geospatial (Mapbox GL alternative), time-series (lightweight charting), graph visualization (force-directed layouts), vector search results, and document rendering.
+Type Safety: Automatic TypeScript type generation from TPT Keystone schemas, ensuring end-to-end type safety from database to UI.
+State Management: Built-in reactive stores that automatically sync with Keystone queries, eliminating the need for external state libraries.
+Example: Building a Real-Time Delivery Dashboard with TPT Canvas
+Here's what a complete, real-time delivery tracking dashboard looks like in TPT Canvas:
+import { Canvas, useKeystoneQuery } from '@tpt/canvas';
+
+export function DeliveryDashboard() {
+  // This query automatically subscribes to real-time updates via TPT Flux
+  const { data: robots } = useKeystoneQuery(`
+    SELECT id, status, location, last_seen, embedding
+    FROM delivery_robots
+    WHERE status = 'active'
+  `);
+
+  return (
+    <div className="dashboard">
+      {/* Native geospatial map with real-time robot positions */}
+      <Canvas.Map
+        data={robots}
+        locationField="location"
+        cluster={true}
+        onRobotClick={(robot) => showDetails(robot)}
+      />
+
+      {/* Native time-series chart of delivery metrics */}
+      <Canvas.TimeSeries
+        query={`
+          SELECT time_bucket('5 minutes', timestamp) AS bucket,
+                 AVG(delivery_time) AS avg_time,
+                 COUNT(*) AS deliveries
+          FROM delivery_metrics
+          WHERE timestamp > NOW() - INTERVAL '1 hour'
+          GROUP BY bucket
+        `}
+        xField="bucket"
+        yField="avg_time"
+        realtime={true}
+      />
+
+      {/* Native graph visualization of delivery routes */}
+      <Canvas.Graph
+        query={`
+          MATCH (r:Robot)-[d:DELIVERED_TO]->(c:Customer)
+          RETURN r, d, c
+          LIMIT 100
+        `}
+        nodeField="r"
+        edgeField="d"
+        layout="force-directed"
+      />
+
+      {/* Native vector search for similar delivery patterns */}
+      <Canvas.VectorSearch
+        query={`
+          SELECT id, embedding <=> $query_vector AS similarity
+          FROM delivery_patterns
+          ORDER BY similarity
+          LIMIT 10
+        `}
+        parameters={{ query_vector: currentPatternEmbedding }}
+      />
+    </div>
+  );
+}
+That's it. Four components. Four data models. Real-time updates. Zero boilerplate.
+In React, this would require:
+Setting up TanStack Query or SWR for data fetching
+Configuring Mapbox GL or Leaflet for the map
+Setting up Recharts or D3 for the time-series
+Configuring Cytoscape or react-force-graph for the graph
+Writing custom WebSocket code for real-time updates
+Managing complex state to keep everything in sync
+Hundreds of lines of boilerplate
+With TPT Canvas, it's four lines of declarative code.

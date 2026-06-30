@@ -1,0 +1,237 @@
+TPT SDK Ecosystem: Universal Access to Canvas & Keystone
+1. TPT SDK/Web (TypeScript/JavaScript)
+The Primary Web SDK
+This is the main SDK for web developers building with TPT Canvas. It provides full TypeScript type safety, reactive primitives, and seamless integration with TPT Keystone's multi-model data types.
+Features:
+Full TypeScript definitions auto-generated from Keystone schemas
+Reactive query hooks (useKeystoneQuery, useKeystoneMutation)
+Native WebSocket integration with TPT Flux for real-time updates
+Type-safe builders for all 7 data models (relational, geospatial, vector, time-series, graph, document, events)
+Plugin API for building custom Canvas components
+Integration with popular bundlers (Vite, Webpack, esbuild)
+Installation:
+npm install @tpt/sdk-web
+
+Example
+import { createKeystoneClient, useQuery } from '@tpt/sdk-web';
+
+const keystone = createKeystoneClient({
+  url: 'wss://your-keystone-instance.com',
+  apiKey: process.env.KEYSTONE_API_KEY
+});
+
+function DeliveryMap() {
+  const { data, isLoading } = useQuery(`
+    SELECT id, location, status 
+    FROM delivery_robots 
+    WHERE status = 'active'
+  `);
+
+  return <Canvas.Map data={data} locationField="location" />;
+}
+
+2. TPT SDK/Rust (Native Desktop & Server)
+The High-Performance SDK
+For developers building native desktop applications (Tauri, GTK, Qt) or high-performance server-side rendering, the Rust SDK provides zero-overhead access to Canvas and Keystone.
+Features:
+Native Rust bindings with full type safety
+Direct access to Canvas rendering pipeline (WebGPU/Vulkan)
+Synchronous and async APIs
+Embedded Keystone client for edge computing
+FFI bindings for C/C++ interop
+Zero-copy data transfer between Canvas and native code
+Installation:
+[dependencies]
+tpt-sdk = { version = "0.1", features = ["canvas", "keystone"] }
+
+Example:
+use tpt_sdk::prelude::*;
+
+#[tokio::main]
+async fn main() {
+    let keystone = KeystoneClient::connect("wss://keystone.example.com").await?;
+    
+    let robots: Vec<Robot> = keystone
+        .query("SELECT * FROM delivery_robots WHERE status = 'active'")
+        .execute()
+        .await?;
+    
+    let mut canvas = Canvas::new();
+    canvas.render_map(&robots, MapConfig::default());
+    canvas.run().await;
+}
+
+3. TPT SDK/Mobile (React Native, Flutter, Swift, Kotlin)
+The Mobile SDK Suite
+Mobile developers need native performance and platform-specific optimizations. The mobile SDKs provide full Canvas capabilities on iOS and Android.
+React Native SDK
+npm install @tpt/sdk-react-native
+Native bridge to Canvas rendering engine
+Optimized for mobile touch interactions
+Offline-first with automatic sync
+Push notification integration with TPT Flux events
+Flutter SDK
+dependencies:
+  tpt_sdk: ^0.1.0
+
+Dart bindings with null safety
+Custom Flutter widgets for all Canvas components
+Hot reload support
+Platform-specific optimizations (Metal on iOS, Vulkan on Android)
+Swift SDK (iOS)
+import TPTSDK
+
+let keystone = KeystoneClient(url: "wss://keystone.example.com")
+let robots = try await keystone.query("SELECT * FROM delivery_robots")
+
+Native Swift API with async/await
+SwiftUI and UIKit integration
+CoreLocation integration for geospatial
+Metal rendering backend
+Kotlin SDK (Android)
+val keystone = KeystoneClient("wss://keystone.example.com")
+val robots = keystone.query("SELECT * FROM delivery_robots").await()
+
+Native Kotlin API with coroutines
+Jetpack Compose integration
+Fused Location Provider integration
+OpenGL ES / Vulkan rendering
+4. TPT SDK/Server (Node.js, Deno, Bun, Python, Go)
+The Backend SDK Suite
+For server-side rendering, API development, and backend integrations, these SDKs provide full Keystone access without the Canvas rendering layer.
+Node.js/Deno/Bun SDK
+npm install @tpt/sdk-server
+
+niversal JavaScript runtime support
+Streaming query results
+Server-side rendering (SSR) support for Canvas
+WebSocket server for broadcasting Flux events to clients
+Python SDK
+pip install tpt-sdk
+
+Pythonic API with type hints
+Pandas/NumPy integration for analytics
+Jupyter notebook support
+Async/await support
+Example:
+from tpt_sdk import KeystoneClient
+import asyncio
+
+async def main():
+    keystone = KeystoneClient("wss://keystone.example.com")
+    
+    # Query with automatic type conversion
+    robots = await keystone.query("""
+        SELECT id, location, embedding
+        FROM delivery_robots
+        WHERE embedding <=> $1 < 0.5
+    """, params=[query_vector])
+    
+    for robot in robots:
+        print(f"Robot {robot.id} at {robot.location}")
+
+asyncio.run(main())
+
+Go SDK
+go get github.com/tpt/sdk-go
+
+Idiomatic Go API
+Context support for cancellation
+Connection pooling
+High-performance streaming
+5. TPT SDK/CLI (Command Line Tools)
+The Developer Experience SDK
+For building CLI tools, scripts, and automation, the CLI SDK provides lightweight access to Keystone without heavy dependencies.
+Features:
+Single binary, no runtime dependencies
+Interactive query REPL
+Export/import utilities
+Migration tools
+Schema introspection
+Installation:
+curl -fsSL https://get.tpt.dev | sh
+
+Example:
+# Interactive query mode
+tpt query
+
+# Execute a query and export to JSON
+tpt query "SELECT * FROM users" --format json > users.json
+
+# Stream events from TPT Flux
+tpt stream "SELECT * FROM events WHERE type = 'delivery'" --follow
+
+6. TPT SDK/Plugin (Custom Canvas Components)
+The Extension SDK
+For developers who want to build custom Canvas components, plugins, or integrations, the Plugin SDK provides the tools to extend Canvas with new functionality.
+Features:
+Plugin lifecycle management
+Custom rendering hooks (WebGPU shaders)
+Event system for inter-plugin communication
+Marketplace publishing tools
+Hot-reload during development
+Example: Building a Custom Chart Component
+
+import { definePlugin, useCanvasContext } from '@tpt/sdk-plugin';
+
+export default definePlugin({
+  name: 'custom-chart',
+  
+  setup(ctx) {
+    // Register custom component
+    ctx.registerComponent('CustomChart', {
+      props: {
+        data: { type: 'array', required: true },
+        color: { type: 'string', default: '#00ff00' }
+      },
+      
+      render({ data, color }) {
+        const { gl } = useCanvasContext();
+        
+        // Custom WebGPU rendering
+        return gl.renderChart(data, { color });
+      }
+    });
+  }
+});
+
+7. TPT SDK/Edge (Wasm Workers)
+The Edge Computing SDK
+For deploying Canvas and Keystone queries at the edge (Cloudflare Workers, Fastly, AWS Lambda@Edge), the Edge SDK provides a lightweight, Wasm-optimized runtime.
+Features:
+Ultra-small bundle size (<50KB)
+Wasm-optimized for edge runtimes
+Streaming responses
+Edge caching integration
+Zero cold starts
+Example: Cloudflare Worker
+
+import { KeystoneClient } from '@tpt/sdk-edge';
+
+export default {
+  async fetch(request: Request) {
+    const keystone = new KeystoneClient({
+      url: 'wss://keystone.example.com',
+      apiKey: env.KEYSTONE_API_KEY
+    });
+    
+    const robots = await keystone.query(
+      "SELECT id, location FROM delivery_robots WHERE status = 'active'"
+    );
+    
+    return new Response(JSON.stringify(robots), {
+      headers: { 'content-type': 'application/json' }
+    });
+  }
+};
+
+SDK Design Principles
+All TPT SDKs follow these core principles:
+Type Safety First: Every SDK generates TypeScript/Rust/Swift/Kotlin types directly from your Keystone schema. Change the database, and your SDK types update automatically.
+Real-Time by Default: Every SDK automatically connects to TPT Flux for live updates. No manual WebSocket setup required.
+Zero Configuration: Sensible defaults for everything. Connect to Keystone with a single line of code.
+Offline-First: Mobile and edge SDKs cache data locally and sync automatically when connectivity returns.
+Polyglot, Not Proprietary: Every SDK speaks the same protocol. Switch languages without changing your database or queries.
+Apache 2.0 Forever: All SDKs are free, open-source, and community-owned. No premium tiers, no usage limits.
+
+

@@ -1,0 +1,11 @@
+ TPT Canopy (Native Document & JSON Engine)
+The "MongoDB Alternative"
+Semi-structured data is the reality of modern application development. User profiles, product catalogs, configuration files, and API responses are inherently document-shaped. But developers are currently forced into a false choice: store JSON in a relational database and suffer terrible query performance and lack of indexing, or use a dedicated document database (like MongoDB) and sacrifice ACID transactions, complex joins, and strict schema validation.
+TPT Canopy makes document data a first-class citizen with the full power of a relational engine. At the storage level, Canopy implements native JSON/BSON storage with deep, path-based indexing. You can index any nested field in a JSON document (e.g., user.address.city) and query it with the exact same performance as a relational column. Canopy supports optional or enforced JSON schema validation, full ACID transactions across document collections, and seamless joins between document collections and traditional relational tables. It also includes a native aggregation pipeline for complex data transformations, mirroring the flexibility of MongoDB but backed by the mathematical rigor of SQL.
+By releasing TPT Canopy under the Apache 2.0 license, we eliminate the artificial dichotomy between flexibility and reliability. Developers can store semi-structured data with the schema flexibility of a document store while retaining the transactional guarantees and query power of a relational database. Furthermore, Canopy includes native full-text search capabilities directly within JSON documents, making it a unified, free replacement for both document databases and basic search engines.
+Tech Stack:
+Core Engine: Rust with native JSON/BSON binary storage and deep path-based indexing.
+Indexing: Path-based indexes for nested JSON fields, supporting both B-Tree and inverted full-text indexes.
+Query Language: SQL/JSON extensions for querying and manipulating JSON data, plus a native aggregation pipeline.
+Schema Validation: Native JSON Schema validation engine with configurable enforcement levels (strict, relaxed, or off).
+Transactions: Full ACID transactions spanning document collections, relational tables, and graph edges.

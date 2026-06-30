@@ -1,0 +1,216 @@
+TPT Harbor (The Universal Data Migration Platform)
+The "On-Ramp to Keystone"
+The single greatest barrier to adopting any new database is not performance, features, or licensing—it is migration. Enterprises have terabytes of data locked in Postgres, MongoDB, Neo4j, InfluxDB, Kafka, and Pinecone, accumulated over decades of operational history. The prospect of moving that data—without downtime, without corruption, without losing a single row—into a new system is so terrifying that teams will endure years of technical debt and millions in licensing fees rather than attempt it. Every previous attempt at database disruption has ultimately failed not because the technology was inferior, but because the migration path was too narrow, too fragile, or too manual.
+TPT Harbor is a comprehensive, zero-downtime data migration platform designed to make moving into TPT Keystone as safe and predictable as flipping a switch. Harbor operates in three distinct phases: Schema Translation, Bulk Transfer, and Live Replication. First, it connects to the source database, introspects the full schema (including indexes, constraints, stored procedures, and triggers), and automatically generates the optimal TPT Keystone schema—mapping Postgres tables to relational tables, MongoDB collections to Canopy documents, Neo4j nodes to Plexus vertices, InfluxDB measurements to Chronos time-series, and so on. Second, it performs a massively parallel bulk transfer using snapshot isolation, ensuring a consistent point-in-time copy without locking the source database. Third, and most critically, Harbor enters Live Replication mode, consuming the source database's change log (WAL, oplog, binlog) in real-time and applying every mutation to Keystone, keeping the two systems perfectly synchronized until the team is ready to cut over.
+What makes Harbor truly revolutionary is its Verification Engine. Migration tools historically operate on a "trust but don't verify" basis—data goes in one side and hopefully comes out the other. Harbor treats migration as a mathematical proof. It performs row-count validation, checksum comparison on every column, distribution analysis on indexed fields, and query-result regression testing (running the same queries against both source and target and comparing outputs). If a single bit is corrupted, Harbor detects it, reports exactly which row and column diverged, and automatically re-syncs the delta. Furthermore, Harbor includes a Dry Run Mode that simulates the entire migration—including schema translation and cutover—against a read-only snapshot, generating a comprehensive impact report before any data is ever written. By releasing TPT Harbor under the Apache 2.0 license, we eliminate the fear of migration, turning what has historically been a months-long, consultant-driven nightmare into a safe, automated, weekend operation.
+Tech Stack:
+Core Migration Engine: Rust (for high-throughput, memory-safe bulk data transfer with zero-copy serialization).
+Orchestration: Go (for managing complex, multi-phase migration workflows, checkpointing, and resumability).
+Source Connectors: Native drivers for PostgreSQL (pgwire/WAL), MongoDB (oplog), MySQL (binlog), Neo4j (Bolt), InfluxDB (TSM), Kafka (consumer protocol), Pinecone/Weaviate/Qdrant (REST/gRPC), Elasticsearch (scroll API).
+CDC Engine: Custom WAL/oplog/binlog tailing for zero-downtime live replication with exactly-once delivery semantics.
+Verification Engine: Rust with parallel checksum computation (xxHash3), statistical distribution analysis, and query regression testing.
+Schema Translator: Rust with a rule-based AST transformation engine that maps source DDL to optimal Keystone/Canopy/Plexus/Chronos schemas.
+CLI & Dashboard: Rust CLI for automation and CI/CD integration; React/TypeScript web dashboard for real-time progress monitoring, validation reports, and cutover management.
+The Harbor Migration Channels
+Each source database requires a dedicated "Channel"—a specialized connector that understands the internal storage format, change log protocol, and schema semantics of the source system. Here are the channels Harbor ships with on day one:
+1. Harbor/PG (PostgreSQL → Keystone)
+The deepest and most critical channel. It connects via the pgwire protocol for bulk reads and tails the Write-Ahead Log (WAL) using logical replication for live sync. It automatically translates Postgres data types (including arrays, ranges, hstore, and custom composite types) into their Keystone equivalents. It migrates indexes, foreign keys, check constraints, and sequences. For stored procedures written in PL/pgSQL, it provides an automated translation layer that converts them to Wasm-based user-defined functions in Keystone's extension system.
+2. Harbor/Mongo (MongoDB → Canopy)
+Connects via the MongoDB wire protocol and tails the oplog for live replication. It introspects the document structure across all collections, infers JSON Schema validation rules from the existing data patterns, and generates Canopy path-based indexes that mirror the query patterns observed in the source database's profiler logs. It preserves _id fields, TTL indexes, and aggregation pipeline definitions.
+3. Harbor/Graph (Neo4j → Plexus)
+Connects via the Bolt protocol and exports the full property graph, including node labels, relationship types, and all properties. It translates Cypher-based constraints and indexes into Plexus equivalents. For large graphs, it uses Neo4j's parallel export capabilities and rebuilds Plexus adjacency lists in bulk, which is significantly faster than inserting edges one at a time.
+4. Harbor/TimeSeries (InfluxDB / TimescaleDB → Chronos)
+Connects to InfluxDB's TSM storage engine directly for maximum read throughput, or uses TimescaleDB's hypertable introspection for PostgreSQL-based time-series. It maps measurement/tag/field structures into Chronos's time-partitioned storage model, preserving continuous queries as Chronos continuous aggregates. It applies Gorilla compression during the transfer, often resulting in the migrated data being smaller than the original.
+5. Harbor/Stream (Kafka / RabbitMQ → Flux)
+Connects as a consumer group, reads all topics/partitions from the earliest offset, and writes them into Flux's append-only partitioned log. It preserves message keys, headers, timestamps, and partition ordering. For the live replication phase, it simply continues consuming as a normal Kafka consumer while simultaneously writing to Flux, allowing a gradual, zero-downtime cutover where consumers can switch from Kafka to Flux topic by topic.
+6. Harbor/Vector (Pinecone / Weaviate / Qdrant → Prism)
+Connects via REST/gRPC APIs, bulk-exports all vector collections including metadata, and writes them into Prism's native HNSW/IVF-PQ indexes. Crucially, it applies Prism's native quantization during the import, meaning the migrated vectors often use 50-75% less storage than the originals while maintaining recall within 1% of the source system.
+7. Harbor/GIS (PostGIS → Meridian)
+Operates as a specialized extension of Harbor/PG. It reads PostGIS geometry and geography columns, validates them against OGC standards, and imports them into Meridian's native S2/H3 hierarchical grid storage. It translates spatial indexes (GiST) into Meridian's distributed spatial partitions and converts PostGIS functions (ST_Contains, ST_Intersects, ST_DWithin) into Meridian's native equivalents.
+The Harbor Migration Lifecycle
+Every migration follows a rigorous, auditable lifecycle:
+Phase 1: DISCOVER
+├── Connect to source database (read-only)
+├── Introspect full schema, indexes, constraints
+├── Analyze query patterns and access hot spots
+├── Generate proposed Keystone schema
+└── Produce Migration Impact Report
+
+Phase 2: VALIDATE (Dry Run)
+├── Apply schema to a temporary Keystone instance
+├── Sample-transfer 1% of data from each table
+├── Run verification checksums on sample
+├── Execute query regression suite
+└── Produce Validation Report (pass/fail/warnings)
+
+Phase 3: SNAPSHOT (Bulk Transfer)
+├── Establish consistent snapshot isolation on source
+├── Parallel bulk transfer of all data
+├── Rebuild indexes in Keystone during transfer
+├── Checkpoint progress every 10GB (resumable on failure)
+└── Produce Transfer Report (rows transferred, duration, errors)
+
+Phase 4: REPLICATE (Live Sync)
+├── Begin tailing source change log (WAL/oplog/binlog)
+├── Apply all mutations to Keystone in real-time
+├── Monitor replication lag (target: <100ms)
+├── Continuous background verification (checksum drift detection)
+└── Produce Replication Health Dashboard
+
+Phase 5: VERIFY (Pre-Cutover)
+├── Full row-count comparison
+├── Full checksum comparison (every row, every column)
+├── Query regression suite (100+ queries compared)
+├── Performance benchmark comparison
+└── Produce Final Verification Report
+
+Phase 6: CUTOVER
+├── Drain connections from source database
+├── Wait for replication lag = 0
+├── Final verification pass
+├── Update DNS/connection strings to point to Keystone
+├── Monitor for anomalies for configurable period
+└── Decommission source database (optional)
+
+The Harbor CLI Experience
+# Discover and analyze the source database
+tpt-harbor discover --source "postgres://prod-db:5432/myapp" --output migration-plan.yaml
+
+# Run a dry-run validation
+tpt-harbor validate --plan migration-plan.yaml --target "keystone://localhost:5432"
+
+# Execute the bulk transfer (resumable, parallel)
+tpt-harbor transfer --plan migration-plan.yaml --workers 16 --checkpoint-interval 10GB
+
+# Start live replication
+tpt-harbor replicate --plan migration-plan.yaml --max-lag 100ms
+
+# Run full verification
+tpt-harbor verify --plan migration-plan.yaml --full-checksum --query-regression
+
+# Execute cutover
+tpt-harbor cutover --plan migration-plan.yaml --drain-timeout 30s --rollback-on-failure
+Harbor's Role in the TPT Ecosystem
+Harbor is the adoption engine for the entire TPT stack. Without it, TPT Keystone is a beautiful database that nobody can practically adopt. With it, Keystone becomes a drop-in replacement that teams can migrate to incrementally, safely, and with full mathematical confidence.
+Harbor also serves a secondary purpose: it is the ultimate compatibility test. If Harbor can successfully migrate every Postgres schema, every MongoDB collection, and every Neo4j graph into Keystone without data loss, that is the strongest possible proof that Keystone's data model is truly universal. Every migration that succeeds is a validation of the architecture. Every edge case that Harbor encounters becomes a test case that makes Keystone more robust.
+In the TPT ecosystem, Harbor sits alongside TPT Chisel (which optimizes what you've already built) and TPT Harbor (which brings in everything you've built before). Together, they form a complete lifecycle: migrate in with Harbor, optimize with Chisel, run on Keystone, observe with Scope, and serve through Frontier—all unified, all open source, all Apache 2.0.
+
+
+
+
+Harbor/Oracle: The Oracle Migration Channel
+The "Final Boss"
+Oracle presents six specific challenges that make it fundamentally different from migrating Postgres or MongoDB:
+1. The PL/SQL Problem
+Oracle databases contain thousands of lines of business logic written in PL/SQL—stored procedures, functions, triggers, and packages. This isn't just data; it's the actual application logic embedded in the database layer. You can't just migrate the data; you have to migrate the logic.
+Harbor's Solution: Harbor includes a PL/SQL to Wasm Transpiler. It parses PL/SQL ASTs, translates the logic into Rust or Go, compiles it to WebAssembly, and loads it as TPT Keystone extensions. For complex PL/SQL that can't be automatically translated, Harbor generates a detailed migration report identifying which procedures need manual refactoring, and provides a compatibility layer that allows the original PL/SQL to run in an embedded Oracle-compatible execution environment during the transition period.
+2. Proprietary Data Types
+Oracle has data types that don't exist anywhere else: NUMBER (variable precision), VARCHAR2 (different from VARCHAR), RAW, LONG, BFILE, XMLType, SDO_GEOMETRY (Oracle's own geospatial type), ANYDATA, and custom object types. These don't map cleanly to standard SQL types.
+Harbor's Solution: Harbor maintains a comprehensive Oracle Type Mapping Engine that intelligently translates each proprietary type:
+NUMBER(p,s) → NUMERIC(p,s) or BIGINT depending on precision
+VARCHAR2 → TEXT with proper encoding handling
+RAW → BYTEA
+BFILE → External file references with Meridian geospatial integration
+XMLType → Canopy JSON documents with XPath query compatibility
+SDO_GEOMETRY → Meridian native geospatial types with automatic coordinate system transformation
+Custom object types → Canopy nested JSON structures or separate relational tables based on usage patterns
+3. Oracle-Specific Features
+Oracle has features that have no direct equivalent in open source: Materialized View Logs, Advanced Queuing, Edition-Based Redefinition, Virtual Private Database (VPD), Fine-Grained Access Control (FGAC), Flashback Query, Application Continuity, and the entire Oracle RAC (Real Application Clusters) architecture.
+Harbor's Solution:
+Materialized View Logs → TPT Chronos continuous aggregates with automatic refresh
+Advanced Queuing → TPT Flux native event streaming with Oracle AQ protocol compatibility
+VPD/FGAC → TPT Aegis row-level security policies with automatic policy translation
+Flashback Query → TPT Flux time-travel queries with point-in-time reconstruction
+Oracle RAC → TPT Keystone's native distributed architecture (no special migration needed)
+4. The Partitioning Nightmare
+Oracle tables are often partitioned using proprietary partitioning schemes: range, list, hash, composite, interval, system, and virtual column-based partitioning. Oracle's partition pruning and partition-wise joins are deeply optimized and don't have direct equivalents.
+Harbor's Solution: Harbor analyzes the Oracle partitioning scheme and translates it into TPT Keystone's native partitioning model. For interval partitioning (Oracle's automatic range partitioning), Harbor generates equivalent time-based partitions in Chronos. For composite partitioning, Harbor creates multi-level partition hierarchies. Harbor also generates a Partition Performance Report that compares query performance before and after migration, identifying any queries that might need index optimization.
+5. The Sequences and Synonyms Problem
+Oracle uses sequences for auto-incrementing values and synonyms for object aliasing. These are trivial to migrate but easy to miss, causing silent failures.
+Harbor's Solution: Harbor automatically converts Oracle sequences to Keystone sequences with identical caching behavior. Synonyms are resolved to their actual target objects and the references are updated in the migrated schema.
+6. The Character Set and NLS Chaos
+Oracle databases often use proprietary character sets (AL32UTF8, WE8MSWIN1252, etc.) and NLS (National Language Support) settings that affect sorting, comparison, and string operations. Getting this wrong means data corruption or broken queries.
+Harbor's Solution: Harbor performs a Character Set Audit during the discovery phase, identifying all character sets in use. It converts all data to UTF-8 during transfer and generates a Collation Compatibility Report that identifies any sorting or comparison operations that might behave differently in Keystone, providing migration scripts to fix any issues.
+The Harbor/Oracle Migration Lifecycle
+# Phase 1: Deep Discovery
+tpt-harbor discover \
+  --source "oracle://user:pass@prod-db:1521/PRODDB" \
+  --analyze-plsql \
+  --analyze-partitioning \
+  --analyze-character-sets \
+  --output oracle-migration-plan.yaml
+
+# This generates a comprehensive report:
+# - 2,847 tables, 12,453 indexes, 892 sequences
+# - 1,247 PL/SQL procedures (847 auto-translatable, 400 need manual review)
+# - 23 materialized views, 156 Advanced Queuing definitions
+# - 12 VPD policies, 45 FGAC rules
+# - Character sets: AL32UTF8 (primary), WE8MSWIN1252 (legacy columns)
+# - Partitioning: 847 partitioned tables (range: 623, list: 156, composite: 68)
+
+# Phase 2: PL/SQL Transpilation
+tpt-harbor transpile-plsql \
+  --plan oracle-migration-plan.yaml \
+  --target-language rust \
+  --output-dir ./transpiled-procedures/ \
+  --generate-manual-review-report
+
+# Phase 3: Schema Translation
+tpt-harbor translate-schema \
+  --plan oracle-migration-plan.yaml \
+  --map-oracle-types \
+  --translate-partitioning \
+  --convert-vpd-policies \
+  --output keystone-schema.sql
+
+# Phase 4: Validation (Dry Run)
+tpt-harbor validate \
+  --plan oracle-migration-plan.yaml \
+  --sample-size 5% \
+  --verify-plsql-logic \
+  --test-vpd-policies \
+  --output validation-report.html
+
+# Phase 5: Bulk Transfer
+tpt-harbor transfer \
+  --plan oracle-migration-plan.yaml \
+  --workers 32 \
+  --parallel-channels 16 \
+  --checkpoint-interval 5GB \
+  --preserve-rowids  # For applications that depend on ROWID
+
+# Phase 6: Live Replication (Oracle GoldenGate Alternative)
+tpt-harbor replicate \
+  --plan oracle-migration-plan.yaml \
+  --use-logminer \  # Oracle's change data capture
+  --max-lag 50ms \
+  --handle-ddl-changes
+
+# Phase 7: Verification
+tpt-harbor verify \
+  --plan oracle-migration-plan.yaml \
+  --full-checksum \
+  --verify-plsql-results \
+  --test-all-vpd-policies \
+  --compare-query-plans
+
+# Phase 8: Cutover
+tpt-harbor cutover \
+  --plan oracle-migration-plan.yaml \
+  --drain-timeout 60s \
+  --rollback-on-failure \
+  --generate-compliance-report
+
+The Honest Challenges
+Even with Harbor, Oracle migration is hard. Here's what you'll still face:
+1. PL/SQL Complexity: Some PL/SQL procedures are 10,000+ lines of complex business logic with nested cursors, dynamic SQL, and Oracle-specific packages (DBMS_LOB, UTL_FILE, etc.). Harbor can transpile 70-80% automatically, but the remaining 20-30% require manual refactoring. This is where you need experienced developers.
+2. Performance Tuning: Oracle's query optimizer is incredibly sophisticated. Some queries that run in milliseconds on Oracle might need index tuning or query rewriting on Keystone. Harbor provides a Query Performance Comparison Report that identifies these cases.
+3. Application Dependencies: If your application uses Oracle-specific JDBC drivers, OCI (Oracle Call Interface), or Oracle-specific SQL syntax, you'll need to update the application code. Harbor doesn't migrate the application—only the database.
+4. Oracle RAC to Keystone Distributed: If you're running Oracle RAC, you're used to multi-master replication and shared-disk architecture. Keystone's distributed architecture is different (shared-nothing, automatic sharding). The migration is possible, but the operational model changes.
+Why This Matters
+If TPT Harbor can successfully migrate Oracle databases, it proves something profound: you don't have to be trapped by proprietary database vendors.
+Oracle charges $47,500 per processor core for Enterprise Edition. A medium-sized company with a 16-core Oracle database pays $760,000 in licensing fees—plus 22% annual support ($167,200/year). That's nearly $1 million per year to run a database.
+With Harbor, that same company can migrate to TPT Keystone (Apache 2.0, free forever) and save $1 million per year, every year, forever. The migration might take 6-12 months of engineering effort, but the ROI is immediate and permanent.
+This is why Harbor is the adoption engine for the entire TPT stack. It's not just a migration tool—it's the key that unlocks the cage.
+
+

@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/target/
+Cargo.lock
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts / logs
+*.log
+

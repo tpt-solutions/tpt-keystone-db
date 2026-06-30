@@ -1,0 +1,11 @@
+TPT Flux (Native Event Streaming Engine)
+The "Kafka Replacement"
+Event-driven architecture is the backbone of modern distributed systems. Applications need to capture every state change as an immutable event, stream those events to multiple consumers, and replay them for auditing or rebuilding state. But operating a dedicated streaming cluster like Kafka is a massive operational burden, requiring complex consensus protocols and dedicated infrastructure. Meanwhile, trying to use a traditional relational database as an event log results in terrible write performance and no native support for streaming patterns.
+TPT Flux makes event streaming a native, zero-overhead capability of the database. At the storage level, Flux implements an append-only, partitioned log optimized for high-throughput sequential writes and massive fan-out reads. It natively supports consumer groups, offset tracking, and configurable message retention policies. Crucially, Flux allows you to query the event log alongside relational data in a single transaction. You can insert a row, publish an event, and query historical events all in one ACID-compliant operation. It also features native Change Data Capture (CDC)—every insert, update, and delete automatically generates an immutable event that can be streamed to external consumers in real-time.
+By releasing TPT Flux under the Apache 2.0 license, we give the community a unified platform for both operational data and event streaming. Applications can utilize event sourcing, CQRS, and real-time analytics without deploying and operating a separate, heavy message broker. Flux also supports event replay and time-travel queries, allowing developers to reconstruct the exact state of their application at any historical point in time, completely free of charge.
+Tech Stack:
+Core Engine: Rust with append-only, partitioned log storage optimized for sequential NVMe I/O.
+Messaging: Native consumer groups, offset tracking, and time/size-based retention policies.
+Change Data Capture: Automatic, zero-overhead CDC event generation for all database mutations.
+Query Language: SQL extensions for querying event logs, performing time-travel queries, and windowing functions.
+Integration: Native WebSocket and gRPC streaming endpoints for real-time, low-latency event consumption.
