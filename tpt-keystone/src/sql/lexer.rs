@@ -13,6 +13,8 @@ pub enum Token {
     Case, When, Then, Else, End, Cast, Interval,
     Insert, Into, Values, Delete, Update, Create, Table, Drop, Index,
     If, Exists, Primary, Key, Default,
+    Join, Left, Right, Full, Cross, On,
+    With, Recursive,
 
     // Identifiers
     Ident(String),
@@ -228,6 +230,9 @@ fn keyword_or_ident(s: &str) -> Token {
         "CREATE" => Token::Create, "TABLE" => Token::Table, "DROP" => Token::Drop, "INDEX" => Token::Index,
         "IF" => Token::If, "EXISTS" => Token::Exists,
         "PRIMARY" => Token::Primary, "KEY" => Token::Key, "DEFAULT" => Token::Default,
+        "JOIN" => Token::Join, "LEFT" => Token::Left, "RIGHT" => Token::Right, "FULL" => Token::Full,
+        "CROSS" => Token::Cross, "ON" => Token::On,
+        "WITH" => Token::With, "RECURSIVE" => Token::Recursive,
         _ => Token::Ident(s.to_string()),
     }
 }

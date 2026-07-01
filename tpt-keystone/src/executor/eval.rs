@@ -43,7 +43,7 @@ impl Value {
         }
     }
 
-    fn is_truthy(&self) -> bool {
+    pub fn is_truthy(&self) -> bool {
         match self {
             Self::Bool(b) => *b,
             Self::Null => false,
@@ -164,6 +164,15 @@ pub fn eval_expr(expr: &Expr) -> anyhow::Result<Value> {
                 Ok(Value::Null)
             }
         }
+
+        Expr::Subquery(_) => {
+            anyhow::bail!("subqueries not yet supported in expression context (use RowContext)")
+        }
+
+        Expr::Window { func, args, partition_by: _, order_by: _, frame: _ } => {
+            // For now, just evaluate the function
+            eval_function(func, args)
+        }
     }
 }
 
@@ -257,7 +266,7 @@ fn coerce_float(v: &Value) -> anyhow::Result<f64> {
     }
 }
 
-fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
+pub fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
     match (a, b) {
         (Value::Null, Value::Null) => Ok(0),
         (Value::Null, _) | (_, Value::Null) => anyhow::bail!("null comparison"),

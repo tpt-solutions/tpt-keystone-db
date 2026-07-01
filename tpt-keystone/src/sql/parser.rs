@@ -48,6 +48,14 @@ impl Parser {
         while self.eat(&Token::Semicolon) {}
 
         let stmt = match self.peek().clone() {
+            Token::With => {
+                self.advance();
+                let recursive = self.eat(&Token::Recursive);
+                let ctes = self.parse_ctes(recursive)?;
+                let mut select = self.parse_select()?;
+                select.ctes = ctes;
+                Ok(Stmt::Select(select))
+            }
             Token::Select | Token::Distinct => Ok(Stmt::Select(self.parse_select()?)),
             Token::Insert => { self.advance(); self.parse_insert() }
             Token::Delete => { self.advance(); self.parse_delete() }
@@ -65,6 +73,33 @@ impl Parser {
 
         self.eat(&Token::Semicolon);
         Ok(stmt)
+    }
+
+    fn parse_ctes(&mut self, recursive: bool) -> anyhow::Result<Vec<Cte>> {
+        let mut ctes = vec![self.parse_cte(recursive)?];
+        while self.eat(&Token::Comma) {
+            ctes.push(self.parse_cte(recursive)?);
+        }
+        Ok(ctes)
+    }
+
+    fn parse_cte(&mut self, recursive: bool) -> anyhow::Result<Cte> {
+        let name = self.parse_ident_string()?;
+        let columns = if self.eat(&Token::LParen) {
+            let mut cols = vec![self.parse_ident_string()?];
+            while self.eat(&Token::Comma) {
+                cols.push(self.parse_ident_string()?);
+            }
+            self.expect(&Token::RParen)?;
+            cols
+        } else {
+            vec![]
+        };
+        self.expect(&Token::As)?;
+        self.expect(&Token::LParen)?;
+        let subquery = self.parse_select()?;
+        self.expect(&Token::RParen)?;
+        Ok(Cte { name, columns, subquery, recursive })
     }
 
     fn parse_insert(&mut self) -> anyhow::Result<Stmt> {
@@ -253,7 +288,7 @@ impl Parser {
         let distinct = self.eat(&Token::Distinct);
         if !distinct { self.eat(&Token::All); }
         let projections = self.parse_projection_list()?;
-        let from = if self.eat(&Token::From) { Some(self.parse_table_ref()?) } else { None };
+        let from = if self.eat(&Token::From) { Some(self.parse_table_with_joins()?) } else { None };
         let where_ = if self.eat(&Token::Where) { Some(self.parse_expr(0)?) } else { None };
         let group_by = if self.peek() == &Token::Group && self.peek2() == &Token::By {
             self.advance(); self.advance(); self.parse_expr_list()?
@@ -264,7 +299,7 @@ impl Parser {
         } else { vec![] };
         let limit = if self.eat(&Token::Limit) { Some(self.parse_expr(0)?) } else { None };
         let offset = if self.eat(&Token::Offset) { Some(self.parse_expr(0)?) } else { None };
-        Ok(SelectStmt { distinct, projections, from, where_, group_by, having, order_by, limit, offset })
+        Ok(SelectStmt { ctes: vec![], distinct, projections, from, where_, group_by, having, order_by, limit, offset })
     }
 
     fn parse_projection_list(&mut self) -> anyhow::Result<Vec<Projection>> {
@@ -274,12 +309,65 @@ impl Parser {
     }
 
     fn parse_projection(&mut self) -> anyhow::Result<Projection> {
-        if self.eat(&Token::Star) { return Ok(Projection::Wildcard); }
-        let expr = self.parse_expr(0)?;
-        let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
-        else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
-        else { None };
-        Ok(Projection::Expr { expr, alias })
+        if self.eat(&Token::Star) {
+            // Check for table.*
+            if self.eat(&Token::Dot) {
+                let table = self.parse_ident_string()?;
+                Ok(Projection::WildcardTable(table))
+            } else {
+                Ok(Projection::Wildcard)
+            }
+        } else {
+            let expr = self.parse_expr(0)?;
+            let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
+            else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
+            else { None };
+            Ok(Projection::Expr { expr, alias })
+        }
+    }
+
+    fn parse_table_with_joins(&mut self) -> anyhow::Result<TableWithJoins> {
+        let primary = self.parse_table_ref()?;
+        let mut joins = Vec::new();
+
+        while self.peek() == &Token::Join || self.peek() == &Token::Left || self.peek() == &Token::Right || self.peek() == &Token::Full {
+            let join_type = match self.peek().clone() {
+                Token::Join => {
+                    self.advance();
+                    JoinType::Inner
+                }
+                Token::Left => {
+                    self.advance();
+                    if self.eat(&Token::Join) {
+                        JoinType::Left
+                    } else {
+                        JoinType::Left
+                    }
+                }
+                Token::Right => {
+                    self.advance();
+                    self.eat(&Token::Join);
+                    JoinType::Right
+                }
+                Token::Full => {
+                    self.advance();
+                    self.eat(&Token::Join);
+                    JoinType::Full
+                }
+                _ => break,
+            };
+
+            let table = self.parse_table_ref()?;
+            let on = if self.eat(&Token::On) {
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
+
+            joins.push(Join { join_type, table, on });
+        }
+
+        Ok(TableWithJoins { primary, joins })
     }
 
     fn parse_table_ref(&mut self) -> anyhow::Result<TableRef> {
