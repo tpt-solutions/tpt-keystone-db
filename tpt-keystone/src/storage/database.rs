@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 use super::btree::BTree;
-use super::config::NodeRole;
+use super::config::{NodeRole, UdfConfig};
 use super::lease::LeaseHandle;
 use super::lsm::LsmEngine;
 use super::mvcc::MvccStore;
 use super::objectstore::ObjectStore;
 use super::tx::{IsolationLevel, Transaction, TransactionManager};
-use super::{ColumnDef, ColumnType, KeyValue, StorageEngine, StorageStats, TableSchema};
+use super::{ColumnDef, ColumnType, KeyValue, StorageEngine, StorageStats, TableSchema, UserFunction};
 
 /// The main database engine that ties together LSM storage, MVCC, schemas, and indexes.
 pub struct Database {
@@ -19,10 +19,12 @@ pub struct Database {
     mvcc: Arc<MvccStore>,
     tx_mgr: TransactionManager,
     schemas: Arc<Mutex<HashMap<String, TableSchema>>>,
+    functions: Arc<Mutex<HashMap<String, UserFunction>>>,
     indexes: Arc<Mutex<HashMap<String, HashMap<String, BTree>>>>, // table → (column_name → BTree)
     store: Arc<dyn ObjectStore>,
     local_index_dir: PathBuf,
     role: NodeRole,
+    udf_config: UdfConfig,
     /// In-process pub/sub bus for `LISTEN`/`NOTIFY`. Notifications are
     /// process-local (not shared across compute nodes via the object
     /// store) — a session only sees `NOTIFY`s issued on the same node.
@@ -36,13 +38,14 @@ impl Database {
     /// at. `lease` gates whether this node is allowed to flush (see
     /// `storage::lease`); `role` gates whether it's allowed to accept writes
     /// at all.
-    pub fn open(local_dir: &Path, store: Arc<dyn ObjectStore>, lease: Arc<LeaseHandle>, role: NodeRole) -> Result<Self> {
+    pub fn open(local_dir: &Path, store: Arc<dyn ObjectStore>, lease: Arc<LeaseHandle>, role: NodeRole, udf_config: UdfConfig) -> Result<Self> {
         std::fs::create_dir_all(local_dir)?;
 
         let lsm = Arc::new(Mutex::new(LsmEngine::open(&local_dir.join("wal"), store.clone(), lease)?));
         let mvcc = Arc::new(MvccStore::new());
         let tx_mgr = TransactionManager::new(mvcc.clone());
         let schemas = Arc::new(Mutex::new(HashMap::new()));
+        let functions = Arc::new(Mutex::new(HashMap::new()));
         let indexes = Arc::new(Mutex::new(HashMap::new()));
 
         // Schemas live in the shared object store (not local disk) so every
@@ -51,6 +54,16 @@ impl Database {
             if let Some((data, _meta)) = store.get(&key)? {
                 if let Ok(schema) = TableSchema::decode(&data) {
                     schemas.lock().unwrap().insert(schema.name.clone(), schema);
+                }
+            }
+        }
+
+        // Function definitions (WASM bytes + signature) are also shared via
+        // the object store, same as schemas.
+        for key in store.list("functions/")? {
+            if let Some((data, _meta)) = store.get(&key)? {
+                if let Ok(uf) = UserFunction::decode(&data) {
+                    functions.lock().unwrap().insert(uf.name.clone(), uf);
                 }
             }
         }
@@ -89,10 +102,12 @@ impl Database {
             mvcc,
             tx_mgr,
             schemas,
+            functions,
             indexes,
             store,
             local_index_dir,
             role,
+            udf_config,
             notify_bus,
         })
     }
@@ -128,6 +143,13 @@ impl Database {
             if let Some((data, _meta)) = self.store.get(&key)? {
                 if let Ok(schema) = TableSchema::decode(&data) {
                     self.schemas.lock().unwrap().entry(schema.name.clone()).or_insert(schema);
+                }
+            }
+        }
+        for key in self.store.list("functions/")? {
+            if let Some((data, _meta)) = self.store.get(&key)? {
+                if let Ok(uf) = UserFunction::decode(&data) {
+                    self.functions.lock().unwrap().entry(uf.name.clone()).or_insert(uf);
                 }
             }
         }
@@ -296,6 +318,31 @@ impl Database {
     /// receiver and filters by channel name itself.
     pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<(String, String)> {
         self.notify_bus.subscribe()
+    }
+
+    /// Register a WASM UDF, persisting it to the shared object store so
+    /// every compute node sees the same function catalog (mirrors
+    /// `create_table`).
+    pub fn create_function(&self, uf: UserFunction) -> Result<()> {
+        self.check_writable()?;
+        let mut functions = self.functions.lock().unwrap();
+        if functions.contains_key(&uf.name) {
+            anyhow::bail!("function \"{}\" already exists", uf.name);
+        }
+        self.store.put(&format!("functions/{}.bin", uf.name), &uf.encode()?)?;
+        info!(function = %uf.name, "function created");
+        functions.insert(uf.name.clone(), uf);
+        Ok(())
+    }
+
+    /// Look up a registered WASM UDF by name.
+    pub fn get_function(&self, name: &str) -> Option<UserFunction> {
+        self.functions.lock().unwrap().get(name).cloned()
+    }
+
+    /// Sandboxing limits applied to WASM UDF invocations on this node.
+    pub fn udf_config(&self) -> UdfConfig {
+        self.udf_config
     }
 
     /// Point-lookup a row via a B-Tree index on `column = value` (`value`

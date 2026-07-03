@@ -135,6 +135,28 @@ impl TableSchema {
     }
 }
 
+/// A registered WASM user-defined function. Only `Int8`/`Float8`/`Bool`
+/// argument and return types are supported — see `executor::udf`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserFunction {
+    pub name: String,
+    pub arg_types: Vec<ColumnType>,
+    pub return_type: ColumnType,
+    pub wasm_bytes: Vec<u8>,
+}
+
+impl UserFunction {
+    /// Serialize to bytes for persistent storage.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    /// Deserialize from bytes.
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
 /// Storage statistics for monitoring.
 #[derive(Debug, Clone, Default)]
 pub struct StorageStats {

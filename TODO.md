@@ -68,12 +68,13 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 ## Phase 4 — Keystone: Extensions + Compatibility
 
 - [ ] Wasmtime integration for sandboxed UDFs (WASM-based user-defined functions)
-- [ ] Full Postgres wire protocol parity (COPY, server-side cursors, LISTEN/NOTIFY)
-- [ ] `pg_catalog` system tables (`\d`, `\dt`, `\di` etc. in psql)
+- [x] Full Postgres wire protocol parity (COPY, server-side cursors, LISTEN/NOTIFY) — `COPY table FROM STDIN`/`TO STDOUT` (default text format only, no `WITH (...)` options), `DECLARE`/`FETCH`/`MOVE`/`CLOSE` server-side cursors over the simple query protocol, and `LISTEN`/`NOTIFY`/`UNLISTEN` via an in-process (single-node, not cross-replica) broadcast bus with async `NotificationResponse` delivery
+- [x] `pg_catalog` system tables (`\d`, `\dt`, `\di` etc. in psql) — `pg_tables`, `pg_class`, `pg_namespace`, `pg_attribute`, `pg_type`, `pg_indexes`, `pg_index`, `information_schema.tables`/`columns` materialized live from the schema/index catalog (`executor/catalog.rs`), queryable via plain SQL including schema-qualified names (`pg_catalog.pg_tables`)
 - [ ] Built-in connection pooler (session multiplexing)
 - [ ] `pg_dump` / `pg_restore` compatibility
 
 **Milestone:** Most psql meta-commands work; existing Postgres client libraries connect
+**Milestone verified:** `cargo test` (28 tests) covers pg_catalog/information_schema queries, COPY IN/OUT round-tripping, DECLARE/FETCH/MOVE/CLOSE cursor sequencing, and LISTEN/NOTIFY delivery — all against an in-process `Database`. Not yet verified: a real `psql` client's actual `\d`/`\dt`/`\di` meta-command queries (which join through `pg_type`/call `format_type()`/`pg_table_is_visible()` — not implemented) — only direct `SELECT`s against the catalog tables are covered. `pg_dump`/`pg_restore` and a connection pooler remain unimplemented.
 
 ---
 

@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         lease_mgr.clone().spawn_renewal_task();
     }
 
-    let db = Arc::new(Database::open(&config.local_dir, store, lease_mgr.handle(), config.role)?);
+    let db = Arc::new(Database::open(&config.local_dir, store, lease_mgr.handle(), config.role, config.udf)?);
     info!(dir = %config.local_dir.display(), "Database opened");
 
     if config.role == NodeRole::Reader {

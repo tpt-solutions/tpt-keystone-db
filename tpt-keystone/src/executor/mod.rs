@@ -1,6 +1,10 @@
 mod catalog;
+pub mod copy;
 pub mod eval;
 mod planner;
+mod udf;
+#[cfg(test)]
+mod phase4_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +55,7 @@ pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow
         Stmt::CreateTable(ct) => execute_create_table(ct, db),
         Stmt::DropTable(dt) => execute_drop_table(dt, db),
         Stmt::CreateIndex(ci) => execute_create_index(ci, db),
+        Stmt::CreateFunction(cf) => execute_create_function(cf, db),
         Stmt::Set(s) => {
             tracing::debug!("SET {} = {:?} (ignored)", s.name, s.value);
             Ok(QueryResult { fields: vec![], rows: vec![], tag: "SET".into() })
@@ -79,6 +84,9 @@ pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow
         }
         Stmt::Listen(_) | Stmt::Unlisten(_) => {
             anyhow::bail!("LISTEN/UNLISTEN are only supported over the simple query protocol")
+        }
+        Stmt::CopyIn(_) | Stmt::CopyOut(_) => {
+            anyhow::bail!("COPY is only supported over the simple query protocol")
         }
     }
 }
@@ -113,7 +121,7 @@ pub fn execute_select_with_cte(
     }
 
     let Some(table_with_joins) = &select.from else {
-        return execute_projection_only(&select, params);
+        return execute_projection_only(&select, db, params);
     };
 
     let (primary_schema, primary_rows) = planner::resolve_primary_table(&table_with_joins.primary, &select.where_, &db, cte_ctx, outer, params)?;
@@ -298,8 +306,9 @@ pub fn describe_select(select: &SelectStmt, db: Arc<Database>) -> anyhow::Result
 }
 
 /// A no-FROM SELECT: evaluate projections once against an empty row context.
-fn execute_projection_only(select: &SelectStmt, params: &[Value]) -> anyhow::Result<QueryResult> {
-    let ctx = RowContext::empty().with_params(params.to_vec());
+fn execute_projection_only(select: &SelectStmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
+    let mut ctx = RowContext::empty().with_params(params.to_vec());
+    ctx.db = Some(db);
     let mut fields = Vec::new();
     let mut row: Vec<Option<Vec<u8>>> = Vec::new();
 
@@ -870,6 +879,43 @@ fn execute_drop_table(_dt: crate::sql::ast::DropTableStmt, _db: Arc<Database>) -
 fn execute_create_index(ci: crate::sql::ast::CreateIndexStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
     db.create_index(&ci.table, &ci.column)?;
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE INDEX".into() })
+}
+
+/// Resolve a `CREATE FUNCTION` type name to the restricted set of types
+/// WASM UDFs support — deliberately narrower than `ColumnType::from_name`
+/// (which also accepts `text`/`int4`/etc.), since those would require a
+/// linear-memory ABI this version doesn't implement.
+fn udf_column_type(name: &str) -> anyhow::Result<ColumnType> {
+    match name.to_lowercase().as_str() {
+        "int8" | "bigint" => Ok(ColumnType::Int8),
+        "float8" | "double" | "double precision" => Ok(ColumnType::Float8),
+        "bool" | "boolean" => Ok(ColumnType::Bool),
+        other => anyhow::bail!("WASM UDFs only support int8, float8, and bool argument/return types, got \"{other}\""),
+    }
+}
+
+fn execute_create_function(cf: crate::sql::ast::CreateFunctionStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
+    if !cf.language.eq_ignore_ascii_case("wasm") {
+        anyhow::bail!("unsupported CREATE FUNCTION language \"{}\" (only \"wasm\" is supported)", cf.language);
+    }
+
+    let arg_types: Vec<ColumnType> = cf.args.iter().map(|(_, ty)| udf_column_type(ty)).collect::<anyhow::Result<_>>()?;
+    let return_type = udf_column_type(&cf.return_type)?;
+
+    use base64::Engine as _;
+    let wasm_bytes = base64::engine::general_purpose::STANDARD
+        .decode(cf.body_base64.trim())
+        .map_err(|e| anyhow::anyhow!("CREATE FUNCTION body is not valid base64: {e}"))?;
+
+    udf::validate_module(&wasm_bytes, &cf.name, &arg_types, &return_type)?;
+
+    db.create_function(crate::storage::UserFunction {
+        name: cf.name,
+        arg_types,
+        return_type,
+        wasm_bytes,
+    })?;
+    Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE FUNCTION".into() })
 }
 
 fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {

@@ -23,6 +23,9 @@ pub enum FrontendMessage {
     Flush,
     Terminate,
     CancelRequest,
+    CopyData(Vec<u8>),
+    CopyDone,
+    CopyFail(String),
 }
 
 /// Startup message parameters sent by the client before the normal message loop.
@@ -164,6 +167,9 @@ impl Conn {
             b'S' => FrontendMessage::Sync,
             b'H' => FrontendMessage::Flush,
             b'X' => FrontendMessage::Terminate,
+            b'd' => FrontendMessage::CopyData(data.to_vec()),
+            b'c' => FrontendMessage::CopyDone,
+            b'f' => FrontendMessage::CopyFail(read_cstr(&mut data)),
             other => {
                 tracing::warn!("unknown frontend message type: {}", other as char);
                 FrontendMessage::Sync

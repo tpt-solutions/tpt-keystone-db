@@ -21,6 +21,29 @@ pub enum Stmt {
     Listen(String),
     Notify(String, Option<String>),
     Unlisten(String),
+    CopyIn(CopyStmt),
+    CopyOut(CopyStmt),
+    CreateFunction(CreateFunctionStmt),
+}
+
+/// `CREATE FUNCTION name(arg type, ...) RETURNS type LANGUAGE wasm AS '<base64>'`.
+/// Only WASM UDFs are supported — `language` must be `"wasm"`.
+#[derive(Debug, Clone)]
+pub struct CreateFunctionStmt {
+    pub name: String,
+    pub args: Vec<(String, String)>, // (arg_name, declared type name)
+    pub return_type: String,
+    pub language: String,
+    pub body_base64: String,
+}
+
+/// `COPY table [(columns)] FROM STDIN` / `COPY table [(columns)] TO STDOUT`.
+/// Only the default Postgres text format is supported (tab-delimited rows,
+/// `\N` for NULL) — `WITH (...)` options are not parsed.
+#[derive(Debug, Clone)]
+pub struct CopyStmt {
+    pub table: String,
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -20,6 +20,10 @@ pub enum BackendMessage {
     NoData,
     PortalSuspended,
     NotificationResponse { pid: i32, channel: String, payload: String },
+    CopyInResponse { columns: usize },
+    CopyOutResponse { columns: usize },
+    CopyData(Vec<u8>),
+    CopyDone,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,7 +208,27 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
                 b.put_u8(0);
             });
         }
+        BackendMessage::CopyInResponse { columns } => write_copy_response(buf, b'G', *columns),
+        BackendMessage::CopyOutResponse { columns } => write_copy_response(buf, b'H', *columns),
+        BackendMessage::CopyData(data) => {
+            write_msg(buf, b'd', |b| b.put_slice(data));
+        }
+        BackendMessage::CopyDone => {
+            write_msg(buf, b'c', |_| {});
+        }
     }
+}
+
+/// Shared body for `CopyInResponse`/`CopyOutResponse`: overall format code
+/// (0 = text) plus one format code per column (also text).
+fn write_copy_response(buf: &mut BytesMut, tag: u8, columns: usize) {
+    write_msg(buf, tag, |b| {
+        b.put_u8(0); // text format overall
+        b.put_i16(columns as i16);
+        for _ in 0..columns {
+            b.put_i16(0); // text format per column
+        }
+    });
 }
 
 /// Write a framed message: type byte + i32 length (includes itself) + body.

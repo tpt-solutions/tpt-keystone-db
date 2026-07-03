@@ -536,7 +536,16 @@ impl RowContext {
                 }
                 Ok(best.unwrap_or(Value::Null))
             }
-            other => anyhow::bail!("function \"{other}\" does not exist"),
+            other => {
+                let Some(db) = &self.db else {
+                    anyhow::bail!("function \"{other}\" does not exist")
+                };
+                let Some(uf) = db.get_function(other) else {
+                    anyhow::bail!("function \"{other}\" does not exist")
+                };
+                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<anyhow::Result<_>>()?;
+                super::udf::call(db.udf_config(), &uf, &arg_vals)
+            }
         }
     }
 }

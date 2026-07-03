@@ -12,6 +12,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Sandboxing limits applied to every WASM UDF invocation (see
+/// `executor::udf`): a fuel budget (bounds execution steps, so a UDF can't
+/// hang a connection) and a linear-memory cap (bounds how much a UDF's own
+/// module can allocate).
+#[derive(Debug, Clone, Copy)]
+pub struct UdfConfig {
+    pub fuel_limit: u64,
+    pub memory_limit_bytes: usize,
+}
+
+impl Default for UdfConfig {
+    fn default() -> Self {
+        Self { fuel_limit: 100_000_000, memory_limit_bytes: 16 * 1024 * 1024 }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
     /// Holds the write lease; the only node allowed to flush/mutate.
@@ -38,6 +54,7 @@ pub struct StorageConfig {
     /// Root for this node's disposable local state (active WAL segment,
     /// local B-Tree indexes) — everything durable lives in the object store.
     pub local_dir: PathBuf,
+    pub udf: UdfConfig,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -78,6 +95,10 @@ impl StorageConfig {
                 env::var("TPT_MANIFEST_REFRESH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(5),
             ),
             local_dir: PathBuf::from(env_or("TPT_LOCAL_DIR", "tpt-data")),
+            udf: UdfConfig {
+                fuel_limit: env::var("TPT_UDF_FUEL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().fuel_limit),
+                memory_limit_bytes: env::var("TPT_UDF_MEMORY_LIMIT_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().memory_limit_bytes),
+            },
         }
     }
 

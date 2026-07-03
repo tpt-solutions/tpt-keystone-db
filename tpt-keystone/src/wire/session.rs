@@ -8,8 +8,9 @@ use super::codec::{Conn, FrontendMessage};
 use super::messages::{oid, BackendMessage, ErrorInfo, FieldDescription, TransactionStatus};
 use crate::executor::eval::Value;
 use crate::executor::{describe_select, execute_parsed, max_param_index, QueryResult};
-use crate::sql::ast::{FetchCount, Stmt};
+use crate::sql::ast::{CopyStmt, FetchCount, Stmt};
 use crate::storage::database::Database;
+use crate::storage::StorageEngine;
 
 /// A materialized `DECLARE CURSOR` result, with a `FETCH` read position.
 /// Cursors are session-local state (simple query protocol only — see
@@ -219,6 +220,11 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> 
             FrontendMessage::CancelRequest => {
                 warn!(%peer, "cancel request ignored");
             }
+            FrontendMessage::CopyData(_) | FrontendMessage::CopyDone | FrontendMessage::CopyFail(_) => {
+                // Only expected while `handle_copy_in` is reading directly
+                // off `conn`, which bypasses this dispatch loop entirely.
+                warn!(%peer, "unexpected COPY message outside an active COPY");
+            }
         }
     }
 }
@@ -237,7 +243,26 @@ async fn handle_simple_query(
         return Ok(());
     }
 
-    match execute_simple(sql, db, cursors, listening) {
+    let stmt = match crate::sql::parse(sql) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            conn.send_error(ErrorInfo::new("42601", e.to_string()));
+            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+            conn.flush().await?;
+            return Ok(());
+        }
+    };
+
+    // COPY takes over the connection for a sub-protocol of CopyData/CopyDone
+    // messages, so it's handled directly here rather than through
+    // `execute_simple`'s uniform QueryResult shape.
+    match stmt {
+        Stmt::CopyIn(copy) => return handle_copy_in(conn, copy, db).await,
+        Stmt::CopyOut(copy) => return handle_copy_out(conn, copy, db).await,
+        _ => {}
+    }
+
+    match execute_simple(stmt, db, cursors, listening) {
         Ok(result) => {
             conn.send(&BackendMessage::RowDescription(result.fields));
             for row in result.rows {
@@ -255,17 +280,16 @@ async fn handle_simple_query(
     Ok(())
 }
 
-/// Parse and execute one simple-query-protocol statement, intercepting
+/// Execute one already-parsed simple-query-protocol statement, intercepting
 /// cursor statements (`DECLARE`/`FETCH`/`MOVE`/`CLOSE`) to manage
 /// session-local `cursors` state; everything else is delegated to the
 /// stateless executor.
 fn execute_simple(
-    sql: &str,
+    stmt: Stmt,
     db: Arc<Database>,
     cursors: &mut HashMap<String, CursorState>,
     listening: &mut HashSet<String>,
 ) -> anyhow::Result<QueryResult> {
-    let stmt = crate::sql::parse(sql)?;
     match stmt {
         Stmt::Listen(channel) => {
             listening.insert(channel);
@@ -318,6 +342,99 @@ fn fetch_count(count: &FetchCount, cursor: &CursorState) -> usize {
     }
 }
 
+/// Drive the `COPY table FROM STDIN` sub-protocol: send `CopyInResponse`,
+/// then read `CopyData`/`CopyDone`/`CopyFail` messages directly off `conn`
+/// (bypassing the normal message dispatch) until the client ends the copy.
+async fn handle_copy_in(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> anyhow::Result<()> {
+    let schema = match db.get_table(&copy.table) {
+        Ok(Some(s)) => s,
+        Ok(None) => return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await,
+        Err(e) => return copy_abort(conn, e.to_string()).await,
+    };
+    let target = match crate::executor::copy::target_columns(&schema, &copy.columns) {
+        Ok(t) => t,
+        Err(e) => return copy_abort(conn, e.to_string()).await,
+    };
+
+    conn.send(&BackendMessage::CopyInResponse { columns: target.len() });
+    conn.flush().await?;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut row_count = 0u64;
+    let mut failed: Option<String> = None;
+    loop {
+        match conn.read_message().await? {
+            FrontendMessage::CopyData(data) => {
+                buf.extend_from_slice(&data);
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=pos).collect();
+                    let line = &line[..line.len().saturating_sub(1)]; // strip trailing '\n'
+                    if failed.is_none() {
+                        let text = String::from_utf8_lossy(line);
+                        match crate::executor::copy::insert_copy_line(&db, &copy.table, &schema, &target, &text) {
+                            Ok(()) => row_count += 1,
+                            Err(e) => failed = Some(e.to_string()),
+                        }
+                    }
+                }
+            }
+            FrontendMessage::CopyDone => break,
+            FrontendMessage::CopyFail(msg) => {
+                failed = Some(format!("COPY aborted by client: {msg}"));
+                break;
+            }
+            _ => { /* any other message here is a client protocol violation; ignore */ }
+        }
+    }
+
+    match failed {
+        Some(msg) => conn.send_error(ErrorInfo::new("22P04", msg)),
+        None => conn.send(&BackendMessage::CommandComplete(format!("COPY {row_count}"))),
+    }
+    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+    conn.flush().await?;
+    Ok(())
+}
+
+/// Send an ErrorResponse and bail out of a COPY before the `CopyInResponse`/
+/// `CopyOutResponse` handshake — used when the target table/columns are
+/// invalid.
+async fn copy_abort(conn: &mut Conn, message: String) -> anyhow::Result<()> {
+    conn.send_error(ErrorInfo::new("42P01", message));
+    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+    conn.flush().await?;
+    Ok(())
+}
+
+/// Drive the `COPY table TO STDOUT` sub-protocol: send `CopyOutResponse`,
+/// stream every row as a `CopyData` message, then `CopyDone`.
+async fn handle_copy_out(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> anyhow::Result<()> {
+    let schema = match db.get_table(&copy.table) {
+        Ok(Some(s)) => s,
+        Ok(None) => return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await,
+        Err(e) => return copy_abort(conn, e.to_string()).await,
+    };
+    let target = match crate::executor::copy::target_columns(&schema, &copy.columns) {
+        Ok(t) => t,
+        Err(e) => return copy_abort(conn, e.to_string()).await,
+    };
+    let rows = match crate::executor::copy::scan_for_copy(&db, &copy.table, &target) {
+        Ok(r) => r,
+        Err(e) => return copy_abort(conn, e.to_string()).await,
+    };
+
+    conn.send(&BackendMessage::CopyOutResponse { columns: target.len() });
+    let row_count = rows.len();
+    for row in &rows {
+        conn.send(&BackendMessage::CopyData(crate::executor::copy::encode_copy_line(row)));
+    }
+    conn.send(&BackendMessage::CopyDone);
+    conn.send(&BackendMessage::CommandComplete(format!("COPY {row_count}")));
+    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+    conn.flush().await?;
+    Ok(())
+}
+
 /// Send RowDescription (or NoData for non-SELECT / no-FROM statements) for
 /// a prepared statement or portal, ahead of Execute.
 fn send_row_description_for(conn: &mut Conn, stmt: &Stmt, db: &Arc<Database>) -> anyhow::Result<()> {
@@ -347,6 +464,96 @@ fn decode_param(bytes: Option<&[u8]>, format: i16) -> Value {
         4 => Value::Int(i32::from_be_bytes(b.try_into().unwrap()) as i64),
         8 => Value::Int(i64::from_be_bytes(b.try_into().unwrap())),
         _ => Value::from_bytes(Some(b)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::config::NodeRole;
+    use crate::storage::lease::LeaseManager;
+    use crate::storage::objectstore::{LocalFsObjectStore, ObjectStore};
+    use std::time::Duration;
+
+    fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
+        let bucket = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        lease.try_acquire().unwrap();
+        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        (db, bucket, local)
+    }
+
+    fn exec(sql: &str, db: Arc<Database>, cursors: &mut HashMap<String, CursorState>, listening: &mut HashSet<String>) -> anyhow::Result<QueryResult> {
+        execute_simple(crate::sql::parse(sql).unwrap(), db, cursors, listening)
+    }
+
+    #[test]
+    fn cursor_declare_fetch_move_close() {
+        let (db, _b, _l) = test_db();
+        db.create_table(
+            "nums",
+            &[crate::storage::ColumnDef { name: "n".into(), col_type: crate::storage::ColumnType::Int4, nullable: false, default: None, is_pk: true }],
+        ).unwrap();
+        for i in 1..=5 {
+            execute_parsed(crate::sql::parse(&format!("INSERT INTO nums VALUES ({i})")).unwrap(), db.clone(), &[]).unwrap();
+        }
+
+        let mut cursors = HashMap::new();
+        let mut listening = HashSet::new();
+
+        let declared = exec("DECLARE c CURSOR FOR SELECT n FROM nums ORDER BY n", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(declared.tag, "DECLARE CURSOR");
+        assert!(cursors.contains_key("c"));
+
+        let first_two = exec("FETCH 2 FROM c", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(first_two.tag, "FETCH 2");
+        assert_eq!(first_two.rows.len(), 2);
+        assert_eq!(first_two.rows[0][0].as_deref(), Some(b"1".as_slice()));
+        assert_eq!(first_two.rows[1][0].as_deref(), Some(b"2".as_slice()));
+
+        let moved = exec("MOVE 1 FROM c", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(moved.tag, "MOVE 1");
+
+        let rest = exec("FETCH ALL FROM c", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(rest.rows.len(), 2); // rows 4 and 5 — row 3 was skipped by MOVE
+        assert_eq!(rest.rows[0][0].as_deref(), Some(b"4".as_slice()));
+
+        let closed = exec("CLOSE c", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(closed.tag, "CLOSE CURSOR");
+        assert!(!cursors.contains_key("c"));
+
+        assert!(exec("FETCH 1 FROM c", db.clone(), &mut cursors, &mut listening).is_err());
+    }
+
+    #[test]
+    fn listen_unlisten_update_session_state() {
+        let (db, _b, _l) = test_db();
+        let mut cursors = HashMap::new();
+        let mut listening = HashSet::new();
+
+        let listened = exec("LISTEN foo", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(listened.tag, "LISTEN");
+        assert!(listening.contains("foo"));
+
+        exec("UNLISTEN foo", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert!(!listening.contains("foo"));
+    }
+
+    #[test]
+    fn notify_delivers_to_subscribed_channel() {
+        let (db, _b, _l) = test_db();
+        let mut rx = db.subscribe_notifications();
+
+        let mut cursors = HashMap::new();
+        let mut listening = HashSet::new();
+        let result = exec("NOTIFY foo, 'hello'", db.clone(), &mut cursors, &mut listening).unwrap();
+        assert_eq!(result.tag, "NOTIFY");
+
+        let (channel, payload) = rx.try_recv().unwrap();
+        assert_eq!(channel, "foo");
+        assert_eq!(payload, "hello");
     }
 }
 

@@ -90,6 +90,7 @@ impl Parser {
                 };
                 Ok(Stmt::Notify(channel, payload))
             }
+            Token::Copy => { self.advance(); self.parse_copy() }
             Token::Eof => anyhow::bail!("empty statement"),
             other => anyhow::bail!("unexpected token: {:?}", other),
         }?;
@@ -201,8 +202,35 @@ impl Parser {
         match self.peek().clone() {
             Token::Table => { self.advance(); self.parse_create_table() }
             Token::Index => { self.advance(); self.parse_create_index() }
-            other => anyhow::bail!("expected TABLE or INDEX after CREATE, got {:?}", other),
+            Token::Function => { self.advance(); self.parse_create_function() }
+            other => anyhow::bail!("expected TABLE, INDEX, or FUNCTION after CREATE, got {:?}", other),
         }
+    }
+
+    /// `CREATE FUNCTION name(arg type, ...) RETURNS type LANGUAGE wasm AS '<base64>'`
+    fn parse_create_function(&mut self) -> anyhow::Result<Stmt> {
+        let name = self.parse_ident_string()?;
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        if self.peek() != &Token::RParen {
+            loop {
+                let arg_name = self.parse_ident_string()?;
+                let arg_type = self.parse_ident_string()?;
+                args.push((arg_name, arg_type));
+                if !self.eat(&Token::Comma) { break; }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Returns)?;
+        let return_type = self.parse_ident_string()?;
+        self.expect(&Token::Language)?;
+        let language = self.parse_ident_string()?;
+        self.expect(&Token::As)?;
+        let body_base64 = match self.advance().clone() {
+            Token::StringLiteral(s) => s,
+            other => anyhow::bail!("expected string literal function body, got {:?}", other),
+        };
+        Ok(Stmt::CreateFunction(CreateFunctionStmt { name, args, return_type, language, body_base64 }))
     }
 
     fn parse_create_table(&mut self) -> anyhow::Result<Stmt> {
@@ -434,9 +462,7 @@ impl Parser {
     fn parse_set(&mut self) -> anyhow::Result<Stmt> {
         let name = self.parse_ident_string()?;
         if !self.eat(&Token::Eq) {
-            if let Token::Ident(s) = self.peek().clone() {
-                if s.to_uppercase() == "TO" { self.advance(); }
-            }
+            self.eat(&Token::To);
         }
         let mut parts = Vec::new();
         loop {
@@ -451,6 +477,31 @@ impl Parser {
     fn parse_show(&mut self) -> anyhow::Result<Stmt> {
         let name = self.parse_ident_string()?;
         Ok(Stmt::Show(ShowStmt { name }))
+    }
+
+    /// `COPY table [(cols)] FROM STDIN` / `COPY table [(cols)] TO STDOUT`.
+    fn parse_copy(&mut self) -> anyhow::Result<Stmt> {
+        let table = self.parse_ident_string()?;
+        let columns = if self.eat(&Token::LParen) {
+            let mut cols = vec![self.parse_ident_string()?];
+            while self.eat(&Token::Comma) {
+                cols.push(self.parse_ident_string()?);
+            }
+            self.expect(&Token::RParen)?;
+            cols
+        } else {
+            vec![]
+        };
+        let stmt = if self.eat(&Token::From) {
+            self.expect(&Token::Stdin)?;
+            Stmt::CopyIn(CopyStmt { table, columns })
+        } else if self.eat(&Token::To) {
+            self.expect(&Token::Stdout)?;
+            Stmt::CopyOut(CopyStmt { table, columns })
+        } else {
+            anyhow::bail!("expected FROM STDIN or TO STDOUT after COPY table");
+        };
+        Ok(stmt)
     }
 
     /// `DECLARE name CURSOR FOR <select>`
