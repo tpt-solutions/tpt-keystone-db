@@ -14,7 +14,10 @@ pub enum Token {
     Insert, Into, Values, Delete, Update, Create, Table, Drop, Index,
     If, Exists, Primary, Key, Default,
     Join, Left, Right, Full, Cross, On,
-    With, Recursive,
+    With, Recursive, Union,
+    Over, Partition, Rows, Range, Unbounded, Preceding, Following, Current, Row,
+    Declare, Cursor, For, Fetch, Next, Move, Close,
+    Listen, Notify, Unlisten,
 
     // Identifiers
     Ident(String),
@@ -232,7 +235,15 @@ fn keyword_or_ident(s: &str) -> Token {
         "PRIMARY" => Token::Primary, "KEY" => Token::Key, "DEFAULT" => Token::Default,
         "JOIN" => Token::Join, "LEFT" => Token::Left, "RIGHT" => Token::Right, "FULL" => Token::Full,
         "CROSS" => Token::Cross, "ON" => Token::On,
-        "WITH" => Token::With, "RECURSIVE" => Token::Recursive,
+        "WITH" => Token::With, "RECURSIVE" => Token::Recursive, "UNION" => Token::Union,
+        "OVER" => Token::Over, "PARTITION" => Token::Partition,
+        "ROWS" => Token::Rows, "RANGE" => Token::Range, "UNBOUNDED" => Token::Unbounded,
+        "PRECEDING" => Token::Preceding, "FOLLOWING" => Token::Following,
+        "CURRENT" => Token::Current, "ROW" => Token::Row,
+        "DECLARE" => Token::Declare, "CURSOR" => Token::Cursor, "FOR" => Token::For,
+        "FETCH" => Token::Fetch, "NEXT" => Token::Next, "MOVE" => Token::Move,
+        "CLOSE" => Token::Close,
+        "LISTEN" => Token::Listen, "NOTIFY" => Token::Notify, "UNLISTEN" => Token::Unlisten,
         _ => Token::Ident(s.to_string()),
     }
 }

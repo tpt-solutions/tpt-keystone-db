@@ -1,7 +1,14 @@
 pub mod btree;
+pub mod cache;
+pub mod config;
 pub mod database;
+pub mod lease;
 pub mod lsm;
+pub mod manifest;
 pub mod mvcc;
+pub mod objectstore;
+#[cfg(test)]
+mod phase3_tests;
 pub mod sstable;
 pub mod tx;
 pub mod wal;

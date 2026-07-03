@@ -13,6 +13,13 @@ pub enum BackendMessage {
     ErrorResponse(ErrorInfo),
     EmptyQueryResponse,
     NoticeResponse(String),
+    ParseComplete,
+    BindComplete,
+    CloseComplete,
+    ParameterDescription(Vec<i32>),
+    NoData,
+    PortalSuspended,
+    NotificationResponse { pid: i32, channel: String, payload: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,7 +39,7 @@ impl TransactionStatus {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldDescription {
     pub name: String,
     pub table_oid: i32,
@@ -162,6 +169,38 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
         BackendMessage::NoticeResponse(msg) => {
             write_msg(buf, b'N', |b| {
                 b.put_u8(b'M'); b.put_slice(msg.as_bytes()); b.put_u8(0);
+                b.put_u8(0);
+            });
+        }
+        BackendMessage::ParseComplete => {
+            write_msg(buf, b'1', |_| {});
+        }
+        BackendMessage::BindComplete => {
+            write_msg(buf, b'2', |_| {});
+        }
+        BackendMessage::CloseComplete => {
+            write_msg(buf, b'3', |_| {});
+        }
+        BackendMessage::ParameterDescription(types) => {
+            write_msg(buf, b't', |b| {
+                b.put_i16(types.len() as i16);
+                for ty in types {
+                    b.put_i32(*ty);
+                }
+            });
+        }
+        BackendMessage::NoData => {
+            write_msg(buf, b'n', |_| {});
+        }
+        BackendMessage::PortalSuspended => {
+            write_msg(buf, b's', |_| {});
+        }
+        BackendMessage::NotificationResponse { pid, channel, payload } => {
+            write_msg(buf, b'A', |b| {
+                b.put_i32(*pid);
+                b.put_slice(channel.as_bytes());
+                b.put_u8(0);
+                b.put_slice(payload.as_bytes());
                 b.put_u8(0);
             });
         }

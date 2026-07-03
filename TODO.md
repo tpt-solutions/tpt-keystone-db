@@ -41,10 +41,10 @@
 - [x] JOINs — hash join, merge join, nested loop
 - [x] INSERT, UPDATE, DELETE with MVCC isolation
 - [x] DDL: CREATE / DROP / ALTER TABLE, CREATE INDEX
-- [ ] Subqueries + CTEs (WITH)
-- [ ] Window functions
-- [ ] Prepared statements (extended query protocol — Parse/Bind/Execute)
-- [ ] Query planner + cost-based optimiser
+- [x] Subqueries + CTEs (WITH) — scalar/correlated/EXISTS/IN subqueries, derived tables, recursive CTEs (UNION/UNION ALL)
+- [x] Window functions — ranking (ROW_NUMBER/RANK/DENSE_RANK/NTILE), LAG/LEAD, aggregate-as-window with ROWS/RANGE frames
+- [x] Prepared statements (extended query protocol — Parse/Bind/Describe/Execute/Sync/Close)
+- [x] Query planner + cost-based optimiser (heuristic: index-aware point lookups, size-aware hash-join build side; not a full Selinger-style cost model)
 
 **Milestone:** TPC-H benchmark queries run correctly
 
@@ -52,11 +52,14 @@
 
 ## Phase 3 — Keystone: Cloud-Native Storage
 
-- [ ] Disaggregated storage: S3-compatible object store as source of truth
-- [ ] Local NVMe cache layer (cache-aside, LRU eviction)
-- [ ] Stateless compute nodes (no local durable state)
-- [ ] Horizontal scale-out: multiple compute nodes share one S3 bucket
-- [ ] Fencing / lease mechanism for concurrent writers
+- [x] Disaggregated storage: S3-compatible object store as source of truth (`storage/objectstore.rs` — `ObjectStore` trait, real `aws-sdk-s3`-backed `S3ObjectStore`, plus a `LocalFsObjectStore` emulation for dev/test)
+- [x] Local NVMe cache layer (cache-aside, LRU eviction) (`storage/cache.rs` — `NvmeCache` + `CachedObjectStore`; only immutable `sst/`/`wal/` objects are cached, manifest/lease always read fresh)
+- [x] Stateless compute nodes (no local durable state) (`storage/config.rs`, `main.rs` — local disk holds only the active WAL segment + local B-Tree indexes; SSTables, sealed WAL segments, schemas, manifest, and lease all live in the object store)
+- [x] Horizontal scale-out: multiple compute nodes share one S3 bucket (`storage/manifest.rs` — single-writer/multi-reader; readers poll-refresh the shared manifest)
+- [x] Fencing / lease mechanism for concurrent writers (`storage/lease.rs` — CAS-based lease with monotonic fencing token; a superseded writer's manifest CAS is rejected even if it never notices its own lease expired)
+
+**Milestone verified:** `storage::phase3_tests` runs two in-process `Database`s against one shared `LocalFsObjectStore` root (emulating one bucket) — the writer creates a table, writes, and flushes; the reader sees the same schema and rows after `refresh()`, is rejected on any write attempt, and a lease-takeover test confirms a superseded writer's later flush is fenced off. The real `S3ObjectStore` path is implemented against the S3 API contract (conditional `If-Match`/`If-None-Match` PUTs) but has not been exercised against a live AWS S3/MinIO endpoint in this environment.
+B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `fizzy-growing-harp.md`).
 
 **Milestone:** Two compute nodes share one S3 bucket, queries return consistent results
 
@@ -80,6 +83,10 @@
   - Port: 5433 (alongside Postgres listener on 5432)
   - Tools: `query(sql)`, `schema()`, `tables()`, `columns(table)`, `explain(sql)`, `mutate(sql)`
   - Auth: TPT token header
+- [ ] **Structured retrieval tools** — traversal/similarity tools return compact,
+  self-describing facts (e.g. `{subject, relation, object}` triples with
+  human-readable labels), not raw subgraphs or unfiltered text — server does the
+  filtering, agent gets only what it needs
 - [ ] **Schema introspection API** — structured metadata for LLM context
   - Table names, column types, nullability, defaults, constraints, indexes, foreign keys
   - Row count statistics and value distribution histograms
@@ -190,6 +197,9 @@
 - [ ] Formal benchmark suite vs Postgres, InfluxDB, Neo4j, MongoDB, Kafka
 - [ ] Documentation site (architecture, SQL reference, SDK docs, tutorials)
 - [ ] Security audit (wire protocol auth, WASM sandbox, S3 credential handling)
+- [ ] Publish versioned, language-independent on-disk format specifications
+  (Keystone SSTable/WAL, Chronos, Canopy, Prism index formats) so readers can be
+  reimplemented independently of the original Rust codebase
 - [ ] Apache 2.0 open-source release
 
 ---
@@ -312,6 +322,9 @@
 - [ ] Debug REPL — step through a past session event-by-event, inspect agent state at each point
 - [ ] Performance metrics store — per-agent latency, token usage, success/failure rates stored in Chronos
 - [ ] Compliance auditing — policy enforcement log, tamper-evident audit trail in Keystone
+- [ ] Provenance tracking on stored data (not just agent actions) — every fact
+  carries who/what asserted it and when, so consumers (human or AI) can weight
+  reliability without a human sanity-check in the loop
 - [ ] OTel span integration — agent action spans annotate existing distributed traces from Phase 12
 - [ ] Dashboard — live agent activity monitor, per-agent performance charts, replay controls
 

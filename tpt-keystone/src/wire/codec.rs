@@ -9,9 +9,16 @@ use super::messages::{encode, BackendMessage, ErrorInfo};
 pub enum FrontendMessage {
     Query(String),
     Parse { name: String, query: String, param_types: Vec<i32> },
-    Bind { portal: String, stmt: String },
+    Bind {
+        portal: String,
+        stmt: String,
+        params: Vec<Option<Vec<u8>>>,
+        param_formats: Vec<i16>,
+        result_formats: Vec<i16>,
+    },
     Describe { kind: u8, name: String },
     Execute { portal: String, max_rows: i32 },
+    Close { kind: u8, name: String },
     Sync,
     Flush,
     Terminate,
@@ -111,7 +118,33 @@ impl Conn {
             b'B' => {
                 let portal = read_cstr(&mut data);
                 let stmt = read_cstr(&mut data);
-                FrontendMessage::Bind { portal, stmt }
+
+                let n_param_formats = if data.remaining() >= 2 { data.get_i16() as usize } else { 0 };
+                let mut param_formats = Vec::with_capacity(n_param_formats);
+                for _ in 0..n_param_formats {
+                    param_formats.push(if data.remaining() >= 2 { data.get_i16() } else { 0 });
+                }
+
+                let n_params = if data.remaining() >= 2 { data.get_i16() as usize } else { 0 };
+                let mut params = Vec::with_capacity(n_params);
+                for _ in 0..n_params {
+                    let len = if data.remaining() >= 4 { data.get_i32() } else { -1 };
+                    if len < 0 {
+                        params.push(None);
+                    } else {
+                        let len = len as usize;
+                        let take = len.min(data.remaining());
+                        params.push(Some(data.copy_to_bytes(take).to_vec()));
+                    }
+                }
+
+                let n_result_formats = if data.remaining() >= 2 { data.get_i16() as usize } else { 0 };
+                let mut result_formats = Vec::with_capacity(n_result_formats);
+                for _ in 0..n_result_formats {
+                    result_formats.push(if data.remaining() >= 2 { data.get_i16() } else { 0 });
+                }
+
+                FrontendMessage::Bind { portal, stmt, params, param_formats, result_formats }
             }
             b'D' => {
                 let kind = if data.has_remaining() { data.get_u8() } else { b'S' };
@@ -122,6 +155,11 @@ impl Conn {
                 let portal = read_cstr(&mut data);
                 let max_rows = if data.remaining() >= 4 { data.get_i32() } else { 0 };
                 FrontendMessage::Execute { portal, max_rows }
+            }
+            b'C' => {
+                let kind = if data.has_remaining() { data.get_u8() } else { b'S' };
+                let name = read_cstr(&mut data);
+                FrontendMessage::Close { kind, name }
             }
             b'S' => FrontendMessage::Sync,
             b'H' => FrontendMessage::Flush,

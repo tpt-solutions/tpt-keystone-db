@@ -30,15 +30,20 @@ impl Wal {
     pub fn open(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let path = dir.join("wal.log");
-        let file = OpenOptions::new()
+        // Deliberately not opened with `.append(true)`: on Windows that only
+        // grants FILE_APPEND_DATA, which is not sufficient for `set_len`
+        // (truncate) — we need full write access and manage the write
+        // position ourselves instead (see `append`).
+        let mut file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
             .read(true)
             .open(&path)?;
 
         // Determine the next sequence number by scanning existing records.
         let seq = Self::scan_max_seq(&file)? + 1;
         let bytes_written = file.metadata()?.len();
+        file.seek(SeekFrom::End(0))?;
 
         info!(path = %path.display(), seq, bytes_written, "WAL opened");
 
@@ -75,6 +80,7 @@ impl Wal {
         buf.extend_from_slice(value);
         buf.push(record_type);
 
+        self.file.seek(SeekFrom::End(0))?; // no append(true) mode; keep cursor pinned to end
         self.file.write_all(&buf)?;
         self.file.sync_all()?; // fsync for durability
         self.bytes_written += buf.len() as u64;
@@ -149,11 +155,26 @@ impl Wal {
         Ok(())
     }
 
+    /// Read the WAL's raw bytes as currently on disk (used to ship the
+    /// sealed segment to the object store before truncating).
+    pub fn read_all_bytes(&self) -> Result<Vec<u8>> {
+        use anyhow::Context;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&self.path)
+            .with_context(|| format!("reopening wal for read at {}", self.path.display()))?;
+        file.seek(SeekFrom::Start(0)).context("seeking wal to start")?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).context("reading wal bytes")?;
+        Ok(buf)
+    }
+
     /// Truncate the WAL (after a successful flush to SSTable).
     pub fn truncate(&mut self) -> Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.sync_all()?;
+        use anyhow::Context;
+        self.file.set_len(0).context("truncating wal file")?;
+        self.file.seek(SeekFrom::Start(0)).context("seeking wal after truncate")?;
+        self.file.sync_all().context("fsyncing wal after truncate")?;
         self.bytes_written = 0;
         info!("WAL truncated");
         Ok(())

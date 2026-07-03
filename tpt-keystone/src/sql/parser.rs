@@ -67,6 +67,29 @@ impl Parser {
             Token::Begin => { self.advance(); Ok(Stmt::Begin) }
             Token::Commit => { self.advance(); Ok(Stmt::Commit) }
             Token::Rollback => { self.advance(); Ok(Stmt::Rollback) }
+            Token::Declare => { self.advance(); self.parse_declare_cursor() }
+            Token::Fetch => { self.advance(); Ok(Stmt::Fetch(self.parse_fetch_stmt()?)) }
+            Token::Move => { self.advance(); Ok(Stmt::MoveCursor(self.parse_fetch_stmt()?)) }
+            Token::Close => { self.advance(); Ok(Stmt::CloseCursor(self.parse_ident_string()?)) }
+            Token::Listen => { self.advance(); Ok(Stmt::Listen(self.parse_ident_string()?)) }
+            Token::Unlisten => {
+                self.advance();
+                let channel = if self.eat(&Token::Star) { "*".to_string() } else { self.parse_ident_string()? };
+                Ok(Stmt::Unlisten(channel))
+            }
+            Token::Notify => {
+                self.advance();
+                let channel = self.parse_ident_string()?;
+                let payload = if self.eat(&Token::Comma) {
+                    match self.advance().clone() {
+                        Token::StringLiteral(s) => Some(s),
+                        other => anyhow::bail!("expected string literal payload, got {:?}", other),
+                    }
+                } else {
+                    None
+                };
+                Ok(Stmt::Notify(channel, payload))
+            }
             Token::Eof => anyhow::bail!("empty statement"),
             other => anyhow::bail!("unexpected token: {:?}", other),
         }?;
@@ -268,14 +291,12 @@ impl Parser {
     }
 
     fn parse_create_index(&mut self) -> anyhow::Result<Stmt> {
-        let _name = if self.peek() != &Token::Ident("ON".to_string()) && self.peek() != &Token::Ident("on".to_string()) {
-            Some(self.parse_ident_string()?)
-        } else {
+        let _name = if self.peek() == &Token::On {
             None
+        } else {
+            Some(self.parse_ident_string()?)
         };
-        if let Token::Ident(s) = self.peek().clone() {
-            if s.to_uppercase() == "ON" { self.advance(); }
-        }
+        self.expect(&Token::On)?;
         let table = self.parse_ident_string()?;
         self.expect(&Token::LParen)?;
         let column = self.parse_ident_string()?;
@@ -299,7 +320,15 @@ impl Parser {
         } else { vec![] };
         let limit = if self.eat(&Token::Limit) { Some(self.parse_expr(0)?) } else { None };
         let offset = if self.eat(&Token::Offset) { Some(self.parse_expr(0)?) } else { None };
-        Ok(SelectStmt { ctes: vec![], distinct, projections, from, where_, group_by, having, order_by, limit, offset })
+        let union = if self.peek() == &Token::Union {
+            self.advance();
+            let op = if self.eat(&Token::All) { UnionOp::UnionAll } else { UnionOp::Union };
+            let rhs = self.parse_select()?;
+            Some((op, Box::new(rhs)))
+        } else {
+            None
+        };
+        Ok(SelectStmt { ctes: vec![], distinct, projections, from, where_, group_by, having, order_by, limit, offset, union })
     }
 
     fn parse_projection_list(&mut self) -> anyhow::Result<Vec<Projection>> {
@@ -371,11 +400,23 @@ impl Parser {
     }
 
     fn parse_table_ref(&mut self) -> anyhow::Result<TableRef> {
-        let name = self.parse_ident_string()?;
+        if self.peek() == &Token::LParen && self.peek2() == &Token::Select {
+            self.advance();
+            let subquery = self.parse_select()?;
+            self.expect(&Token::RParen)?;
+            let alias = if self.eat(&Token::As) { self.parse_ident_string()? }
+            else { self.parse_ident_string()? };
+            return Ok(TableRef { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(subquery)) });
+        }
+        let mut name = self.parse_ident_string()?;
+        if self.eat(&Token::Dot) {
+            name.push('.');
+            name.push_str(&self.parse_ident_string()?);
+        }
         let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
         else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
         else { None };
-        Ok(TableRef { name, alias })
+        Ok(TableRef { name, alias, subquery: None })
     }
 
     fn parse_order_by_list(&mut self) -> anyhow::Result<Vec<OrderBy>> {
@@ -410,6 +451,29 @@ impl Parser {
     fn parse_show(&mut self) -> anyhow::Result<Stmt> {
         let name = self.parse_ident_string()?;
         Ok(Stmt::Show(ShowStmt { name }))
+    }
+
+    /// `DECLARE name CURSOR FOR <select>`
+    fn parse_declare_cursor(&mut self) -> anyhow::Result<Stmt> {
+        let name = self.parse_ident_string()?;
+        self.expect(&Token::Cursor)?;
+        self.expect(&Token::For)?;
+        let query = self.parse_select()?;
+        Ok(Stmt::DeclareCursor(DeclareCursorStmt { name, query }))
+    }
+
+    /// `FETCH|MOVE [ NEXT | ALL | count ] [ FROM | IN ] cursor`
+    fn parse_fetch_stmt(&mut self) -> anyhow::Result<FetchStmt> {
+        let count = match self.peek().clone() {
+            Token::Next => { self.advance(); FetchCount::Next }
+            Token::All => { self.advance(); FetchCount::All }
+            Token::IntLiteral(n) => { self.advance(); FetchCount::Count(n) }
+            _ => FetchCount::Next,
+        };
+        self.eat(&Token::From);
+        self.eat(&Token::In);
+        let cursor = self.parse_ident_string()?;
+        Ok(FetchStmt { cursor, count })
     }
 
     fn parse_ident_string(&mut self) -> anyhow::Result<String> {
@@ -464,7 +528,12 @@ impl Parser {
                 let negated = self.eat(&Token::Not);
                 self.expect(&Token::In)?;
                 self.expect(&Token::LParen)?;
-                let list = self.parse_expr_list()?;
+                let list = if self.peek() == &Token::Select {
+                    let subquery = self.parse_select()?;
+                    InList::Subquery(Box::new(subquery))
+                } else {
+                    InList::Exprs(self.parse_expr_list()?)
+                };
                 self.expect(&Token::RParen)?;
                 lhs = Expr::In { expr: Box::new(lhs), list, negated };
                 continue;
@@ -481,9 +550,22 @@ impl Parser {
         match self.peek().clone() {
             Token::Minus => { self.advance(); let expr = self.parse_unary()?; Ok(Expr::UnaryOp { op: UnOp::Neg, expr: Box::new(expr) }) }
             Token::Plus => { self.advance(); self.parse_unary() }
+            Token::Not if self.peek2() == &Token::Exists => {
+                self.advance();
+                self.parse_exists(true)
+            }
             Token::Not => { self.advance(); let expr = self.parse_unary()?; Ok(Expr::UnaryOp { op: UnOp::Not, expr: Box::new(expr) }) }
+            Token::Exists => self.parse_exists(false),
             _ => self.parse_postfix(),
         }
+    }
+
+    fn parse_exists(&mut self, negated: bool) -> anyhow::Result<Expr> {
+        self.expect(&Token::Exists)?;
+        self.expect(&Token::LParen)?;
+        let subquery = self.parse_select()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Exists { subquery: Box::new(subquery), negated })
     }
 
     fn parse_postfix(&mut self) -> anyhow::Result<Expr> {
@@ -506,6 +588,12 @@ impl Parser {
             Token::False => { self.advance(); Ok(Expr::Literal(Literal::Bool(false))) }
             Token::Null => { self.advance(); Ok(Expr::Literal(Literal::Null)) }
             Token::Dollar(n) => { self.advance(); Ok(Expr::Param(n)) }
+            Token::LParen if self.peek2() == &Token::Select => {
+                self.advance();
+                let subquery = self.parse_select()?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Subquery(Box::new(subquery)))
+            }
             Token::LParen => { self.advance(); let expr = self.parse_expr(0)?; self.expect(&Token::RParen)?; Ok(expr) }
             Token::Case => { self.advance(); self.parse_case() }
             Token::Cast => {
@@ -525,6 +613,9 @@ impl Parser {
                     else if self.peek() == &Token::RParen { vec![] }
                     else { self.parse_expr_list()? };
                     self.expect(&Token::RParen)?;
+                    if self.peek() == &Token::Over {
+                        return self.parse_over_clause(name, args);
+                    }
                     return Ok(Expr::Function { name, args, distinct });
                 }
                 if self.eat(&Token::Dot) {
@@ -534,6 +625,75 @@ impl Parser {
                 Ok(Expr::Ident(name))
             }
             other => anyhow::bail!("unexpected token in expression: {:?}", other),
+        }
+    }
+
+    fn parse_over_clause(&mut self, func: String, args: Vec<Expr>) -> anyhow::Result<Expr> {
+        self.expect(&Token::Over)?;
+        self.expect(&Token::LParen)?;
+        let partition_by = if self.peek() == &Token::Partition {
+            self.advance();
+            self.expect(&Token::By)?;
+            self.parse_expr_list()?
+        } else {
+            vec![]
+        };
+        let order_by = if self.peek() == &Token::Order && self.peek2() == &Token::By {
+            self.advance();
+            self.advance();
+            self.parse_order_by_list()?
+        } else {
+            vec![]
+        };
+        let frame = if self.peek() == &Token::Rows || self.peek() == &Token::Range {
+            Some(self.parse_window_frame()?)
+        } else {
+            None
+        };
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Window { func, args, partition_by, order_by, frame })
+    }
+
+    fn parse_window_frame(&mut self) -> anyhow::Result<WindowFrame> {
+        let frame_type = match self.advance().clone() {
+            Token::Rows => FrameType::Rows,
+            Token::Range => FrameType::Range,
+            other => anyhow::bail!("expected ROWS or RANGE, got {:?}", other),
+        };
+        if self.eat(&Token::Between) {
+            let start = self.parse_frame_bound()?;
+            self.expect(&Token::And)?;
+            let end = self.parse_frame_bound()?;
+            Ok(WindowFrame { frame_type, start, end: Some(end) })
+        } else {
+            let start = self.parse_frame_bound()?;
+            Ok(WindowFrame { frame_type, start, end: None })
+        }
+    }
+
+    fn parse_frame_bound(&mut self) -> anyhow::Result<FrameBound> {
+        match self.peek().clone() {
+            Token::Unbounded => {
+                self.advance();
+                match self.advance().clone() {
+                    Token::Preceding => Ok(FrameBound { bound_type: FrameBoundType::UnboundedPreceding, offset: None }),
+                    Token::Following => Ok(FrameBound { bound_type: FrameBoundType::UnboundedFollowing, offset: None }),
+                    other => anyhow::bail!("expected PRECEDING or FOLLOWING, got {:?}", other),
+                }
+            }
+            Token::Current => {
+                self.advance();
+                self.expect(&Token::Row)?;
+                Ok(FrameBound { bound_type: FrameBoundType::CurrentRow, offset: None })
+            }
+            _ => {
+                let offset = self.parse_expr(0)?;
+                match self.advance().clone() {
+                    Token::Preceding => Ok(FrameBound { bound_type: FrameBoundType::Preceding, offset: Some(Box::new(offset)) }),
+                    Token::Following => Ok(FrameBound { bound_type: FrameBoundType::Following, offset: Some(Box::new(offset)) }),
+                    other => anyhow::bail!("expected PRECEDING or FOLLOWING, got {:?}", other),
+                }
+            }
         }
     }
 

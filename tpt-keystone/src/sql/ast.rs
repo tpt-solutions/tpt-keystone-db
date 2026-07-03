@@ -14,6 +14,33 @@ pub enum Stmt {
     Begin,
     Commit,
     Rollback,
+    DeclareCursor(DeclareCursorStmt),
+    Fetch(FetchStmt),
+    MoveCursor(FetchStmt),
+    CloseCursor(String),
+    Listen(String),
+    Notify(String, Option<String>),
+    Unlisten(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct DeclareCursorStmt {
+    pub name: String,
+    pub query: SelectStmt,
+}
+
+/// Shared shape for `FETCH`/`MOVE`: how many rows, from which cursor.
+#[derive(Debug, Clone)]
+pub struct FetchStmt {
+    pub cursor: String,
+    pub count: FetchCount,
+}
+
+#[derive(Debug, Clone)]
+pub enum FetchCount {
+    Next,
+    All,
+    Count(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +124,13 @@ pub struct SelectStmt {
     pub order_by: Vec<OrderBy>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    pub union: Option<(UnionOp, Box<SelectStmt>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnionOp {
+    Union,
+    UnionAll,
 }
 
 /// Common Table Expression (CTE) definition.
@@ -119,6 +153,9 @@ pub enum Projection {
 pub struct TableRef {
     pub name: String,
     pub alias: Option<String>,
+    /// Present for a derived table (`(SELECT ...) AS alias`) in the FROM
+    /// clause or a JOIN. When set, `name` holds the required alias.
+    pub subquery: Option<Box<SelectStmt>>,
 }
 
 /// Represents a FROM clause with optional JOINs.
@@ -174,7 +211,8 @@ pub enum Expr {
     IsFalse { expr: Box<Expr>, negated: bool },
     Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool },
     Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool },
-    In { expr: Box<Expr>, list: Vec<Expr>, negated: bool },
+    In { expr: Box<Expr>, list: InList, negated: bool },
+    Exists { subquery: Box<SelectStmt>, negated: bool },
     Cast { expr: Box<Expr>, ty: String },
     Function { name: String, args: Vec<Expr>, distinct: bool },
     Case { operand: Option<Box<Expr>>, branches: Vec<(Expr, Expr)>, else_: Option<Box<Expr>> },
@@ -187,6 +225,12 @@ pub enum Expr {
         order_by: Vec<OrderBy>,
         frame: Option<WindowFrame>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum InList {
+    Exprs(Vec<Expr>),
+    Subquery(Box<SelectStmt>),
 }
 
 #[derive(Debug, Clone)]

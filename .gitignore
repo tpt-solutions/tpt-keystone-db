@@ -13,3 +13,6 @@ Thumbs.db
 # Build artifacts / logs
 *.log
 
+# Keystone runtime data (local object-store emulation, NVMe cache, WAL/indexes)
+**/tpt-data/
+
