@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::geo::geometry::{Coord, Geometry};
 use crate::sql::ast::{BinOp, Expr, InList, Literal, UnOp};
 use crate::storage::database::Database;
 use crate::storage::TableSchema;
@@ -45,6 +46,16 @@ impl Value {
             Self::Text(_) => oid::TEXT,
             Self::Bool(_) => oid::BOOL,
             Self::Null => oid::TEXT,
+        }
+    }
+
+    /// Coerces a numeric `Value` to `f64`, for functions (e.g. `ST_MakePoint`)
+    /// that accept either `INT` or `FLOAT` arguments interchangeably.
+    pub fn as_f64(&self) -> anyhow::Result<f64> {
+        match self {
+            Self::Int(n) => Ok(*n as f64),
+            Self::Float(f) => Ok(*f),
+            other => anyhow::bail!("expected a numeric value, got {}", other.type_name()),
         }
     }
 
@@ -448,6 +459,27 @@ impl RowContext {
         }
     }
 
+    /// Evaluate a `nextval`/`currval`/`setval` sequence-name argument. A
+    /// trailing `::regclass` cast (real `pg_dump` output writes
+    /// `nextval('foo_seq'::regclass)`) is handled transparently by
+    /// `cast_value`'s regclass pass-through — nothing special needed here.
+    fn eval_sequence_name_arg(&self, args: &[Expr], fn_name: &str) -> anyhow::Result<String> {
+        let arg = args.first().ok_or_else(|| anyhow::anyhow!("{fn_name}() requires a sequence name argument"))?;
+        match self.eval(arg)? {
+            Value::Text(s) => Ok(s),
+            other => anyhow::bail!("{fn_name}() requires a text sequence name, got {}", other.type_name()),
+        }
+    }
+
+    /// Evaluates `expr` and parses it as WKT geometry text — the common
+    /// argument shape for every `ST_*` function.
+    fn eval_geom(&self, expr: &Expr) -> anyhow::Result<Geometry> {
+        match self.eval(expr)? {
+            Value::Text(s) => Geometry::from_wkt(&s),
+            other => anyhow::bail!("expected geometry (WKT text), got {}", other.type_name()),
+        }
+    }
+
     fn eval_function(&self, name: &str, args: &[Expr], distinct: bool) -> anyhow::Result<Value> {
         let _ = distinct;
         match name.to_lowercase().as_str() {
@@ -460,6 +492,32 @@ impl RowContext {
             "current_schema" | "current_schemas" => Ok(Value::Text("public".into())),
             "pg_backend_pid" => Ok(Value::Int(1)),
             "pg_postmaster_start_time" => Ok(Value::Text("2026-06-30 00:00:00+00".into())),
+            "nextval" => {
+                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("nextval() requires a database context"))?;
+                let name = self.eval_sequence_name_arg(args, "nextval")?;
+                Ok(Value::Int(db.nextval(&name)?))
+            }
+            "currval" => {
+                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("currval() requires a database context"))?;
+                let name = self.eval_sequence_name_arg(args, "currval")?;
+                Ok(Value::Int(db.currval(&name)?))
+            }
+            "setval" => {
+                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("setval() requires a database context"))?;
+                if args.len() < 2 || args.len() > 3 {
+                    anyhow::bail!("setval() requires 2 or 3 arguments");
+                }
+                let name = self.eval_sequence_name_arg(args, "setval")?;
+                let value = match self.eval(&args[1])? {
+                    Value::Int(n) => n,
+                    other => anyhow::bail!("setval() requires an integer value, got {}", other.type_name()),
+                };
+                let is_called = match args.get(2) {
+                    Some(e) => self.eval(e)?.is_truthy(),
+                    None => true,
+                };
+                Ok(Value::Int(db.setval(&name, value, is_called)?))
+            }
             "abs" => {
                 let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("abs() requires 1 argument"))?)?;
                 match v {
@@ -536,6 +594,124 @@ impl RowContext {
                 }
                 Ok(best.unwrap_or(Value::Null))
             }
+            // Meridian: geospatial scalar functions (`2meridianspec.txt`).
+            // Geometry values are represented as WKT text (`Value::Text`) —
+            // see `geo::geometry` — so these are ordinary functions from
+            // the evaluator's point of view, not a distinct value variant.
+            "st_makepoint" | "st_point" => {
+                if args.len() < 2 || args.len() > 4 {
+                    anyhow::bail!("{name}() requires 2-4 arguments (x, y, [z], [t])");
+                }
+                let nums = args.iter().map(|a| self.eval(a)?.as_f64()).collect::<anyhow::Result<Vec<f64>>>()?;
+                let coord = Coord {
+                    x: nums[0],
+                    y: nums[1],
+                    z: nums.get(2).copied(),
+                    t: nums.get(3).map(|t| *t as i64),
+                };
+                Ok(Value::Text(Geometry::Point(coord).to_wkt()))
+            }
+            "st_geomfromtext" | "st_geographyfromtext" => {
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                Ok(Value::Text(geom.to_wkt()))
+            }
+            "st_astext" => {
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_astext() requires 1 argument"))?)?;
+                Ok(Value::Text(geom.to_wkt()))
+            }
+            "st_x" | "st_y" | "st_z" => {
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                let c = geom.representative_point();
+                match name.to_ascii_lowercase().as_str() {
+                    "st_x" => Ok(Value::Float(c.x)),
+                    "st_y" => Ok(Value::Float(c.y)),
+                    _ => c.z.map(Value::Float).map_or(Ok(Value::Null), Ok),
+                }
+            }
+            "st_t" | "st_time" => {
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                Ok(geom.representative_point().t.map(Value::Int).unwrap_or(Value::Null))
+            }
+            "st_distance" => {
+                if args.len() != 2 {
+                    anyhow::bail!("st_distance() requires 2 arguments");
+                }
+                let a = self.eval_geom(&args[0])?.representative_point();
+                let b = self.eval_geom(&args[1])?.representative_point();
+                Ok(Value::Float(crate::geo::geometry::haversine_distance_m(a.x, a.y, b.x, b.y)))
+            }
+            "st_dwithin" => {
+                if args.len() != 3 {
+                    anyhow::bail!("st_dwithin() requires 3 arguments (geom, geom, radius_meters)");
+                }
+                let a = self.eval_geom(&args[0])?.representative_point();
+                let b = self.eval_geom(&args[1])?.representative_point();
+                let radius = self.eval(&args[2])?.as_f64()?;
+                let dist = crate::geo::geometry::haversine_distance_m(a.x, a.y, b.x, b.y);
+                Ok(Value::Bool(dist <= radius))
+            }
+            "st_within" | "st_contains" => {
+                if args.len() != 2 {
+                    anyhow::bail!("{name}() requires 2 arguments");
+                }
+                // ST_Within(point, polygon) vs ST_Contains(polygon, point) —
+                // same underlying test, arguments swapped.
+                let (point_arg, poly_arg) = if name.eq_ignore_ascii_case("st_within") { (&args[0], &args[1]) } else { (&args[1], &args[0]) };
+                let point = self.eval_geom(point_arg)?.representative_point();
+                let poly = self.eval_geom(poly_arg)?;
+                let Geometry::Polygon(rings) = &poly else {
+                    anyhow::bail!("{name}() requires a POLYGON argument");
+                };
+                let exterior = rings.first().map(|r| r.as_slice()).unwrap_or(&[]);
+                Ok(Value::Bool(crate::geo::geometry::point_in_polygon(point.x, point.y, exterior)))
+            }
+            "st_intersects" => {
+                if args.len() != 2 {
+                    anyhow::bail!("st_intersects() requires 2 arguments");
+                }
+                let a = self.eval_geom(&args[0])?;
+                let b = self.eval_geom(&args[1])?;
+                Ok(Value::Bool(crate::geo::geometry::bbox_intersects(&a.bbox(), &b.bbox())))
+            }
+            "st_length" => {
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_length() requires 1 argument"))?)?;
+                let Geometry::LineString(pts) = &geom else {
+                    anyhow::bail!("st_length() requires a LINESTRING argument");
+                };
+                let total = pts.windows(2).map(|w| crate::geo::geometry::haversine_distance_m(w[0].x, w[0].y, w[1].x, w[1].y)).sum();
+                Ok(Value::Float(total))
+            }
+            "st_area" => {
+                // Planar shoelace formula in raw coordinate units (degrees^2
+                // if the geometry is lon/lat) — a documented simplification,
+                // not a geodesic ellipsoidal area calculation.
+                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_area() requires 1 argument"))?)?;
+                let Geometry::Polygon(rings) = &geom else {
+                    anyhow::bail!("st_area() requires a POLYGON argument");
+                };
+                let ring = rings.first().map(|r| r.as_slice()).unwrap_or(&[]);
+                let mut sum = 0.0;
+                for w in ring.windows(2) {
+                    sum += w[0].x * w[1].y - w[1].x * w[0].y;
+                }
+                if let (Some(first), Some(last)) = (ring.first(), ring.last()) {
+                    sum += last.x * first.y - first.x * last.y;
+                }
+                Ok(Value::Float((sum / 2.0).abs()))
+            }
+            // Chronos: SQL time extensions (`8chronos` phase). Timestamps
+            // are plain `Value::Int` unix-millisecond values (no dedicated
+            // `Value::Timestamp`/`Interval` variant exists in this engine —
+            // see module docs), and interval literals are hand-parsed text
+            // like `'1 hour'` rather than a real `INTERVAL` AST type.
+            "time_bucket" => {
+                if args.len() != 2 {
+                    anyhow::bail!("time_bucket() requires 2 arguments (interval, timestamp)");
+                }
+                let interval_ms = self.eval_interval_arg(&args[0], "time_bucket")?;
+                let ts = self.eval_timestamp_arg(&args[1], "time_bucket")?;
+                Ok(Value::Int(ts.div_euclid(interval_ms) * interval_ms))
+            }
             other => {
                 let Some(db) = &self.db else {
                     anyhow::bail!("function \"{other}\" does not exist")
@@ -548,6 +724,48 @@ impl RowContext {
             }
         }
     }
+
+    fn eval_interval_arg(&self, expr: &Expr, fname: &str) -> anyhow::Result<i64> {
+        match self.eval(expr)? {
+            Value::Text(s) => parse_interval(&s).ok_or_else(|| anyhow::anyhow!("{fname}(): invalid interval literal {s:?}")),
+            other => anyhow::bail!("{fname}(): expected an interval string literal, got {}", other.type_name()),
+        }
+    }
+
+    fn eval_timestamp_arg(&self, expr: &Expr, fname: &str) -> anyhow::Result<i64> {
+        match self.eval(expr)? {
+            Value::Int(n) => Ok(n),
+            Value::Float(f) => Ok(f as i64),
+            other => anyhow::bail!("{fname}(): expected a timestamp (unix-ms integer), got {}", other.type_name()),
+        }
+    }
+}
+
+/// Parses a Chronos interval literal (`'<n> <unit>'`, e.g. `'1 hour'`,
+/// `'30 days'`) into milliseconds. Shared by `time_bucket()` and
+/// `CREATE INDEX ... USING TIME WITH (interval = ..., retention = ...)`
+/// DDL parsing (`executor::execute_create_index`) — this engine has no real
+/// `INTERVAL` type/arithmetic, so both paths go through this one parser
+/// instead.
+pub fn parse_interval(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let split_at = s.find(|c: char| !c.is_ascii_digit())?;
+    let (num_str, unit) = s.split_at(split_at);
+    let n: i64 = num_str.trim().parse().ok()?;
+    let unit = unit.trim().trim_end_matches('s').to_ascii_lowercase();
+    let unit_ms: i64 = match unit.as_str() {
+        "ms" | "millisecond" => 1,
+        "s" | "sec" | "second" => 1_000,
+        "m" | "min" | "minute" => 60_000,
+        "h" | "hr" | "hour" => 3_600_000,
+        "d" | "day" => 86_400_000,
+        "w" | "week" => 7 * 86_400_000,
+        // Not a true calendar month — a documented approximation, same
+        // caveat any fixed-ms "month" bucketing carries.
+        "mon" | "month" => 30 * 86_400_000,
+        _ => return None,
+    };
+    Some(n * unit_ms)
 }
 
 /// Evaluate an expression with no row/table context (DDL defaults, INSERT
@@ -555,6 +773,15 @@ impl RowContext {
 /// Bound `$n` parameters are still honored.
 pub fn eval_expr(expr: &Expr, params: &[Value]) -> anyhow::Result<Value> {
     RowContext::empty().with_params(params.to_vec()).eval(expr)
+}
+
+/// Like `eval_expr`, but with `db` available — needed for a column DEFAULT
+/// like `nextval('seq')`, which is the one row-independent expression that
+/// still needs write access to the database.
+pub fn eval_expr_with_db(expr: &Expr, db: Arc<Database>, params: &[Value]) -> anyhow::Result<Value> {
+    let mut ctx = RowContext::empty().with_params(params.to_vec());
+    ctx.db = Some(db);
+    ctx.eval(expr)
 }
 
 pub fn is_aggregate_name(name: &str) -> bool {
@@ -775,6 +1002,10 @@ fn cast_value(v: Value, ty: &str) -> anyhow::Result<Value> {
             Value::Null => Ok(Value::Null),
             _ => anyhow::bail!("cannot cast {} to bool", v.type_name()),
         },
+        // `pg_dump` output routinely casts identifiers this way (e.g.
+        // `nextval('foo_id_seq'::regclass)`) — we have no real OID/regclass
+        // semantics, so just pass the text through unchanged.
+        "regclass" | "regproc" | "regtype" => Ok(Value::Text(val_to_text(&v))),
         _ => anyhow::bail!("unknown cast target type: {ty}"),
     }
 }

@@ -28,6 +28,20 @@ fn cell_text(cell: &Option<Vec<u8>>) -> String {
 }
 
 #[test]
+fn repeated_query_text_hits_the_shared_statement_cache() {
+    let (db, _b, _l) = test_db();
+    execute_query("SELECT 1", db.clone()).unwrap();
+    let (_, _, misses_after_first) = db.stmt_cache_stats();
+    assert_eq!(misses_after_first, 1);
+
+    execute_query("SELECT 1", db.clone()).unwrap();
+    let (entries, hits, misses) = db.stmt_cache_stats();
+    assert_eq!(entries, 1);
+    assert_eq!(misses, 1, "second identical query should be a cache hit, not another parse");
+    assert_eq!(hits, 1);
+}
+
+#[test]
 fn pg_tables_lists_created_table() {
     let (db, _b, _l) = test_db();
     db.create_table(

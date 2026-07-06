@@ -4,17 +4,24 @@ pub mod eval;
 mod planner;
 mod udf;
 #[cfg(test)]
+mod chronos_tests;
+#[cfg(test)]
+mod geo_tests;
+#[cfg(test)]
 mod phase4_tests;
+#[cfg(test)]
+mod pg_dump_tests;
+#[cfg(test)]
+mod plexus_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::sql;
-use crate::sql::ast::{BinOp, Expr, FrameBound, FrameBoundType, InList, Join, JoinType, Projection, SelectStmt, Stmt, TableRef, UnionOp};
+use crate::sql::ast::{BinOp, Expr, FrameBound, FrameBoundType, InList, Join, JoinType, Literal, Projection, SelectStmt, Stmt, TableRef, UnOp, UnionOp};
 use crate::storage::database::Database;
-use crate::storage::{ColumnDef, ColumnType, StorageEngine, TableSchema};
+use crate::storage::{ColumnDef, ColumnType, ForeignKey, StorageEngine, TableSchema};
 use crate::wire::messages::{FieldDescription, oid};
-use eval::{eval_expr, value_compare, OuterRow, RowContext, Value};
+use eval::{eval_expr, eval_expr_with_db, value_compare, OuterRow, RowContext, Value};
 
 /// The result of executing a query.
 pub struct QueryResult {
@@ -39,9 +46,13 @@ impl CteContext {
     }
 }
 
-/// Parse and execute a SQL statement, returning a QueryResult.
+/// Parse and execute a SQL statement, returning a QueryResult. Parsing goes
+/// through `Database`'s shared statement cache (`db.parse_cached`) so a
+/// repeated query text — even from a different connection — skips
+/// re-lexing/parsing.
 pub fn execute_query(sql_text: &str, db: Arc<Database>) -> anyhow::Result<QueryResult> {
-    execute_parsed(sql::parse(sql_text)?, db, &[])
+    let stmt = db.parse_cached(sql_text)?;
+    execute_parsed(stmt, db, &[])
 }
 
 /// Execute an already-parsed statement, with bound `$n` parameter values
@@ -56,6 +67,7 @@ pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow
         Stmt::DropTable(dt) => execute_drop_table(dt, db),
         Stmt::CreateIndex(ci) => execute_create_index(ci, db),
         Stmt::CreateFunction(cf) => execute_create_function(cf, db),
+        Stmt::CreateSequence(cs) => execute_create_sequence(cs, db),
         Stmt::Set(s) => {
             tracing::debug!("SET {} = {:?} (ignored)", s.name, s.value);
             Ok(QueryResult { fields: vec![], rows: vec![], tag: "SET".into() })
@@ -71,10 +83,7 @@ pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow
         Stmt::Begin => Ok(QueryResult { fields: vec![], rows: vec![], tag: "BEGIN".into() }),
         Stmt::Commit => Ok(QueryResult { fields: vec![], rows: vec![], tag: "COMMIT".into() }),
         Stmt::Rollback => Ok(QueryResult { fields: vec![], rows: vec![], tag: "ROLLBACK".into() }),
-        Stmt::AlterTable(_) => {
-            // TODO: Implement ALTER TABLE
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: "ALTER TABLE".into() })
-        }
+        Stmt::AlterTable(at) => execute_alter_table(at, db),
         Stmt::DeclareCursor(_) | Stmt::Fetch(_) | Stmt::MoveCursor(_) | Stmt::CloseCursor(_) => {
             anyhow::bail!("cursor statements are only supported over the simple query protocol")
         }
@@ -342,6 +351,9 @@ fn resolve_table_ref(
         let schema = schema_from_fields(&table.name, &result.fields);
         return Ok((Some(Arc::new(schema)), result.rows));
     }
+    if let Some(args) = &table.func_args {
+        return resolve_graph_function(&table.name, args, db, params);
+    }
     if let Some((rows, schema)) = cte_ctx.get(&table.name) {
         return Ok((Some(schema.clone()), rows.clone()));
     }
@@ -355,6 +367,128 @@ fn resolve_table_ref(
     Ok((schema_arc, parse_rows(&rows, &schema)))
 }
 
+/// Dispatch a table-valued function call in the FROM clause (`table.name`
+/// with `table.func_args` set — see `TableRef` docs) to one of the Plexus
+/// graph-traversal/algorithm entry points. Arguments are evaluated as
+/// constants (`eval_expr`, no row context), consistent with how `CREATE
+/// INDEX ... WITH (...)` options are constant-only elsewhere in this engine.
+fn resolve_graph_function(
+    name: &str,
+    args: &[Expr],
+    db: &Arc<Database>,
+    params: &[Value],
+) -> anyhow::Result<(Option<Arc<TableSchema>>, Vec<Vec<Option<Vec<u8>>>>)> {
+    use crate::graph::Direction;
+
+    let arg_val = |i: usize| -> anyhow::Result<Value> {
+        args.get(i).map(|e| eval_expr(e, params)).transpose()?
+            .ok_or_else(|| anyhow::anyhow!("{name}: missing argument {}", i + 1))
+    };
+    let arg_text = |i: usize| -> anyhow::Result<String> {
+        match arg_val(i)? {
+            Value::Text(s) => Ok(s),
+            Value::Int(n) => Ok(n.to_string()),
+            other => anyhow::bail!("{name}: expected text argument {}, got {}", i + 1, other.type_name()),
+        }
+    };
+    let arg_bytes = |i: usize| -> anyhow::Result<Vec<u8>> {
+        arg_val(i)?.to_wire_bytes().ok_or_else(|| anyhow::anyhow!("{name}: argument {} must not be NULL", i + 1))
+    };
+    let arg_usize_or = |i: usize, default: usize| -> anyhow::Result<usize> {
+        match args.get(i) { Some(e) => Ok(eval_expr(e, params)?.as_f64()? as usize), None => Ok(default) }
+    };
+    let arg_f64_or = |i: usize, default: f64| -> anyhow::Result<f64> {
+        match args.get(i) { Some(e) => eval_expr(e, params)?.as_f64(), None => Ok(default) }
+    };
+    let arg_direction_or = |i: usize, default: Direction| -> anyhow::Result<Direction> {
+        match args.get(i) {
+            Some(_) => {
+                let s = arg_text(i)?;
+                Direction::parse(&s).ok_or_else(|| anyhow::anyhow!("{name}: invalid direction \"{s}\" (expected out/in/both)"))
+            }
+            None => Ok(default),
+        }
+    };
+
+    fn func_schema(name: &str, cols: &[&str]) -> Arc<TableSchema> {
+        Arc::new(TableSchema {
+            name: name.to_string(),
+            columns: cols.iter().map(|c| ColumnDef { name: c.to_string(), col_type: ColumnType::Text, nullable: true, default: None, is_pk: false }).collect(),
+            pk_columns: vec![],
+            unique_groups: vec![],
+            foreign_keys: vec![],
+        })
+    }
+    fn cell(b: Vec<u8>) -> Option<Vec<u8>> { Some(b) }
+    fn opt_cell(s: Option<String>) -> Option<Vec<u8>> { s.map(|s| s.into_bytes()) }
+    fn num_cell(n: impl ToString) -> Option<Vec<u8>> { Some(n.to_string().into_bytes()) }
+
+    match name.to_ascii_lowercase().as_str() {
+        "graph_neighbors" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let key = arg_bytes(2)?;
+            let dir = arg_direction_or(3, Direction::Out)?;
+            let neighbors = db.graph_neighbors(&table, &from_col, &key, dir)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col} (or unknown vertex)"))?;
+            let rows = neighbors.into_iter().map(|(k, rel)| vec![cell(k), opt_cell(rel)]).collect();
+            Ok((Some(func_schema("graph_neighbors", &["neighbor", "rel_type"])), rows))
+        }
+        "graph_bfs" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let key = arg_bytes(2)?;
+            let max_depth = arg_usize_or(3, 10)?;
+            let dir = arg_direction_or(4, Direction::Out)?;
+            let visited = db.graph_bfs(&table, &from_col, &key, max_depth, dir)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col} (or unknown vertex)"))?;
+            let rows = visited.into_iter().map(|(k, depth)| vec![cell(k), num_cell(depth)]).collect();
+            Ok((Some(func_schema("graph_bfs", &["vertex", "depth"])), rows))
+        }
+        "graph_shortest_path" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let start = arg_bytes(2)?;
+            let end = arg_bytes(3)?;
+            let dir = arg_direction_or(4, Direction::Both)?;
+            let path = db.graph_shortest_path(&table, &from_col, &start, &end, dir)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col} (or unknown vertex)"))?;
+            let rows = match path {
+                Some(vertices) => vertices.into_iter().enumerate().map(|(i, k)| vec![num_cell(i), cell(k)]).collect(),
+                None => Vec::new(),
+            };
+            Ok((Some(func_schema("graph_shortest_path", &["step", "vertex"])), rows))
+        }
+        "graph_connected_components" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let comps = db.graph_connected_components(&table, &from_col)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col}"))?;
+            let rows = comps.into_iter().map(|(k, c)| vec![cell(k), num_cell(c)]).collect();
+            Ok((Some(func_schema("graph_connected_components", &["vertex", "component"])), rows))
+        }
+        "graph_pagerank" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let iterations = arg_usize_or(2, 20)?;
+            let damping = arg_f64_or(3, 0.85)?;
+            let ranks = db.graph_pagerank(&table, &from_col, damping, iterations)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col}"))?;
+            let rows = ranks.into_iter().map(|(k, r)| vec![cell(k), num_cell(r)]).collect();
+            Ok((Some(func_schema("graph_pagerank", &["vertex", "score"])), rows))
+        }
+        "graph_triangle_count" => {
+            let table = arg_text(0)?;
+            let from_col = arg_text(1)?;
+            let counts = db.graph_triangle_count(&table, &from_col)
+                .ok_or_else(|| anyhow::anyhow!("no graph index on {table}.{from_col}"))?;
+            let rows = counts.into_iter().map(|(k, c)| vec![cell(k), num_cell(c)]).collect();
+            Ok((Some(func_schema("graph_triangle_count", &["vertex", "triangles"])), rows))
+        }
+        other => anyhow::bail!("unknown table function \"{other}\""),
+    }
+}
+
 /// Build a schema for a derived table / CTE result from its RowDescription fields.
 fn schema_from_fields(name: &str, fields: &[FieldDescription]) -> TableSchema {
     let columns: Vec<ColumnDef> = fields.iter().map(|f| {
@@ -366,7 +500,7 @@ fn schema_from_fields(name: &str, fields: &[FieldDescription]) -> TableSchema {
         };
         ColumnDef { name: f.name.clone(), col_type, nullable: true, default: None, is_pk: false }
     }).collect();
-    TableSchema { name: name.to_string(), columns, pk_columns: vec![] }
+    TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] }
 }
 
 /// Combine two table schemas (in row-layout order) so joined columns are
@@ -376,7 +510,7 @@ fn merge_schema(left: &Option<Arc<TableSchema>>, right: &Option<Arc<TableSchema>
         (Some(l), Some(r)) => {
             let mut columns = l.columns.clone();
             columns.extend(r.columns.iter().cloned());
-            Some(Arc::new(TableSchema { name: format!("{}_{}", l.name, r.name), columns, pk_columns: vec![] }))
+            Some(Arc::new(TableSchema { name: format!("{}_{}", l.name, r.name), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] }))
         }
         (Some(l), None) => Some(l.clone()),
         (None, Some(r)) => Some(r.clone()),
@@ -457,7 +591,7 @@ fn cte_schema(cte: &crate::sql::ast::Cte, fields: &[FieldDescription]) -> Arc<Ta
             default: None,
             is_pk: false,
         }).collect();
-        Arc::new(TableSchema { name: cte.name.clone(), columns, pk_columns: vec![] })
+        Arc::new(TableSchema { name: cte.name.clone(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] })
     } else {
         Arc::new(schema_from_fields(&cte.name, fields))
     }
@@ -782,6 +916,70 @@ fn compute_window_value(
             let arg = if is_star { None } else { args.first() };
             eval::eval_aggregate(&fname, arg, false, &member_rows, &schema, &db)
         }
+        // Chronos: `interpolate(value)` — for a NULL `value` at this row,
+        // linearly interpolates between the nearest non-null values before
+        // and after it in partition/ORDER BY order (falls back to whichever
+        // single neighbor exists at a partition edge). Non-null values pass
+        // through unchanged. `gap_fill()` (materializing missing timestamp
+        // rows entirely) is a documented scope cut — see TODO.md — since it
+        // would need to insert rows into the result set, not just compute a
+        // per-row value like every other window function here.
+        "interpolate" => {
+            let arg = args.first().ok_or_else(|| anyhow::anyhow!("interpolate() requires 1 argument"))?;
+            let current = rows[order[i]].eval(arg)?;
+            if !matches!(current, Value::Null) {
+                return Ok(current);
+            }
+            let mut before: Option<(usize, f64)> = None;
+            for k in (part_start..i).rev() {
+                if let Ok(v) = rows[order[k]].eval(arg) {
+                    if let Ok(f) = v.as_f64() {
+                        before = Some((k, f));
+                        break;
+                    }
+                }
+            }
+            let mut after: Option<(usize, f64)> = None;
+            for k in (i + 1)..part_end {
+                if let Ok(v) = rows[order[k]].eval(arg) {
+                    if let Ok(f) = v.as_f64() {
+                        after = Some((k, f));
+                        break;
+                    }
+                }
+            }
+            match (before, after) {
+                (Some((bk, bv)), Some((ak, av))) => {
+                    let frac = (i - bk) as f64 / (ak - bk) as f64;
+                    Ok(Value::Float(bv + (av - bv) * frac))
+                }
+                (Some((_, bv)), None) => Ok(Value::Float(bv)),
+                (None, Some((_, av))) => Ok(Value::Float(av)),
+                (None, None) => Ok(Value::Null),
+            }
+        }
+        // Chronos: `moving_average(value, window_size)` — average of the
+        // trailing `window_size` rows (this row inclusive) in partition/
+        // ORDER BY order, clamped to the start of the partition. Defines
+        // its own frame from `window_size` rather than requiring the caller
+        // to spell out `ROWS BETWEEN n PRECEDING AND CURRENT ROW`.
+        "moving_average" => {
+            let value_arg = args.first().ok_or_else(|| anyhow::anyhow!("moving_average() requires 2 arguments (value, window_size)"))?;
+            let window_size = match args.get(1) {
+                Some(e) => match rows[order[i]].eval(e)? {
+                    Value::Int(n) => n.max(1) as usize,
+                    Value::Float(f) => (f as i64).max(1) as usize,
+                    _ => anyhow::bail!("moving_average() window_size must be an integer"),
+                },
+                None => anyhow::bail!("moving_average() requires 2 arguments (value, window_size)"),
+            };
+            let fs = part_start + pos.saturating_sub(window_size - 1);
+            let fe = i + 1;
+            let member_rows: Vec<Vec<Option<Vec<u8>>>> = order[fs..fe].iter().map(|&idx| rows[idx].values.clone()).collect();
+            let schema = rows[order[i]].schema.clone();
+            let db = rows[order[i]].db.clone();
+            eval::eval_aggregate("avg", Some(value_arg), false, &member_rows, &schema, &db)
+        }
         other => anyhow::bail!("window function \"{other}\" is not supported"),
     }
 }
@@ -855,19 +1053,98 @@ fn frame_offset_int(offset: &Option<Box<Expr>>) -> anyhow::Result<i64> {
     }
 }
 
+/// Serialize the small subset of expressions a column DEFAULT realistically
+/// needs (literals, `nextval('seq')`-style function calls, and `::type`
+/// casts like `pg_dump`'s `nextval(...)::regclass`) back to SQL text, so it
+/// can be persisted in `storage::ColumnDef.default: Option<String>` (which
+/// can't hold a parsed `Expr` directly — `Expr::Subquery` pulls in the
+/// entire `SelectStmt` type graph, which isn't `Serialize`) and re-parsed
+/// via `sql::parse_expr_text` at INSERT time. Anything more complex is a
+/// `CREATE TABLE`/`ALTER TABLE` error rather than a silently dropped default.
+fn default_expr_to_text(e: &Expr) -> anyhow::Result<String> {
+    match e {
+        Expr::Literal(Literal::Int(n)) => Ok(n.to_string()),
+        Expr::Literal(Literal::Float(f)) => Ok(f.to_string()),
+        Expr::Literal(Literal::Text(s)) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        Expr::Literal(Literal::Bool(b)) => Ok(b.to_string()),
+        Expr::Literal(Literal::Null) => Ok("NULL".to_string()),
+        Expr::UnaryOp { op: UnOp::Neg, expr } => Ok(format!("-{}", default_expr_to_text(expr)?)),
+        Expr::Function { name, args, .. } => {
+            let arg_texts: Vec<String> = args.iter().map(default_expr_to_text).collect::<anyhow::Result<_>>()?;
+            Ok(format!("{name}({})", arg_texts.join(", ")))
+        }
+        Expr::Cast { expr, ty } => Ok(format!("{}::{}", default_expr_to_text(expr)?, ty)),
+        other => anyhow::bail!(
+            "DEFAULT expression too complex to persist in this version (supported: literals, nextval()-style function calls): {other:?}"
+        ),
+    }
+}
+
+/// Resolve a table-level constraint's column-name list to indices into
+/// `columns` (in declared position order), for `TableSchema.unique_groups`.
+fn resolve_column_indices(columns: &[ColumnDef], names: &[String]) -> anyhow::Result<Vec<usize>> {
+    names.iter().map(|n| {
+        columns.iter().position(|c| &c.name == n).ok_or_else(|| anyhow::anyhow!("column \"{n}\" does not exist"))
+    }).collect()
+}
+
 fn execute_create_table(ct: crate::sql::ast::CreateTableStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
-    let columns: Vec<ColumnDef> = ct.columns.iter().map(|c| {
+    let mut columns: Vec<ColumnDef> = Vec::with_capacity(ct.columns.len());
+    let mut unique_groups: Vec<Vec<usize>> = Vec::new();
+    let mut foreign_keys: Vec<ForeignKey> = Vec::new();
+    // (column index, sequence name) for SERIAL columns — the sequence is
+    // created after the table so its implicit default can name it.
+    let mut serial_columns: Vec<(usize, String)> = Vec::new();
+
+    for (i, c) in ct.columns.iter().enumerate() {
         let col_type = ColumnType::from_name(&c.col_type).unwrap_or(ColumnType::Text);
-        ColumnDef {
+        let default = c.default.as_ref().map(default_expr_to_text).transpose()?;
+
+        if c.is_unique {
+            unique_groups.push(vec![i]);
+        }
+        if let Some((ref_table, ref_column)) = &c.references {
+            foreign_keys.push(ForeignKey { column: i, ref_table: ref_table.clone(), ref_column: ref_column.clone() });
+        }
+        if c.is_serial {
+            serial_columns.push((i, format!("{}_{}_seq", ct.table, c.name)));
+        }
+
+        columns.push(ColumnDef {
             name: c.name.clone(),
             col_type,
             nullable: c.nullable,
-            default: None,
+            default,
             is_pk: c.is_pk,
-        }
-    }).collect();
+        });
+    }
 
-    db.create_table(&ct.table, &columns)?;
+    for constraint in &ct.table_constraints {
+        match constraint {
+            crate::sql::ast::TableConstraint::Unique(names) => {
+                unique_groups.push(resolve_column_indices(&columns, names)?);
+            }
+            crate::sql::ast::TableConstraint::ForeignKey { column, ref_table, ref_column } => {
+                let idx = resolve_column_indices(&columns, std::slice::from_ref(column))?[0];
+                foreign_keys.push(ForeignKey { column: idx, ref_table: ref_table.clone(), ref_column: ref_column.clone() });
+            }
+        }
+    }
+
+    db.create_table_with_constraints(&ct.table, &columns, unique_groups, foreign_keys)?;
+
+    if !serial_columns.is_empty() {
+        for (idx, seq_name) in serial_columns {
+            db.create_sequence(&seq_name, 1, 1)?;
+            columns[idx].default = Some(format!("nextval('{seq_name}')"));
+        }
+        // Re-persist with the implicit SERIAL defaults now that the backing
+        // sequences exist (create_table_with_constraints already wrote the
+        // pre-SERIAL-default version).
+        let schema = db.get_table(&ct.table)?.expect("just created");
+        db.update_table_schema(TableSchema { columns, ..schema })?;
+    }
+
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE TABLE".into() })
 }
 
@@ -877,8 +1154,85 @@ fn execute_drop_table(_dt: crate::sql::ast::DropTableStmt, _db: Arc<Database>) -
 }
 
 fn execute_create_index(ci: crate::sql::ast::CreateIndexStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
-    db.create_index(&ci.table, &ci.column)?;
+    match ci.using.as_deref() {
+        None => db.create_index(&ci.table, &ci.column)?,
+        Some(m) if m.eq_ignore_ascii_case("spatial") || m.eq_ignore_ascii_case("gist") => {
+            // 1km sizing hint: no SQL syntax yet to tune the underlying grid
+            // level per index, so pick a level that comfortably serves
+            // typical "within N meters" queries without either bucketing
+            // everything into one giant cell or fragmenting into millions.
+            const DEFAULT_SPATIAL_RADIUS_HINT_M: f64 = 1000.0;
+            db.create_spatial_index(&ci.table, &ci.column, DEFAULT_SPATIAL_RADIUS_HINT_M)?
+        }
+        Some(m) if m.eq_ignore_ascii_case("time") || m.eq_ignore_ascii_case("chronos") => {
+            let opt = |key: &str| ci.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+            // Default 1-hour buckets — a reasonable middle ground between
+            // hourly/daily/monthly partitioning without requiring `interval`
+            // on every `CREATE INDEX ... USING TIME`.
+            let granularity_ms = match opt("interval") {
+                Some(s) => eval::parse_interval(s).ok_or_else(|| anyhow::anyhow!("invalid interval {s:?}"))?,
+                None => 3_600_000,
+            };
+            let retention_ms = match opt("retention") {
+                Some(s) => Some(eval::parse_interval(s).ok_or_else(|| anyhow::anyhow!("invalid retention {s:?}"))?),
+                None => None,
+            };
+            let schema = db.get_table(&ci.table)?.ok_or_else(|| anyhow::anyhow!("table \"{}\" does not exist", ci.table))?;
+            let value_column = match opt("value") {
+                Some(v) => v.to_string(),
+                // No explicit `value` option: use the first numeric column
+                // that isn't the indexed timestamp column itself.
+                None => schema.columns.iter()
+                    .find(|c| c.name != ci.column && matches!(c.col_type, crate::storage::ColumnType::Int8 | crate::storage::ColumnType::Int4 | crate::storage::ColumnType::Int2 | crate::storage::ColumnType::Float8 | crate::storage::ColumnType::Float4))
+                    .map(|c| c.name.clone())
+                    .ok_or_else(|| anyhow::anyhow!("USING TIME requires a numeric value column; specify WITH (value = '<column>')"))?,
+            };
+            let policy = crate::storage::ts_index::TimeBucketPolicy { granularity_ms, retention_ms };
+            db.create_time_index(&ci.table, &ci.column, &value_column, policy)?
+        }
+        Some(m) if m.eq_ignore_ascii_case("graph") || m.eq_ignore_ascii_case("plexus") => {
+            let opt = |key: &str| ci.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+            let to_column = opt("to").ok_or_else(|| anyhow::anyhow!("USING GRAPH requires WITH (to = '<destination column>')"))?;
+            let type_column = opt("type");
+            db.create_graph_index(&ci.table, &ci.column, to_column, type_column)?
+        }
+        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS)"),
+    }
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE INDEX".into() })
+}
+
+fn execute_create_sequence(cs: crate::sql::ast::CreateSequenceStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
+    db.create_sequence(&cs.name, cs.start, cs.increment)?;
+    Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE SEQUENCE".into() })
+}
+
+/// Apply an `ALTER TABLE ... ALTER COLUMN ...` metadata-only action
+/// (`SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`) by mutating and
+/// re-persisting the schema. `ADD`/`DROP COLUMN` would need to backfill
+/// every existing row's encoding and are left as a pre-existing TODO.
+fn execute_alter_table(at: crate::sql::ast::AlterTableStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
+    use crate::sql::ast::{AlterTableAction, ColumnAction};
+    match at.action {
+        AlterTableAction::AlterColumn { name, action } => {
+            let mut schema = db.get_table(&at.table)?
+                .ok_or_else(|| anyhow::anyhow!("table \"{}\" does not exist", at.table))?;
+            let col = schema.columns.iter_mut().find(|c| c.name == name)
+                .ok_or_else(|| anyhow::anyhow!("column \"{name}\" does not exist"))?;
+            match action {
+                ColumnAction::SetDefault(expr) => col.default = Some(default_expr_to_text(&expr)?),
+                ColumnAction::DropDefault => col.default = None,
+                ColumnAction::SetNotNull => col.nullable = false,
+                ColumnAction::DropNotNull => col.nullable = true,
+            }
+            db.update_table_schema(schema)?;
+        }
+        AlterTableAction::AddColumn(_) | AlterTableAction::DropColumn(_) => {
+            // Pre-existing gap (row width/encoding change needs a backfill
+            // pass this version doesn't implement) — accepted syntactically,
+            // no-op, same as before this change.
+        }
+    }
+    Ok(QueryResult { fields: vec![], rows: vec![], tag: "ALTER TABLE".into() })
 }
 
 /// Resolve a `CREATE FUNCTION` type name to the restricted set of types
@@ -918,30 +1272,139 @@ fn execute_create_function(cf: crate::sql::ast::CreateFunctionStmt, db: Arc<Data
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE FUNCTION".into() })
 }
 
+/// Resolve one `VALUES (...)` row (positional or via an explicit column
+/// list) to a full-width, schema-ordered row of already wire-encoded cells,
+/// filling any column not mentioned in `insert_columns` from its DEFAULT
+/// (re-parsed from `ColumnDef.default`'s persisted text — see
+/// `default_expr_to_text`) or `NULL` if nullable, erroring on a NOT NULL
+/// column with neither a provided value nor a default.
+fn resolve_insert_row(
+    schema: &TableSchema,
+    insert_columns: &[String],
+    row_values: &[Expr],
+    db: &Arc<Database>,
+    params: &[Value],
+) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+    let mut cells: Vec<Option<Vec<u8>>> = vec![None; schema.columns.len()];
+    let mut provided = vec![false; schema.columns.len()];
+
+    if insert_columns.is_empty() {
+        if row_values.len() != schema.columns.len() {
+            anyhow::bail!(
+                "INSERT has {} value(s) but table \"{}\" has {} column(s)",
+                row_values.len(), schema.name, schema.columns.len()
+            );
+        }
+        for (i, expr) in row_values.iter().enumerate() {
+            cells[i] = eval_expr_with_db(expr, db.clone(), params)?.to_wire_bytes();
+            provided[i] = true;
+        }
+    } else {
+        if insert_columns.len() != row_values.len() {
+            anyhow::bail!(
+                "INSERT column list has {} entries but VALUES has {}",
+                insert_columns.len(), row_values.len()
+            );
+        }
+        for (col_name, expr) in insert_columns.iter().zip(row_values) {
+            let idx = schema.columns.iter().position(|c| &c.name == col_name)
+                .ok_or_else(|| anyhow::anyhow!("column \"{col_name}\" does not exist"))?;
+            cells[idx] = eval_expr_with_db(expr, db.clone(), params)?.to_wire_bytes();
+            provided[idx] = true;
+        }
+    }
+
+    for (i, col) in schema.columns.iter().enumerate() {
+        if provided[i] {
+            continue;
+        }
+        if let Some(default_text) = &col.default {
+            let expr = crate::sql::parse_expr_text(default_text)?;
+            cells[i] = eval_expr_with_db(&expr, db.clone(), params)?.to_wire_bytes();
+        } else if !col.nullable {
+            anyhow::bail!("column \"{}\" is NOT NULL and has no default", col.name);
+        }
+    }
+
+    Ok(cells)
+}
+
+/// Reject `cells` if any `UNIQUE` group collides with an existing row
+/// (other than `exclude_key`, for `UPDATE`'s "don't compare a row against
+/// itself"). NULLs never participate in uniqueness (Postgres semantics).
+/// O(n) table scan per check — no index acceleration yet.
+fn check_unique_constraints(
+    schema: &TableSchema,
+    db: &Arc<Database>,
+    cells: &[Option<Vec<u8>>],
+    exclude_key: Option<&[u8]>,
+) -> anyhow::Result<()> {
+    if schema.unique_groups.is_empty() {
+        return Ok(());
+    }
+    let raw_rows = db.scan(&schema.name)?;
+    let existing = parse_rows(&raw_rows, &Some(schema.clone()));
+    for group in &schema.unique_groups {
+        if group.iter().any(|&i| cells.get(i).cloned().flatten().is_none()) {
+            continue;
+        }
+        for (kv, row) in raw_rows.iter().zip(existing.iter()) {
+            if exclude_key == Some(kv.key.as_slice()) {
+                continue;
+            }
+            if group.iter().all(|&i| row.get(i).cloned().flatten() == cells.get(i).cloned().flatten()) {
+                let cols: Vec<&str> = group.iter().map(|&i| schema.columns[i].name.as_str()).collect();
+                anyhow::bail!("duplicate value violates unique constraint on {}({})", schema.name, cols.join(", "));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject `cells` if any `FOREIGN KEY` column's value doesn't match an
+/// existing row in the referenced table. NULL FK values are exempt
+/// (Postgres semantics). `ON DELETE`/`ON UPDATE` actions and delete-time
+/// `RESTRICT` are not enforced — documented scope cut.
+fn check_foreign_keys(schema: &TableSchema, db: &Arc<Database>, cells: &[Option<Vec<u8>>]) -> anyhow::Result<()> {
+    for fk in &schema.foreign_keys {
+        let Some(val) = cells.get(fk.column).cloned().flatten() else { continue };
+        let ref_schema = db.get_table(&fk.ref_table)?
+            .ok_or_else(|| anyhow::anyhow!("referenced table \"{}\" does not exist", fk.ref_table))?;
+        let ref_idx = ref_schema.columns.iter().position(|c| c.name == fk.ref_column)
+            .ok_or_else(|| anyhow::anyhow!("referenced column \"{}\" does not exist", fk.ref_column))?;
+        let raw_rows = db.scan(&fk.ref_table)?;
+        let ref_rows = parse_rows(&raw_rows, &Some(ref_schema));
+        let exists = ref_rows.iter().any(|r| r.get(ref_idx).cloned().flatten().as_deref() == Some(val.as_slice()));
+        if !exists {
+            let col_name = &schema.columns[fk.column].name;
+            anyhow::bail!(
+                "insert or update on table \"{}\" violates foreign key constraint: no row in \"{}\" with {} = {:?}",
+                schema.name, fk.ref_table, fk.ref_column, String::from_utf8_lossy(&val)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
     let schema = db.get_table(&insert.table)?
         .ok_or_else(|| anyhow::anyhow!("table \"{}\" does not exist", insert.table))?;
 
     let mut row_count = 0usize;
     for row_values in &insert.values {
-        let pk_value = if !schema.pk_columns.is_empty() {
-            let pk_idx = schema.pk_columns[0];
-            let expr = &row_values[pk_idx.min(row_values.len() - 1)];
-            let val = eval_expr(expr, params)?;
-            val.to_wire_bytes().unwrap_or_default()
-        } else {
-            let val = eval_expr(&row_values[0], params)?;
-            val.to_wire_bytes().unwrap_or_default()
-        };
+        let cells = resolve_insert_row(&schema, &insert.columns, row_values, &db, params)?;
+        check_unique_constraints(&schema, &db, &cells, None)?;
+        check_foreign_keys(&schema, &db, &cells)?;
+
+        let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
+        let pk_value = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
 
         let mut value_buf = Vec::new();
-        for expr in row_values {
-            let val = eval_expr(expr, params)?;
-            let bytes = val.to_wire_bytes();
-            match bytes {
+        for cell in &cells {
+            match cell {
                 Some(data) => {
                     value_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    value_buf.extend_from_slice(&data);
+                    value_buf.extend_from_slice(data);
                 }
                 None => {
                     value_buf.extend_from_slice(&(-1i32).to_be_bytes());
@@ -1013,6 +1476,9 @@ fn execute_update(update: crate::sql::ast::UpdateStmt, db: Arc<Database>, params
             let val = ctx.eval(expr)?;
             new_row[idx] = val.to_wire_bytes();
         }
+
+        check_unique_constraints(&schema, &db, &new_row, Some(&kv.key))?;
+        check_foreign_keys(&schema, &db, &new_row)?;
 
         let mut value_buf = Vec::new();
         for cell in &new_row {

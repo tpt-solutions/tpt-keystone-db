@@ -24,6 +24,18 @@ pub enum Stmt {
     CopyIn(CopyStmt),
     CopyOut(CopyStmt),
     CreateFunction(CreateFunctionStmt),
+    CreateSequence(CreateSequenceStmt),
+}
+
+/// `CREATE SEQUENCE [IF NOT EXISTS] name [START [WITH] n] [INCREMENT [BY] n]`.
+/// Any trailing clauses real `pg_dump` output emits (`NO MINVALUE`,
+/// `CACHE 1`, `OWNED BY ...`, etc.) are tolerated by the parser but not
+/// modeled — sequences here are just a monotonic counter.
+#[derive(Debug, Clone)]
+pub struct CreateSequenceStmt {
+    pub name: String,
+    pub start: i64,
+    pub increment: i64,
 }
 
 /// `CREATE FUNCTION name(arg type, ...) RETURNS type LANGUAGE wasm AS '<base64>'`.
@@ -90,6 +102,18 @@ pub struct UpdateStmt {
 pub struct CreateTableStmt {
     pub table: String,
     pub columns: Vec<ColumnDef>,
+    pub table_constraints: Vec<TableConstraint>,
+}
+
+/// A table-level constraint, e.g. `UNIQUE (a, b)` or
+/// `FOREIGN KEY (a) REFERENCES other(b)`. Table-level `PRIMARY KEY (...)` is
+/// applied directly to the named columns' `is_pk` at parse time instead of
+/// being modeled here. Foreign keys are single-column only — composite FKs
+/// are a documented scope cut.
+#[derive(Debug, Clone)]
+pub enum TableConstraint {
+    Unique(Vec<String>),
+    ForeignKey { column: String, ref_table: String, ref_column: String },
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +123,13 @@ pub struct ColumnDef {
     pub nullable: bool,
     pub default: Option<Expr>,
     pub is_pk: bool,
+    pub is_unique: bool,
+    pub references: Option<(String, String)>, // (ref_table, ref_column)
+    /// `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` shorthand — `col_type` has already
+    /// been rewritten to the underlying integer type; this just tells
+    /// `execute_create_table` to also create a backing sequence and an
+    /// implicit `nextval(...)` default.
+    pub is_serial: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +143,17 @@ pub struct CreateIndexStmt {
     pub table: String,
     pub column: String,
     pub name: Option<String>,
+    /// `USING <method>` (e.g. `USING SPATIAL`/`USING GIST`/`USING TIME`) —
+    /// `None` means the default B-Tree. `SPATIAL`/`GIST` (aliased) select
+    /// Meridian's S2-inspired spatial index, `TIME`/`CHRONOS` (aliased)
+    /// select Chronos's time-bucketed index; any other method name is
+    /// rejected at execution time rather than silently falling back to
+    /// B-Tree.
+    pub using: Option<String>,
+    /// `WITH (key = 'value', ...)` — generic index options, e.g. Chronos's
+    /// `interval`/`retention`/`value` keys. Empty for a plain B-Tree/spatial
+    /// index.
+    pub options: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +221,14 @@ pub struct TableRef {
     /// Present for a derived table (`(SELECT ...) AS alias`) in the FROM
     /// clause or a JOIN. When set, `name` holds the required alias.
     pub subquery: Option<Box<SelectStmt>>,
+    /// Present for a table-valued function call in the FROM clause (e.g.
+    /// `graph_bfs('edges', 'from_id', '1', 3)`) — the Plexus graph-traversal
+    /// entry points are exposed this way rather than through a GQL `MATCH`
+    /// pattern grammar (not implemented, see `graph` module docs). When set,
+    /// `name` holds the function name and this holds its argument
+    /// expressions, evaluated as constants (no row/outer-query context) at
+    /// FROM-resolution time.
+    pub func_args: Option<Vec<Expr>>,
 }
 
 /// Represents a FROM clause with optional JOINs.

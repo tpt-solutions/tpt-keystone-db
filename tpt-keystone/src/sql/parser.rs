@@ -62,6 +62,7 @@ impl Parser {
             Token::Update => { self.advance(); self.parse_update() }
             Token::Create => { self.advance(); self.parse_create() }
             Token::Drop => { self.advance(); self.parse_drop() }
+            Token::Alter => { self.advance(); self.parse_alter_table() }
             Token::Set => { self.advance(); self.parse_set() }
             Token::Show => { self.advance(); self.parse_show() }
             Token::Begin => { self.advance(); Ok(Stmt::Begin) }
@@ -128,7 +129,7 @@ impl Parser {
 
     fn parse_insert(&mut self) -> anyhow::Result<Stmt> {
         self.expect(&Token::Into)?;
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
 
         let columns = if self.eat(&Token::LParen) {
             let mut cols = vec![self.parse_ident_string()?];
@@ -166,7 +167,7 @@ impl Parser {
 
     fn parse_delete(&mut self) -> anyhow::Result<Stmt> {
         self.expect(&Token::From)?;
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
         let where_ = if self.eat(&Token::Where) {
             Some(self.parse_expr(0)?)
         } else {
@@ -176,7 +177,7 @@ impl Parser {
     }
 
     fn parse_update(&mut self) -> anyhow::Result<Stmt> {
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
         self.expect(&Token::Set)?;
 
         let mut assignments = Vec::new();
@@ -203,7 +204,8 @@ impl Parser {
             Token::Table => { self.advance(); self.parse_create_table() }
             Token::Index => { self.advance(); self.parse_create_index() }
             Token::Function => { self.advance(); self.parse_create_function() }
-            other => anyhow::bail!("expected TABLE, INDEX, or FUNCTION after CREATE, got {:?}", other),
+            Token::Sequence => { self.advance(); self.parse_create_sequence() }
+            other => anyhow::bail!("expected TABLE, INDEX, FUNCTION, or SEQUENCE after CREATE, got {:?}", other),
         }
     }
 
@@ -242,15 +244,37 @@ impl Parser {
             false
         };
 
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
         self.expect(&Token::LParen)?;
 
-        let mut columns = Vec::new();
+        let mut columns: Vec<ColumnDef> = Vec::new();
+        let mut table_constraints = Vec::new();
+
         loop {
+            // A leading constraint keyword here means we've reached the
+            // table-constraint tail, not another column definition (matters
+            // when parsing e.g. `CREATE TABLE t (a int, PRIMARY KEY (a))`).
+            if matches!(self.peek(), Token::Primary | Token::Unique | Token::Foreign) {
+                break;
+            }
+
             let name = self.parse_ident_string()?;
-            let col_type = self.parse_ident_string()?;
+            let mut col_type = self.parse_ident_string()?;
             let mut nullable = true;
             let mut is_pk = false;
+            let mut is_unique = false;
+            let mut references = None;
+            let mut default = None;
+
+            let is_serial = matches!(col_type.to_lowercase().as_str(), "serial" | "bigserial" | "smallserial");
+            if is_serial {
+                col_type = match col_type.to_lowercase().as_str() {
+                    "smallserial" => "int2".to_string(),
+                    "bigserial" => "int8".to_string(),
+                    _ => "int4".to_string(),
+                };
+                nullable = false;
+            }
 
             loop {
                 match self.peek().clone() {
@@ -267,8 +291,17 @@ impl Parser {
                     Token::Null => { self.advance(); nullable = true; }
                     Token::Default => {
                         self.advance();
-                        let _default = self.parse_expr(0)?;
-                        break;
+                        default = Some(self.parse_expr(0)?);
+                    }
+                    Token::Unique => { self.advance(); is_unique = true; }
+                    Token::References => {
+                        self.advance();
+                        let ref_table = self.parse_object_name()?;
+                        self.expect(&Token::LParen)?;
+                        let ref_column = self.parse_ident_string()?;
+                        self.expect(&Token::RParen)?;
+                        references = Some((ref_table, ref_column));
+                        self.skip_referential_actions();
                     }
                     _ => break,
                 }
@@ -278,8 +311,11 @@ impl Parser {
                 name,
                 col_type,
                 nullable,
-                default: None,
+                default,
                 is_pk,
+                is_unique,
+                references,
+                is_serial,
             });
 
             if !self.eat(&Token::Comma) {
@@ -287,17 +323,189 @@ impl Parser {
             }
         }
 
-        // Skip remaining table constraints
+        // Table-level constraints.
         while !self.eat(&Token::RParen) {
             match self.peek().clone() {
-                Token::Primary => { self.advance(); self.expect(&Token::Key)?; self.expect(&Token::LParen)?; while !self.eat(&Token::RParen) { self.advance(); } }
+                Token::Primary => {
+                    self.advance();
+                    self.expect(&Token::Key)?;
+                    for col in self.parse_paren_ident_list()? {
+                        if let Some(c) = columns.iter_mut().find(|c| c.name == col) {
+                            c.is_pk = true;
+                            c.nullable = false;
+                        }
+                    }
+                }
+                Token::Unique => {
+                    self.advance();
+                    table_constraints.push(TableConstraint::Unique(self.parse_paren_ident_list()?));
+                }
+                Token::Foreign => {
+                    self.advance();
+                    self.expect(&Token::Key)?;
+                    let cols = self.parse_paren_ident_list()?;
+                    let column = cols.into_iter().next()
+                        .ok_or_else(|| anyhow::anyhow!("FOREIGN KEY requires at least one column"))?;
+                    self.expect(&Token::References)?;
+                    let ref_table = self.parse_object_name()?;
+                    self.expect(&Token::LParen)?;
+                    let ref_column = self.parse_ident_string()?;
+                    self.expect(&Token::RParen)?;
+                    self.skip_referential_actions();
+                    table_constraints.push(TableConstraint::ForeignKey { column, ref_table, ref_column });
+                }
                 Token::Comma => { self.advance(); }
                 Token::RParen => { break; }
+                // CHECK (...) and anything else unrecognized: skip a
+                // balanced-paren group if present, else one token at a time.
+                _ => {
+                    self.advance();
+                    if self.eat(&Token::LParen) {
+                        let mut depth = 1;
+                        while depth > 0 {
+                            match self.advance().clone() {
+                                Token::LParen => depth += 1,
+                                Token::RParen => depth -= 1,
+                                Token::Eof => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Stmt::CreateTable(CreateTableStmt { table, columns, table_constraints }))
+    }
+
+    /// `ALTER TABLE [ONLY] table ALTER [COLUMN] col SET DEFAULT expr |
+    /// DROP DEFAULT | SET NOT NULL | DROP NOT NULL`. `ADD`/`DROP COLUMN` are
+    /// accepted syntactically (consistent with the pre-existing
+    /// `AlterTableAction` AST shape) but — like before this change — not
+    /// actually applied by the executor, since altering row width safely
+    /// requires backfilling every existing row; only the column-metadata-only
+    /// actions (`SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`) are executed.
+    fn parse_alter_table(&mut self) -> anyhow::Result<Stmt> {
+        self.expect(&Token::Table)?;
+        if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("ONLY")) {
+            self.advance(); // tolerate pg_dump's `ALTER TABLE ONLY`
+        }
+        let table = self.parse_object_name()?;
+
+        let action = match self.peek().clone() {
+            Token::Ident(ref s) if s.eq_ignore_ascii_case("ADD") => {
+                self.advance();
+                self.eat(&Token::Column);
+                let name = self.parse_ident_string()?;
+                let col_type = self.parse_ident_string()?;
+                AlterTableAction::AddColumn(ColumnDef {
+                    name, col_type, nullable: true, default: None, is_pk: false,
+                    is_unique: false, references: None, is_serial: false,
+                })
+            }
+            Token::Drop => {
+                self.advance();
+                self.eat(&Token::Column);
+                AlterTableAction::DropColumn(self.parse_ident_string()?)
+            }
+            Token::Alter => {
+                self.advance();
+                self.eat(&Token::Column);
+                let name = self.parse_ident_string()?;
+                let is_set = if self.eat(&Token::Set) {
+                    true
+                } else {
+                    self.expect(&Token::Drop)?;
+                    false
+                };
+                let action = if is_set {
+                    if self.eat(&Token::Default) {
+                        ColumnAction::SetDefault(self.parse_expr(0)?)
+                    } else {
+                        self.expect(&Token::Not)?;
+                        self.expect(&Token::Null)?;
+                        ColumnAction::SetNotNull
+                    }
+                } else if self.eat(&Token::Default) {
+                    ColumnAction::DropDefault
+                } else {
+                    self.expect(&Token::Not)?;
+                    self.expect(&Token::Null)?;
+                    ColumnAction::DropNotNull
+                };
+                AlterTableAction::AlterColumn { name, action }
+            }
+            other => anyhow::bail!("expected ADD, DROP, or ALTER after ALTER TABLE {table}, got {:?}", other),
+        };
+
+        Ok(Stmt::AlterTable(AlterTableStmt { table, action }))
+    }
+
+    /// `(ident, ident, ...)`.
+    fn parse_paren_ident_list(&mut self) -> anyhow::Result<Vec<String>> {
+        self.expect(&Token::LParen)?;
+        let mut names = vec![self.parse_ident_string()?];
+        while self.eat(&Token::Comma) {
+            names.push(self.parse_ident_string()?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(names)
+    }
+
+    /// Consume (and ignore) a trailing `ON DELETE <action>` / `ON UPDATE
+    /// <action>` clause after `REFERENCES table(col)`, if present. The
+    /// action itself (CASCADE/RESTRICT/SET NULL/...) is not enforced.
+    fn skip_referential_actions(&mut self) {
+        while self.peek() == &Token::On {
+            self.advance(); // ON
+            self.advance(); // DELETE | UPDATE
+            // Action: CASCADE | RESTRICT | (SET NULL | SET DEFAULT) | (NO ACTION)
+            self.advance();
+            if matches!(self.peek(), Token::Null | Token::Default) {
+                self.advance();
+            }
+        }
+    }
+
+    /// `CREATE SEQUENCE [IF NOT EXISTS] name [START [WITH] n] [INCREMENT [BY] n]`,
+    /// tolerating (and ignoring) any further clauses real `pg_dump` output
+    /// emits (`NO MINVALUE`, `CACHE 1`, `OWNED BY ...`, etc.) up to the
+    /// statement terminator.
+    fn parse_create_sequence(&mut self) -> anyhow::Result<Stmt> {
+        if self.peek() == &Token::If && self.peek2() == &Token::Not {
+            self.advance(); self.advance();
+            self.expect(&Token::Exists)?;
+        }
+        let name = self.parse_object_name()?;
+        let mut start = 1i64;
+        let mut increment = 1i64;
+
+        loop {
+            match self.peek().clone() {
+                Token::Start => {
+                    self.advance();
+                    self.eat(&Token::With);
+                    start = self.parse_signed_int()?;
+                }
+                Token::Increment => {
+                    self.advance();
+                    self.eat(&Token::By);
+                    increment = self.parse_signed_int()?;
+                }
+                Token::Semicolon | Token::Eof => break,
                 _ => { self.advance(); }
             }
         }
 
-        Ok(Stmt::CreateTable(CreateTableStmt { table, columns }))
+        Ok(Stmt::CreateSequence(CreateSequenceStmt { name, start, increment }))
+    }
+
+    fn parse_signed_int(&mut self) -> anyhow::Result<i64> {
+        let neg = self.eat(&Token::Minus);
+        match self.advance().clone() {
+            Token::IntLiteral(n) => Ok(if neg { -n } else { n }),
+            other => anyhow::bail!("expected integer, got {:?}", other),
+        }
     }
 
     fn parse_drop(&mut self) -> anyhow::Result<Stmt> {
@@ -306,7 +514,7 @@ impl Parser {
                 self.advance();
                 let if_exists = self.peek() == &Token::If && self.peek2() == &Token::Exists;
                 if if_exists { self.advance(); self.advance(); }
-                let table = self.parse_ident_string()?;
+                let table = self.parse_object_name()?;
                 Ok(Stmt::DropTable(DropTableStmt { table, if_exists }))
             }
             Token::Index => {
@@ -325,11 +533,49 @@ impl Parser {
             Some(self.parse_ident_string()?)
         };
         self.expect(&Token::On)?;
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
+        let using = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("USING")) {
+            self.advance();
+            Some(self.parse_ident_string()?)
+        } else {
+            None
+        };
         self.expect(&Token::LParen)?;
         let column = self.parse_ident_string()?;
         self.expect(&Token::RParen)?;
-        Ok(Stmt::CreateIndex(CreateIndexStmt { table, column, name: _name }))
+        let options = if self.eat(&Token::With) {
+            self.expect(&Token::LParen)?;
+            let mut opts = vec![self.parse_index_option()?];
+            while self.eat(&Token::Comma) {
+                opts.push(self.parse_index_option()?);
+            }
+            self.expect(&Token::RParen)?;
+            opts
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::CreateIndex(CreateIndexStmt { table, column, name: _name, using, options }))
+    }
+
+    /// One `key = 'value'` pair inside a `CREATE INDEX ... WITH (...)`
+    /// clause. The key is usually a plain identifier (`retention`, `value`),
+    /// but `interval` collides with the reserved `INTERVAL` keyword token
+    /// (and Plexus's `to`/`type` options with `TO`/`TYPE`), so those are
+    /// accepted too.
+    fn parse_index_option(&mut self) -> anyhow::Result<(String, String)> {
+        let key = match self.advance().clone() {
+            Token::Ident(s) => s,
+            Token::Interval => "interval".to_string(),
+            Token::To => "to".to_string(),
+            other => anyhow::bail!("expected an index option name, got {:?}", other),
+        };
+        self.expect(&Token::Eq)?;
+        let value = match self.advance().clone() {
+            Token::StringLiteral(s) => s,
+            Token::Ident(s) => s,
+            other => anyhow::bail!("expected a string literal for index option value, got {:?}", other),
+        };
+        Ok((key, value))
     }
 
     fn parse_select(&mut self) -> anyhow::Result<SelectStmt> {
@@ -434,17 +680,47 @@ impl Parser {
             self.expect(&Token::RParen)?;
             let alias = if self.eat(&Token::As) { self.parse_ident_string()? }
             else { self.parse_ident_string()? };
-            return Ok(TableRef { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(subquery)) });
+            return Ok(TableRef { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(subquery)), func_args: None });
         }
-        let mut name = self.parse_ident_string()?;
-        if self.eat(&Token::Dot) {
-            name.push('.');
-            name.push_str(&self.parse_ident_string()?);
+        let first = self.parse_ident_string()?;
+        // A table-valued function call (e.g. `graph_bfs('edges', 'from_id',
+        // '1', 3)`) — the Plexus graph-traversal SQL surface. Distinguished
+        // from a plain table name by an immediately-following `(`.
+        if self.peek() == &Token::LParen {
+            self.advance();
+            let mut args = Vec::new();
+            if self.peek() != &Token::RParen {
+                loop {
+                    args.push(self.parse_expr(0)?);
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&Token::RParen)?;
+            let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
+            else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
+            else { None };
+            return Ok(TableRef { name: first, alias, subquery: None, func_args: Some(args) });
         }
+        // Keep the dotted form only for the virtual catalog schemas
+        // (`executor::catalog` matches on it directly); a real table's
+        // schema qualifier (`public.foo`, as real `pg_dump` output writes)
+        // carries no information here — this engine has one implicit schema.
+        let name = if self.eat(&Token::Dot) {
+            let second = self.parse_ident_string()?;
+            if first.eq_ignore_ascii_case("pg_catalog") || first.eq_ignore_ascii_case("information_schema") {
+                format!("{first}.{second}")
+            } else {
+                second
+            }
+        } else {
+            first
+        };
         let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
         else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
         else { None };
-        Ok(TableRef { name, alias, subquery: None })
+        Ok(TableRef { name, alias, subquery: None, func_args: None })
     }
 
     fn parse_order_by_list(&mut self) -> anyhow::Result<Vec<OrderBy>> {
@@ -481,7 +757,7 @@ impl Parser {
 
     /// `COPY table [(cols)] FROM STDIN` / `COPY table [(cols)] TO STDOUT`.
     fn parse_copy(&mut self) -> anyhow::Result<Stmt> {
-        let table = self.parse_ident_string()?;
+        let table = self.parse_object_name()?;
         let columns = if self.eat(&Token::LParen) {
             let mut cols = vec![self.parse_ident_string()?];
             while self.eat(&Token::Comma) {
@@ -531,6 +807,19 @@ impl Parser {
         match self.advance().clone() {
             Token::Ident(s) => Ok(s),
             other => anyhow::bail!("expected identifier, got {:?}", other),
+        }
+    }
+
+    /// Parse a DDL/DML object name (table, sequence, ...), discarding a
+    /// leading schema qualifier (`public.foo` → `foo`) — this engine has
+    /// one implicit schema, but real `pg_dump` output schema-qualifies
+    /// almost everything.
+    fn parse_object_name(&mut self) -> anyhow::Result<String> {
+        let first = self.parse_ident_string()?;
+        if self.eat(&Token::Dot) {
+            self.parse_ident_string()
+        } else {
+            Ok(first)
         }
     }
 

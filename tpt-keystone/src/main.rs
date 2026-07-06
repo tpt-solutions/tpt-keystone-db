@@ -1,4 +1,7 @@
 mod executor;
+mod geo;
+mod graph;
+mod mcp;
 mod sql;
 mod storage;
 mod wire;
@@ -60,12 +63,46 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("TPT Keystone listening on {addr}");
 
+    // Admission control: every connection already shares this one `db`, so
+    // there's no per-connection backend resource to pool the way pgbouncer
+    // pools real Postgres backend processes — this just bounds concurrency,
+    // queuing new connections past the limit rather than erroring.
+    let connection_slots = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
+
+    // MCP (Model Context Protocol) server, alongside the Postgres listener —
+    // one request/response per connection, no admission-control semaphore
+    // needed since there's no long-lived per-connection state to bound.
+    // Overridable because 5433 is also a common alternate-Postgres port
+    // (e.g. Postgres.app), so a fixed default can collide with an unrelated
+    // service already on the host.
+    let mcp_addr = std::env::var("TPT_MCP_ADDR").unwrap_or_else(|_| "0.0.0.0:5433".to_string());
+    let mcp_listener = TcpListener::bind(&mcp_addr).await?;
+    info!("TPT Keystone MCP server listening on {mcp_addr}");
+    let mcp_db = db.clone();
+    let mcp_token = config.mcp_token.clone();
+    tokio::spawn(async move {
+        loop {
+            match mcp_listener.accept().await {
+                Ok((stream, peer)) => {
+                    let db = mcp_db.clone();
+                    let token = mcp_token.clone();
+                    tokio::spawn(async move {
+                        mcp::handle(stream, peer, db, token).await;
+                    });
+                }
+                Err(e) => error!(error = %e, "MCP listener accept failed"),
+            }
+        }
+    });
+
     loop {
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true)?;
         let db = db.clone();
+        let permit = connection_slots.clone().acquire_owned().await?;
         tokio::spawn(async move {
             wire::session::handle(stream, peer, db).await;
+            drop(permit);
         });
     }
 }

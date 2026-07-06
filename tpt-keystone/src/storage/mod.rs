@@ -1,7 +1,10 @@
 pub mod btree;
 pub mod cache;
+pub mod compress;
 pub mod config;
 pub mod database;
+pub mod geo_index;
+pub mod graph_index;
 pub mod lease;
 pub mod lsm;
 pub mod manifest;
@@ -11,6 +14,7 @@ pub mod objectstore;
 mod phase3_tests;
 pub mod sstable;
 pub mod tx;
+pub mod ts_index;
 pub mod wal;
 
 use anyhow::Result;
@@ -77,6 +81,13 @@ pub enum ColumnType {
     Date,
     Json,
     Bytea,
+    /// Meridian geospatial type. Stored on the wire/in cells as WKT text
+    /// (`Value::Text`) — see `geo::geometry` — so no new row-encoding path
+    /// is needed; this variant exists for DDL/catalog purposes (so
+    /// `\d table` and `pg_attribute` report it distinctly from `TEXT`) and
+    /// so the planner/eval layer can tell a geometry column from a plain
+    /// text one when deciding whether to build/use a spatial index.
+    Geometry,
 }
 
 impl ColumnType {
@@ -94,6 +105,10 @@ impl ColumnType {
             Self::Date => 1082,
             Self::Json => 114,
             Self::Bytea => 17,
+            // No real Postgres OID for a WKT-as-text geometry type; reuse
+            // TEXT's OID so wire clients that don't know GEOMETRY still
+            // render it as a plain string instead of erroring.
+            Self::Geometry => oid::TEXT,
         }
     }
 
@@ -110,9 +125,20 @@ impl ColumnType {
             "date" => Some(Self::Date),
             "json" | "jsonb" => Some(Self::Json),
             "bytea" | "blob" => Some(Self::Bytea),
+            "geometry" | "geography" | "point" => Some(Self::Geometry),
             _ => None,
         }
     }
+}
+
+/// A single-column foreign key: `columns[column]` must match some row's
+/// `ref_column` value in `ref_table`, or be NULL. Composite FKs are a
+/// documented scope cut.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForeignKey {
+    pub column: usize,
+    pub ref_table: String,
+    pub ref_column: String,
 }
 
 /// Schema for a single table.
@@ -121,6 +147,13 @@ pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnDef>,
     pub pk_columns: Vec<usize>, // indices into columns
+    /// One entry per `UNIQUE` constraint (single or composite); indices
+    /// into `columns`. Enforced by scanning the table on insert/update — no
+    /// index acceleration yet.
+    #[serde(default)]
+    pub unique_groups: Vec<Vec<usize>>,
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 impl TableSchema {
@@ -130,6 +163,28 @@ impl TableSchema {
     }
 
     /// Deserialize schema from bytes.
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// A named monotonic counter backing `SERIAL` columns and explicit
+/// `CREATE SEQUENCE`/`nextval`/`setval`. `currval` is intentionally *not*
+/// per-session here — it returns the sequence's current process-wide value,
+/// a documented simplification (true per-session `currval` would need
+/// session-scoped state threaded through query evaluation, which doesn't
+/// exist today).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sequence {
+    pub name: String,
+    pub value: i64,
+    pub increment: i64,
+}
+
+impl Sequence {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
     pub fn decode(data: &[u8]) -> Result<Self> {
         Ok(bincode::deserialize(data)?)
     }

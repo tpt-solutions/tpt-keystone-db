@@ -36,7 +36,7 @@ fn col(name: &str, ty: ColumnType) -> ColumnDef {
 }
 
 fn schema(name: &str, columns: Vec<ColumnDef>) -> Arc<TableSchema> {
-    Arc::new(TableSchema { name: name.to_string(), columns, pk_columns: vec![] })
+    Arc::new(TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] })
 }
 
 fn text(s: impl Into<String>) -> Option<Vec<u8>> {
@@ -75,6 +75,8 @@ pub fn resolve_virtual_table(name: &str, db: &Arc<Database>) -> Option<anyhow::R
         "pg_type" => Some(Ok(pg_type())),
         "pg_indexes" => Some(pg_indexes(db)),
         "pg_index" => Some(pg_index(db)),
+        "pg_constraint" => Some(pg_constraint(db)),
+        "pg_sequence" => Some(Ok(pg_sequence(db))),
         "tables" if is_information_schema(name) => Some(information_schema_tables(db)),
         "columns" if is_information_schema(name) => Some(information_schema_columns(db)),
         _ => None,
@@ -179,6 +181,7 @@ fn pg_type() -> VirtualTable {
         ("float8", ColumnType::Float8), ("float4", ColumnType::Float4), ("text", ColumnType::Text),
         ("bool", ColumnType::Bool), ("timestamp", ColumnType::Timestamp), ("date", ColumnType::Date),
         ("json", ColumnType::Json), ("bytea", ColumnType::Bytea),
+        ("geometry", ColumnType::Geometry),
     ];
     let rows = types.iter().map(|(name, ty)| vec![int(ty.oid()), text(*name)]).collect();
     (s, rows)
@@ -200,6 +203,11 @@ fn pg_indexes(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
             let indexdef = format!("CREATE INDEX {idx_name} ON {table} ({column})");
             vec![text("public"), text(table), text(idx_name), None, text(indexdef)]
         })
+        .chain(db.list_spatial_indexes().into_iter().map(|(table, column)| {
+            let idx_name = format!("{table}_{column}_idx");
+            let indexdef = format!("CREATE INDEX {idx_name} ON {table} USING SPATIAL ({column})");
+            vec![text("public"), text(table), text(idx_name), None, text(indexdef)]
+        }))
         .collect();
     Ok((s, rows))
 }
@@ -218,6 +226,65 @@ fn pg_index(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
         })
         .collect();
     Ok((s, rows))
+}
+
+/// One row per PK/UNIQUE/FK constraint across every table. `contype`
+/// follows Postgres's convention: `'p'` primary key, `'u'` unique,
+/// `'f'` foreign key. `confrelid`/`confkey` (the referenced table/column)
+/// are only meaningful for `'f'` rows.
+fn pg_constraint(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
+    let s = schema("pg_constraint", vec![
+        col("conname", ColumnType::Text),
+        col("contype", ColumnType::Text),
+        col("conrelid", ColumnType::Int4),
+        col("confrelid", ColumnType::Int4),
+    ]);
+    let mut rows = Vec::new();
+    for t in db.list_tables()? {
+        let Some(table_schema) = db.get_table(&t)? else { continue };
+        let relid = synthetic_oid(&t);
+        if !table_schema.pk_columns.is_empty() {
+            rows.push(vec![text(format!("{t}_pkey")), text("p"), int(relid), None]);
+        }
+        for group in &table_schema.unique_groups {
+            let cols: Vec<&str> = group.iter().map(|&i| table_schema.columns[i].name.as_str()).collect();
+            rows.push(vec![text(format!("{t}_{}_key", cols.join("_"))), text("u"), int(relid), None]);
+        }
+        for fk in &table_schema.foreign_keys {
+            let col_name = &table_schema.columns[fk.column].name;
+            rows.push(vec![
+                text(format!("{t}_{col_name}_fkey")),
+                text("f"),
+                int(relid),
+                int(synthetic_oid(&fk.ref_table)),
+            ]);
+        }
+    }
+    Ok((s, rows))
+}
+
+fn pg_sequence(db: &Arc<Database>) -> VirtualTable {
+    let s = schema("pg_sequence", vec![
+        col("seqrelid", ColumnType::Int4),
+        col("seqname", ColumnType::Text),
+        col("start_value", ColumnType::Int8),
+        col("increment_by", ColumnType::Int8),
+        col("last_value", ColumnType::Int8),
+    ]);
+    let rows = db
+        .list_sequences()
+        .into_iter()
+        .map(|seq| {
+            vec![
+                int(synthetic_oid(&seq.name)),
+                text(seq.name.clone()),
+                int(0), // start value isn't retained after creation — only the running counter is
+                Some(seq.increment.to_string().into_bytes()),
+                Some(seq.value.to_string().into_bytes()),
+            ]
+        })
+        .collect();
+    (s, rows)
 }
 
 fn information_schema_tables(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
@@ -277,5 +344,6 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Date => "date",
         ColumnType::Json => "json",
         ColumnType::Bytea => "bytea",
+        ColumnType::Geometry => "geometry",
     }
 }

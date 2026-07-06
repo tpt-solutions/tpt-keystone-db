@@ -55,6 +55,16 @@ pub struct StorageConfig {
     /// local B-Tree indexes) — everything durable lives in the object store.
     pub local_dir: PathBuf,
     pub udf: UdfConfig,
+    /// Max concurrent client connections. Every connection already shares
+    /// one `Database`/one LSM engine (there's no per-connection backend
+    /// process to pool the way pgbouncer pools real Postgres backends), so
+    /// this is admission control/backpressure rather than resource pooling
+    /// — connections beyond the limit queue instead of erroring.
+    pub max_connections: usize,
+    /// Bearer token required on the `X-TPT-Token` header for the MCP server
+    /// (port 5433). Unset means no auth — matches the Postgres listener's
+    /// existing no-auth dev-mode default.
+    pub mcp_token: Option<String>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -99,6 +109,8 @@ impl StorageConfig {
                 fuel_limit: env::var("TPT_UDF_FUEL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().fuel_limit),
                 memory_limit_bytes: env::var("TPT_UDF_MEMORY_LIMIT_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().memory_limit_bytes),
             },
+            max_connections: env::var("TPT_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
+            mcp_token: env::var("TPT_MCP_TOKEN").ok(),
         }
     }
 

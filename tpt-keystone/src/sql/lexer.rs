@@ -20,6 +20,7 @@ pub enum Token {
     Listen, Notify, Unlisten,
     Copy, Stdin, Stdout, To,
     Function, Returns, Language,
+    Alter, Column, Unique, References, Foreign, Sequence, Increment, Start,
 
     // Identifiers
     Ident(String),
@@ -248,6 +249,9 @@ fn keyword_or_ident(s: &str) -> Token {
         "LISTEN" => Token::Listen, "NOTIFY" => Token::Notify, "UNLISTEN" => Token::Unlisten,
         "COPY" => Token::Copy, "STDIN" => Token::Stdin, "STDOUT" => Token::Stdout, "TO" => Token::To,
         "FUNCTION" => Token::Function, "RETURNS" => Token::Returns, "LANGUAGE" => Token::Language,
+        "ALTER" => Token::Alter, "COLUMN" => Token::Column, "UNIQUE" => Token::Unique,
+        "REFERENCES" => Token::References, "FOREIGN" => Token::Foreign, "SEQUENCE" => Token::Sequence,
+        "INCREMENT" => Token::Increment, "START" => Token::Start,
         _ => Token::Ident(s.to_string()),
     }
 }

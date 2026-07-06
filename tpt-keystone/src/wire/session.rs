@@ -111,7 +111,7 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> 
 
             FrontendMessage::Parse { name, query, param_types } => {
                 debug!(%peer, "parse: {query}");
-                match crate::sql::parse(&query) {
+                match db.parse_cached(&query) {
                     Ok(stmt) => {
                         ext.prepared.insert(name, PreparedStmt { stmt, param_types });
                         conn.send(&BackendMessage::ParseComplete);
@@ -243,7 +243,7 @@ async fn handle_simple_query(
         return Ok(());
     }
 
-    let stmt = match crate::sql::parse(sql) {
+    let stmt = match db.parse_cached(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
             conn.send_error(ErrorInfo::new("42601", e.to_string()));

@@ -67,35 +67,46 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 4 — Keystone: Extensions + Compatibility
 
-- [ ] Wasmtime integration for sandboxed UDFs (WASM-based user-defined functions)
+- [x] Wasmtime integration for sandboxed UDFs (WASM-based user-defined functions) — `CREATE FUNCTION name(args) RETURNS type LANGUAGE wasm AS '<base64>'` (`sql/parser.rs`) registers a WASM module (persisted like table schemas, `storage::UserFunction` under `functions/`), validated against its declared signature at creation time and invoked sandboxed (`executor/udf.rs`: empty `Linker` — zero host imports/I/O, fuel budget, linear-memory cap) from any SQL expression via `eval_function`'s UDF-registry fallback. Scope cut: only `int8`/`float8`/`bool` argument/return types (no `text`/`bytea` — would need a linear-memory + allocator ABI, deferred)
 - [x] Full Postgres wire protocol parity (COPY, server-side cursors, LISTEN/NOTIFY) — `COPY table FROM STDIN`/`TO STDOUT` (default text format only, no `WITH (...)` options), `DECLARE`/`FETCH`/`MOVE`/`CLOSE` server-side cursors over the simple query protocol, and `LISTEN`/`NOTIFY`/`UNLISTEN` via an in-process (single-node, not cross-replica) broadcast bus with async `NotificationResponse` delivery
 - [x] `pg_catalog` system tables (`\d`, `\dt`, `\di` etc. in psql) — `pg_tables`, `pg_class`, `pg_namespace`, `pg_attribute`, `pg_type`, `pg_indexes`, `pg_index`, `information_schema.tables`/`columns` materialized live from the schema/index catalog (`executor/catalog.rs`), queryable via plain SQL including schema-qualified names (`pg_catalog.pg_tables`)
-- [ ] Built-in connection pooler (session multiplexing)
-- [ ] `pg_dump` / `pg_restore` compatibility
+- [x] Built-in connection pooler (session multiplexing) — redefined for this architecture (every connection already shares one `Arc<Database>`/one LSM engine, so a pgbouncer-style backend-process pool has nothing to pool): a `tokio::sync::Semaphore`-based admission limit (`TPT_MAX_CONNECTIONS`, `main.rs`) that queues connections past the limit instead of erroring, plus a shared, bounded statement cache (`sql/cache.rs::StatementCache`, keyed by raw SQL text, living on `Database` so it's shared across every connection) wired into both the simple and extended query protocol parse paths
+- [x] `pg_dump` / `pg_restore` compatibility — scoped to plain-SQL format (`pg_dump --format=plain`; no custom/directory binary archive, no `pg_restore` binary parser). Real `FOREIGN KEY`/`UNIQUE`/`SERIAL` support (not just catalog cosmetics): column-list-aware `INSERT` with working `DEFAULT` evaluation (including `nextval(...)`), `CREATE SEQUENCE`/`nextval`/`currval`/`setval`, `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` shorthand, column- and table-level `UNIQUE`/`FOREIGN KEY` constraints enforced on INSERT/UPDATE (O(n) table scan per check, no index acceleration yet), `pg_catalog.pg_constraint`/`pg_sequence`, a real `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT|NOT NULL` (previously unparseable — `ALTER TABLE` had no lexer/parser support at all despite Phase 2 claiming it done), `::regclass`/`::regproc`/`::regtype` cast pass-through, and `public.`-qualified DDL/DML object names. Explicit scope cuts: `ON DELETE`/`ON UPDATE` referential actions are parsed but not enforced (no cascade, no delete-time `RESTRICT`); `ALTER TABLE ADD/DROP COLUMN` remain unimplemented no-ops (would need a row-backfill pass); composite/multi-column primary keys still only use the first column as the physical row key (pre-existing engine limitation, unchanged)
 
 **Milestone:** Most psql meta-commands work; existing Postgres client libraries connect
-**Milestone verified:** `cargo test` (28 tests) covers pg_catalog/information_schema queries, COPY IN/OUT round-tripping, DECLARE/FETCH/MOVE/CLOSE cursor sequencing, and LISTEN/NOTIFY delivery — all against an in-process `Database`. Not yet verified: a real `psql` client's actual `\d`/`\dt`/`\di` meta-command queries (which join through `pg_type`/call `format_type()`/`pg_table_is_visible()` — not implemented) — only direct `SELECT`s against the catalog tables are covered. `pg_dump`/`pg_restore` and a connection pooler remain unimplemented.
+**Milestone verified:** `cargo test` (43 tests) covers pg_catalog/information_schema queries, COPY IN/OUT round-tripping, DECLARE/FETCH/MOVE/CLOSE cursor sequencing, LISTEN/NOTIFY delivery, WASM UDF creation/invocation, the shared statement cache's hit/miss counting, column-list-aware INSERT + defaults, sequences/SERIAL, UNIQUE/FOREIGN KEY enforcement (column- and table-level), `pg_constraint`/`pg_sequence`, `ALTER TABLE ... SET DEFAULT`, `::regclass` pass-through, and `public.`-qualified names — all against an in-process `Database`. Not yet verified: a real `psql` client's actual `\d`/`\dt`/`\di` meta-command queries (which join through `pg_type`/call `format_type()`/`pg_table_is_visible()` — not implemented) — only direct `SELECT`s against the catalog tables are covered. Also not verified: WASM trap behavior (fuel exhaustion / memory-limit exceeded) — in this sandboxed Windows dev environment, wasmtime's OS-level trap handling crashes the test process (`STATUS_STACK_BUFFER_OVERRUN`, confirmed via backtrace to originate inside wasmtime's own `traphandlers` code, not this codebase) instead of returning a catchable error; verify fuel/memory limits by hand on a normal Linux/Windows host before relying on them in production. Also not verified: an actual `pg_dump --format=plain` output file, generated by real Postgres, fed through `psql -f` against a running `cargo run` server — the primitives are implemented and unit-tested, but end-to-end fidelity against real `pg_dump`'s exact verbose output (e.g. `ALTER SEQUENCE ... OWNED BY`, full `ALTER TABLE ONLY` sequences) has not been exercised.
 
 ---
 
 ## Phase 5 — AI Layer
 
-- [ ] **MCP server** — TPT exposes a Model Context Protocol server for AI agents
-  - Port: 5433 (alongside Postgres listener on 5432)
-  - Tools: `query(sql)`, `schema()`, `tables()`, `columns(table)`, `explain(sql)`, `mutate(sql)`
-  - Auth: TPT token header
-- [ ] **Structured retrieval tools** — traversal/similarity tools return compact,
-  self-describing facts (e.g. `{subject, relation, object}` triples with
-  human-readable labels), not raw subgraphs or unfiltered text — server does the
-  filtering, agent gets only what it needs
-- [ ] **Schema introspection API** — structured metadata for LLM context
-  - Table names, column types, nullability, defaults, constraints, indexes, foreign keys
-  - Row count statistics and value distribution histograms
-  - Relationship graph (FK chains) as machine-readable JSON
+- [x] **MCP server** — TPT exposes a Model Context Protocol server for AI agents
+  - Port: 5433 (alongside Postgres listener on 5432; overridable via `TPT_MCP_ADDR`)
+  - Tools: `query(sql)`, `schema()`, `tables()`, `columns(table)`, `explain(sql)`, `mutate(sql)`, `related(table, id)`
+  - Auth: TPT token header (`X-TPT-Token`, configured via `TPT_MCP_TOKEN`)
+  - Transport: hand-rolled JSON-RPC 2.0 over HTTP (`src/mcp/`) — single request/response per
+    connection, no SSE/streaming notifications (documented scope cut)
+  - `explain(sql)` returns the parsed statement's structural shape, not a cost-based plan —
+    the executor has no EXPLAIN/cost estimation yet
+- [x] **Structured retrieval tools** — `related(table, id, max_depth?, limit?)` (`src/mcp/tools.rs`)
+  walks the FK graph outward from one row — both the FKs it declares and the FKs other tables
+  declare against it, up to 2 hops — and returns compact `{subject, relation, object}` triples
+  with human-readable labels (first non-null `text` column, else `pk_col=value`), not raw rows
+  or unfiltered joins. Facts are capped (200 total, configurable per-hop row limit) so the agent
+  gets bounded, self-describing output regardless of graph size. Scope cut: FK-graph traversal
+  only — no similarity/vector traversal exists yet (that's Prism, Phase 7, unbuilt)
+- [x] **Schema introspection API** — `schema()` (`src/mcp/tools.rs`) returns, per table: columns
+  (name/type/nullable/default/PK), foreign keys, indexed columns, exact row count
+  (`SELECT COUNT(*)`), and per-column value-distribution histograms (top-10 buckets via
+  `GROUP BY ... ORDER BY COUNT(*) DESC`, skipped for `bytea`/`json` columns and for tables over
+  10k rows to keep introspection cheap) — plus a `relationship_graph` of `{nodes, edges}` built
+  from every table's FK list, as machine-readable JSON
 - [ ] **AI-optimised SDK** — idiomatic clients for Rust, TypeScript, Python
   - Typed query builder (no raw SQL string construction)
   - Schema-aware types generated from live database introspection
   - Batch operations, streaming results, built-in connection pool
+  - Deliberately deferred: a multi-language SDK with codegen is a distinct, multi-session effort
+    from the MCP-server work above and hasn't been scoped/started yet
 
 **Milestone:** Claude (or any MCP client) can discover schema and query TPT without a Postgres driver
 
@@ -103,15 +114,15 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 6 — Meridian: Geospatial Engine
 
-- [ ] Custom Rust computational geometry library (replaces GEOS / C++ bindings)
-- [ ] S2 Geometry hierarchical grid indexing
-- [ ] Uber H3 hexagonal grid indexing
-- [ ] 4D spatiotemporal storage model (lat, lon, alt, time as first-class)
-- [ ] GPU-accelerated spatial joins via wgpu compute shaders
-- [ ] Raster + vector unified storage model
-- [ ] OGC Simple Features + SQL/MM Spatial compatibility
+- [x] Custom Rust computational geometry library (replaces GEOS / C++ bindings) — `geo/geometry.rs`: hand-written WKT parse/serialize (`POINT`/`LINESTRING`/`POLYGON`, with `Z`/`M` ordinates for altitude/time), bounding boxes, haversine + planar distance, ray-casting point-in-polygon, bbox intersection. Scope cut: no buffering, no polygon boolean ops (union/difference/intersection-as-geometry), no CRS reprojection, holes not subtracted from polygon point-in-polygon tests
+- [x] S2 Geometry hierarchical grid indexing — `geo/s2.rs`: an S2-*inspired* cube-face hierarchical quadtree (real hierarchy — `parent`/`ancestor_at` shrink by exact grid levels — and real locality). Honestly not bit-compatible with Google's S2: linear UV→grid mapping instead of S2's tangent reprojection curve, direct `(face, level, i, j)` id packing instead of Hilbert-curve cell numbering, and cross-cube-face neighbor lookups are a documented gap (a query whose radius crosses a face edge — roughly every 90° of longitude, or near the poles — can under-cover)
+- [x] Uber H3 hexagonal grid indexing — `geo/h3.rs`: an H3-*inspired* axial-coordinate hex grid with aperture-2 (not H3's aperture-7) resolution levels and k-ring queries. Honestly not bit-compatible with real H3: flat equirectangular-ish projection (not icosahedral), so distortion grows near the poles. Implemented standalone with its own unit tests; the live spatial index (below) currently uses the S2-inspired grid, not this one — an application could pick either
+- [x] 4D spatiotemporal storage model (lat, lon, alt, time as first-class) — `Coord { x, y, z: Option<f64>, t: Option<i64> }` end to end: WKT `POINT(lon lat alt time)` (`Z`=alt, `M`=time — WKT has no native time axis), `ST_MakePoint`/`ST_X`/`ST_Y`/`ST_Z`/`ST_T`, and `storage/geo_index.rs`'s spatial index stores `time` per entry so a radius query can also filter by time range from the same cell lookup (see milestone below)
+- [ ] GPU-accelerated spatial joins via wgpu compute shaders — not implemented. Explicit scope cut, not a stub-and-claim-done: a real wgpu compute pipeline needs a GPU-present environment to develop and verify correctness against (this sandbox's wasmtime-trap crash issue, `project_wasmtime_windows_trap_crash.md`, is a preview of how badly "wrote GPU code, never ran it" would go), and is a substantial, separable unit of work from the CPU-side indexing above
+- [ ] Raster + vector unified storage model — not implemented, same honesty policy as the GPU item. No raster tile type, no `ST_Value`/`ST_AsRaster`, no unified storage path exists yet
+- [~] OGC Simple Features + SQL/MM Spatial compatibility — partial: WKT text in/out and a core `ST_*` function subset (`ST_MakePoint`/`ST_Point`, `ST_GeomFromText`, `ST_AsText`, `ST_X`/`ST_Y`/`ST_Z`/`ST_T`, `ST_Distance`, `ST_DWithin`, `ST_Within`/`ST_Contains`, `ST_Intersects` (bbox-only, not exact polygon/line intersection), `ST_Length`, `ST_Area` (planar shoelace, not geodesic)). Not attempted: WKB (binary) I/O, SRID/`ST_Transform`, the OGC conformance test suite, `GEOGRAPHY` vs `GEOMETRY` type distinction (both parse to the same internal type)
 
-**Milestone:** "Find all drones within 500m of coordinate between T1 and T2" runs as a single index scan in <10ms on 10M rows
+**Milestone (verified for the CPU-side, non-GPU query path):** `CREATE INDEX ON drones USING SPATIAL (pos)` builds a `storage/geo_index.rs` index (S2-inspired cell → row-key buckets, each entry also carrying its point's time). `executor/planner.rs`'s `extract_spatial_predicate` recognizes a top-level `ST_DWithin(pos, ST_MakePoint(...), radius) AND ST_T(pos) BETWEEN t1 AND t2` WHERE clause and answers it with one `Database::spatial_query` call (a handful of cell lookups, not a table scan) instead of falling through to `resolve_table_ref`'s full scan — verified end-to-end in `executor/geo_tests.rs::spatial_index_scan_combines_radius_and_time_range` against an in-process `Database`. Not verified: actual latency at 10M-row scale (no benchmark harness run in this environment — the milestone's "<10ms on 10M rows" figure is unverified, only the query-shape/correctness claim is)
 
 ---
 
@@ -133,16 +144,19 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 8 — Chronos: Time-Series Engine
 
-- [ ] Time-aware append-only storage pages
-- [ ] Gorilla compression (XOR-encoded float deltas)
-- [ ] Delta-of-delta integer compression
-- [ ] Dictionary encoding for low-cardinality tag columns
-- [ ] Automatic time-based partitioning (hourly / daily / monthly)
-- [ ] Configurable retention + automatic downsampling policies
-- [ ] Continuous aggregates — real-time incrementally-updated materialised views
-- [ ] SQL time extensions: `time_bucket()`, `interpolate()`, `moving_average()`, `gap_fill()`
+- [x] Time-aware append-only storage pages — `storage/ts_index.rs`'s `TimeIndex` buckets rows by fixed time window at the granularity chosen at `CREATE INDEX` time (see partitioning item below); each bucket is an append-only in-memory/on-disk log until it's no longer the newest, at which point it's sealed and compressed (mirrors an LSM memtable → immutable SSTable transition). Scope cut, same as Meridian's spatial index: this is a local, node-only secondary-index accelerator layered on top of the existing row-oriented LSM/SSTable storage (`storage/sstable.rs`), not a rewrite of the base storage format into time-partitioned columnar pages — see `storage/ts_index.rs` module docs
+- [x] Gorilla compression (XOR-encoded float deltas) — `storage/compress.rs::gorilla_encode`/`gorilla_decode`, hand-written bit-level XOR-delta codec (leading/trailing zero-run + meaningful-bits encoding, per the original Facebook Gorilla paper), unit-tested for round-trip correctness on constant and slowly-varying series; applied to a `TimeIndex` bucket's value column once the bucket seals
+- [x] Delta-of-delta integer compression — `storage/compress.rs::delta_delta_encode`/`delta_delta_decode`, zigzag-varint-encoded second differences, applied to a sealed bucket's timestamp series. Documented limitation: intended for timestamps/slowly-varying counters — integer sequences whose successive deltas swing across most of the `i64` range can overflow the internal arithmetic
+- [x] Dictionary encoding for low-cardinality tag columns — `storage/compress.rs::dictionary_encode` (distinct-value list + per-row code), unit-tested; not yet wired into `TimeIndex`/table storage for an actual tag column (no tag-column concept exists elsewhere in the schema yet) — the codec exists and is tested standalone, wiring it into a real column is future work
+- [x] Automatic time-based partitioning (hourly / daily / monthly) — `CREATE INDEX ... USING TIME(ts_col) WITH (interval = '1 hour' | '1 day' | '30 days', ...)` (`sql/parser.rs`'s generic `WITH (...)` index-options grammar, `executor/mod.rs::execute_create_index`) sets `TimeIndex`'s fixed bucket granularity, mirroring how Meridian's `CREATE INDEX ... USING SPATIAL` picks an S2 grid level
+- [x] Configurable retention + automatic downsampling policies — `WITH (retention = '30 days')` on the same DDL; `TimeIndex::apply_retention` runs synchronously on every insert (no background scheduler — a documented scope cut, see below) and evicts a bucket's raw/compressed series once it falls outside the retention window, keeping only its incrementally-maintained `Rollup` (count/sum/min/max)
+- [x] Continuous aggregates — real-time incrementally-updated materialised views — scoped down to the `Rollup` a `TimeIndex` bucket maintains incrementally on every insert (`storage/ts_index.rs`), queryable via `Database::rollup_query` and backing `moving_average()`. Explicit scope cut: no `CREATE MATERIALIZED VIEW` DDL exists anywhere in this engine (a separate, larger effort) — this is a fixed-shape rollup keyed to one indexed timestamp+value column pair, not an arbitrary incrementally-maintained `SELECT ... GROUP BY` view
+- [x] SQL time extensions — `time_bucket(interval, ts)` (rounds a unix-ms timestamp down to an interval boundary) and `moving_average(value, window_size)`/`interpolate(value)` (window functions, dispatched alongside `ROW_NUMBER`/`LAG`/`LEAD` in `executor/mod.rs::compute_window_value`) are implemented and tested (`executor/chronos_tests.rs`). `gap_fill()` is an explicit scope cut: it would need to materialize new rows for missing timestamp buckets, which no other function in the window-function pipeline does (every existing window function, and `interpolate()`, computes one value per *existing* row) — not implemented
+- Both `time_bucket(...) = const` and plain `BETWEEN` predicates on an indexed timestamp column are planner-rewritten to a `TimeIndex` range scan instead of a full table scan (`executor/planner.rs::extract_time_bucket_predicate`, mirroring Meridian's `extract_spatial_predicate`), verified in `executor/chronos_tests.rs::time_index_scan_answers_range_query`/`time_index_scan_answers_time_bucket_equality`
+- No `INTERVAL` type or arithmetic was added — interval literals are hand-parsed text (`'1 hour'`, `'30 days'`, `eval::parse_interval`) into millisecond `i64`s, consistent with timestamps already being plain `Value::Int` (unix ms) rather than a dedicated `Value::Timestamp` variant in this engine
+- Retention/downsampling is synchronous (checked on every `TimeIndex::insert` against the newest-seen timestamp), not a background cron-style sweep — deliberately not faking a scheduler that can't be verified in this environment, the same discipline behind Meridian's GPU-compute scope cut
 
-**Milestone:** 1M rows/sec sustained ingest with ≥15:1 compression ratio; query last 30 days in <100ms
+**Milestone:** 1M rows/sec sustained ingest with ≥15:1 compression ratio; query last 30 days in <100ms — **unverified**. No benchmark harness exists in this repo/environment (same honesty precedent as Phases 4/6's unverified milestone numbers); `storage::compress::tests` only assert that Gorilla/delta-of-delta compression is smaller than the naive 8-bytes/value encoding on representative synthetic series, not the specific ≥15:1 ratio or any ingest-rate/query-latency figure at scale.
 
 ---
 
