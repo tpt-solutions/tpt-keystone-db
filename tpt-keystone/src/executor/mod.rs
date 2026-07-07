@@ -4,7 +4,11 @@ pub mod eval;
 mod planner;
 mod udf;
 #[cfg(test)]
+mod canopy_tests;
+#[cfg(test)]
 mod chronos_tests;
+#[cfg(test)]
+mod flux_tests;
 #[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
@@ -57,7 +61,15 @@ pub fn execute_query(sql_text: &str, db: Arc<Database>) -> anyhow::Result<QueryR
 
 /// Execute an already-parsed statement, with bound `$n` parameter values
 /// (used by the extended query protocol's Bind/Execute).
+#[tracing::instrument(skip_all)]
 pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
+    let start = std::time::Instant::now();
+    let result = execute_parsed_inner(stmt, db, params);
+    crate::metrics::Metrics::global().record_query(start.elapsed(), result.is_err());
+    result
+}
+
+fn execute_parsed_inner(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
     match stmt {
         Stmt::Select(select) => execute_select_with_cte(select, db, &mut CteContext::new(), &[], params),
         Stmt::Insert(insert) => execute_insert(insert, db, params),
@@ -68,6 +80,7 @@ pub fn execute_parsed(stmt: Stmt, db: Arc<Database>, params: &[Value]) -> anyhow
         Stmt::CreateIndex(ci) => execute_create_index(ci, db),
         Stmt::CreateFunction(cf) => execute_create_function(cf, db),
         Stmt::CreateSequence(cs) => execute_create_sequence(cs, db),
+        Stmt::CreateTopic(ct) => execute_create_topic(ct, db),
         Stmt::Set(s) => {
             tracing::debug!("SET {} = {:?} (ignored)", s.name, s.value);
             Ok(QueryResult { fields: vec![], rows: vec![], tag: "SET".into() })
@@ -417,6 +430,7 @@ fn resolve_graph_function(
             pk_columns: vec![],
             unique_groups: vec![],
             foreign_keys: vec![],
+            json_schemas: vec![],
         })
     }
     fn cell(b: Vec<u8>) -> Option<Vec<u8>> { Some(b) }
@@ -485,6 +499,131 @@ fn resolve_graph_function(
             let rows = counts.into_iter().map(|(k, c)| vec![cell(k), num_cell(c)]).collect();
             Ok((Some(func_schema("graph_triangle_count", &["vertex", "triangles"])), rows))
         }
+        "json_path_lookup" => {
+            let table = arg_text(0)?;
+            let column = arg_text(1)?;
+            let value_text = arg_text(2)?;
+            let keys = db.json_path_lookup(&table, &column, &value_text)
+                .ok_or_else(|| anyhow::anyhow!("no JSONPATH index on {table}.{column}"))?;
+            let rows = keys.into_iter().map(|k| vec![cell(k)]).collect();
+            Ok((Some(func_schema("json_path_lookup", &["row_key"])), rows))
+        }
+        "json_text_search" => {
+            let table = arg_text(0)?;
+            let column = arg_text(1)?;
+            let query = arg_text(2)?;
+            let keys = db.fts_search(&table, &column, &query)
+                .ok_or_else(|| anyhow::anyhow!("no full-text index on {table}.{column}"))?;
+            let rows = keys.into_iter().map(|k| vec![cell(k)]).collect();
+            Ok((Some(func_schema("json_text_search", &["row_key"])), rows))
+        }
+        // --- Flux (Phase 11) ---------------------------------------------
+        "flux_time_travel" => {
+            let table = arg_text(0)?;
+            let cutoff_ms = arg_val(1)?.as_f64()? as i64;
+            let topic = format!("__cdc_{table}");
+            let records = db.flux_all(&topic, 0)
+                .ok_or_else(|| anyhow::anyhow!("no CDC events for table \"{table}\" (topic \"{topic}\" doesn't exist yet — insert/update/delete something first)"))?;
+            // Reconstructed state, `row_key` (hex-encoded, matching
+            // `publish_cdc_event`) -> the row's `after` JSON as of the last
+            // applicable event. A `BTreeMap` just for deterministic output
+            // ordering, not because row keys are ordered data.
+            let mut state: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+            for rec in &records {
+                let event: serde_json::Value = match serde_json::from_slice(&rec.value) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let ts = event.get("ts").and_then(|v| v.as_i64()).unwrap_or(i64::MAX);
+                if ts > cutoff_ms {
+                    continue;
+                }
+                let row_key = event.get("row_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if event.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                    state.remove(&row_key);
+                } else if let Some(after) = event.get("after") {
+                    state.insert(row_key, after.clone());
+                }
+            }
+            // Generic `(row_key, data)` shape rather than the live table
+            // schema: `after` is already a JSON object of column name ->
+            // text value (see `publish_cdc_event`), and the table's schema
+            // may itself have changed since the events being replayed were
+            // recorded, so re-serializing to JSON is the only shape that's
+            // always honest about what was actually captured.
+            let rows = state.into_iter()
+                .map(|(k, v)| vec![cell(k.into_bytes()), cell(v.to_string().into_bytes())])
+                .collect();
+            Ok((Some(func_schema("flux_time_travel", &["row_key", "data"])), rows))
+        }
+        "flux_window_tumbling" => {
+            let topic = arg_text(0)?;
+            let window_ms = arg_val(1)?.as_f64()? as i64;
+            anyhow::ensure!(window_ms > 0, "flux_window_tumbling: window_ms must be positive");
+            let n = db.flux_num_partitions(&topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+            anyhow::ensure!(n == 1, "flux_window_tumbling only supports single-partition topics (multi-partition merge not implemented — see storage::flux module docs)");
+            let records = db.flux_all(&topic, 0).unwrap_or_default();
+            let mut buckets: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
+            for rec in &records {
+                let start = rec.timestamp_ms.div_euclid(window_ms) * window_ms;
+                *buckets.entry(start).or_insert(0) += 1;
+            }
+            let rows = buckets.into_iter()
+                .map(|(start, count)| vec![num_cell(start), num_cell(start + window_ms), num_cell(count)])
+                .collect();
+            Ok((Some(func_schema("flux_window_tumbling", &["window_start", "window_end", "count"])), rows))
+        }
+        "flux_window_session" => {
+            let topic = arg_text(0)?;
+            let gap_ms = arg_val(1)?.as_f64()? as i64;
+            anyhow::ensure!(gap_ms > 0, "flux_window_session: gap_ms must be positive");
+            let n = db.flux_num_partitions(&topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+            anyhow::ensure!(n == 1, "flux_window_session only supports single-partition topics (multi-partition merge not implemented — see storage::flux module docs)");
+            let mut records = db.flux_all(&topic, 0).unwrap_or_default();
+            records.sort_by_key(|r| r.timestamp_ms);
+            let mut rows = Vec::new();
+            let mut current: Option<(i64, i64, u64)> = None; // (start, end, count)
+            for rec in &records {
+                current = Some(match current {
+                    Some((start, end, count)) if rec.timestamp_ms - end <= gap_ms => (start, rec.timestamp_ms, count + 1),
+                    Some((start, end, count)) => {
+                        rows.push(vec![num_cell(start), num_cell(end), num_cell(count)]);
+                        (rec.timestamp_ms, rec.timestamp_ms, 1)
+                    }
+                    None => (rec.timestamp_ms, rec.timestamp_ms, 1),
+                });
+            }
+            if let Some((start, end, count)) = current {
+                rows.push(vec![num_cell(start), num_cell(end), num_cell(count)]);
+            }
+            Ok((Some(func_schema("flux_window_session", &["window_start", "window_end", "count"])), rows))
+        }
+        "flux_window_sliding" => {
+            let topic = arg_text(0)?;
+            let window_size_ms = arg_val(1)?.as_f64()? as i64;
+            let slide_ms = arg_val(2)?.as_f64()? as i64;
+            anyhow::ensure!(window_size_ms > 0 && slide_ms > 0, "flux_window_sliding: window_size_ms and slide_ms must be positive");
+            let n = db.flux_num_partitions(&topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+            anyhow::ensure!(n == 1, "flux_window_sliding only supports single-partition topics (multi-partition merge not implemented — see storage::flux module docs)");
+            let records = db.flux_all(&topic, 0).unwrap_or_default();
+            let mut rows = Vec::new();
+            if let (Some(min_ts), Some(max_ts)) = (records.iter().map(|r| r.timestamp_ms).min(), records.iter().map(|r| r.timestamp_ms).max()) {
+                // One row per slide boundary >= the first record, each
+                // covering the trailing `[boundary - window_size_ms,
+                // boundary)` window — boundaries with zero records in range
+                // are skipped rather than emitted as empty rows.
+                let mut boundary = min_ts.div_euclid(slide_ms) * slide_ms + slide_ms;
+                while boundary - window_size_ms <= max_ts {
+                    let window_start = boundary - window_size_ms;
+                    let count = records.iter().filter(|r| r.timestamp_ms >= window_start && r.timestamp_ms < boundary).count() as u64;
+                    if count > 0 {
+                        rows.push(vec![num_cell(window_start), num_cell(boundary), num_cell(count)]);
+                    }
+                    boundary += slide_ms;
+                }
+            }
+            Ok((Some(func_schema("flux_window_sliding", &["window_start", "window_end", "count"])), rows))
+        }
         other => anyhow::bail!("unknown table function \"{other}\""),
     }
 }
@@ -500,7 +639,7 @@ fn schema_from_fields(name: &str, fields: &[FieldDescription]) -> TableSchema {
         };
         ColumnDef { name: f.name.clone(), col_type, nullable: true, default: None, is_pk: false }
     }).collect();
-    TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] }
+    TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![] }
 }
 
 /// Combine two table schemas (in row-layout order) so joined columns are
@@ -510,7 +649,7 @@ fn merge_schema(left: &Option<Arc<TableSchema>>, right: &Option<Arc<TableSchema>
         (Some(l), Some(r)) => {
             let mut columns = l.columns.clone();
             columns.extend(r.columns.iter().cloned());
-            Some(Arc::new(TableSchema { name: format!("{}_{}", l.name, r.name), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] }))
+            Some(Arc::new(TableSchema { name: format!("{}_{}", l.name, r.name), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![] }))
         }
         (Some(l), None) => Some(l.clone()),
         (None, Some(r)) => Some(r.clone()),
@@ -591,7 +730,7 @@ fn cte_schema(cte: &crate::sql::ast::Cte, fields: &[FieldDescription]) -> Arc<Ta
             default: None,
             is_pk: false,
         }).collect();
-        Arc::new(TableSchema { name: cte.name.clone(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] })
+        Arc::new(TableSchema { name: cte.name.clone(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![] })
     } else {
         Arc::new(schema_from_fields(&cte.name, fields))
     }
@@ -1133,6 +1272,25 @@ fn execute_create_table(ct: crate::sql::ast::CreateTableStmt, db: Arc<Database>)
 
     db.create_table_with_constraints(&ct.table, &columns, unique_groups, foreign_keys)?;
 
+    // Canopy (Phase 10): `WITH (json_schema_col = ..., json_schema = '...',
+    // json_schema_mode = 'strict' | 'relaxed' | 'off')` attaches a JSON
+    // Schema validation rule, enforced on INSERT/UPDATE by `validate_json_schemas`.
+    let opt = |key: &str| ct.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+    if let Some(col) = opt("json_schema_col") {
+        let schema_text = opt("json_schema")
+            .ok_or_else(|| anyhow::anyhow!("json_schema_col requires WITH (json_schema = '<json schema text>')"))?;
+        serde_json::from_str::<serde_json::Value>(schema_text)
+            .map_err(|e| anyhow::anyhow!("invalid json_schema: {e}"))?;
+        let mode = opt("json_schema_mode").unwrap_or("strict");
+        crate::storage::json_schema::Mode::parse(mode)
+            .ok_or_else(|| anyhow::anyhow!("invalid json_schema_mode \"{mode}\" (expected strict, relaxed, or off)"))?;
+        db.set_json_schema(&ct.table, crate::storage::JsonSchemaRule {
+            column: col.to_string(),
+            mode: mode.to_string(),
+            schema: schema_text.to_string(),
+        })?;
+    }
+
     if !serial_columns.is_empty() {
         for (idx, seq_name) in serial_columns {
             db.create_sequence(&seq_name, 1, 1)?;
@@ -1196,7 +1354,16 @@ fn execute_create_index(ci: crate::sql::ast::CreateIndexStmt, db: Arc<Database>)
             let type_column = opt("type");
             db.create_graph_index(&ci.table, &ci.column, to_column, type_column)?
         }
-        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS)"),
+        Some(m) if m.eq_ignore_ascii_case("jsonpath") => {
+            let opt = |key: &str| ci.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+            let json_path = opt("path")
+                .ok_or_else(|| anyhow::anyhow!("USING JSONPATH requires WITH (path = '<dot.separated.path>')"))?;
+            db.create_json_path_index(&ci.table, &ci.column, json_path)?
+        }
+        Some(m) if m.eq_ignore_ascii_case("gin") || m.eq_ignore_ascii_case("fts") => {
+            db.create_fts_index(&ci.table, &ci.column)?
+        }
+        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS)"),
     }
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE INDEX".into() })
 }
@@ -1204,6 +1371,32 @@ fn execute_create_index(ci: crate::sql::ast::CreateIndexStmt, db: Arc<Database>)
 fn execute_create_sequence(cs: crate::sql::ast::CreateSequenceStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
     db.create_sequence(&cs.name, cs.start, cs.increment)?;
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE SEQUENCE".into() })
+}
+
+/// `CREATE TOPIC name WITH (partitions = n, retention = '<interval>',
+/// retention_bytes = n)` (Flux). Mirrors `execute_create_index`'s structure:
+/// pull known keys out of the generic `options` list, parse durations via
+/// `eval::parse_interval` (same parser Chronos's `retention` index option
+/// uses), then call the one `Database` method that does the real work.
+fn execute_create_topic(ct: crate::sql::ast::CreateTopicStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
+    if ct.if_not_exists && db.list_topics().iter().any(|(name, _)| name == &ct.name) {
+        return Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE TOPIC".into() });
+    }
+    let opt = |key: &str| ct.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+    let partitions = match opt("partitions") {
+        Some(s) => s.parse::<u32>().map_err(|_| anyhow::anyhow!("invalid partitions value {s:?}"))?,
+        None => 1,
+    };
+    let retention_ms = match opt("retention") {
+        Some(s) => Some(eval::parse_interval(s).ok_or_else(|| anyhow::anyhow!("invalid retention {s:?}"))?),
+        None => None,
+    };
+    let retention_bytes = match opt("retention_bytes") {
+        Some(s) => Some(s.parse::<u64>().map_err(|_| anyhow::anyhow!("invalid retention_bytes value {s:?}"))?),
+        None => None,
+    };
+    db.create_topic(&ct.name, partitions, retention_ms, retention_bytes)?;
+    Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE TOPIC".into() })
 }
 
 /// Apply an `ALTER TABLE ... ALTER COLUMN ...` metadata-only action
@@ -1261,7 +1454,7 @@ fn execute_create_function(cf: crate::sql::ast::CreateFunctionStmt, db: Arc<Data
         .decode(cf.body_base64.trim())
         .map_err(|e| anyhow::anyhow!("CREATE FUNCTION body is not valid base64: {e}"))?;
 
-    udf::validate_module(&wasm_bytes, &cf.name, &arg_types, &return_type)?;
+    udf::validate_module(&wasm_bytes, &cf.name, &arg_types, &return_type, db.udf_config().max_module_bytes)?;
 
     db.create_function(crate::storage::UserFunction {
         name: cf.name,
@@ -1386,6 +1579,28 @@ fn check_foreign_keys(schema: &TableSchema, db: &Arc<Database>, cells: &[Option<
     Ok(())
 }
 
+/// Reject `cells` if any Canopy JSON Schema rule (`TableSchema::json_schemas`,
+/// set by `CREATE TABLE ... WITH (json_schema_col = ...)`) is violated. A
+/// NULL value in the validated column is exempt (nullability is enforced
+/// separately by the column's own `nullable` flag).
+fn check_json_schemas(schema: &TableSchema, cells: &[Option<Vec<u8>>]) -> anyhow::Result<()> {
+    for rule in &schema.json_schemas {
+        let Some(col_idx) = schema.columns.iter().position(|c| c.name == rule.column) else { continue };
+        let Some(Some(raw)) = cells.get(col_idx) else { continue };
+        let Ok(text) = String::from_utf8(raw.clone()) else { continue };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            anyhow::bail!("column \"{}\" is not valid JSON", rule.column);
+        };
+        let Ok(schema_doc) = serde_json::from_str::<serde_json::Value>(&rule.schema) else { continue };
+        let mode = crate::storage::json_schema::Mode::parse(&rule.mode).unwrap_or(crate::storage::json_schema::Mode::Strict);
+        let errors = crate::storage::json_schema::validate(&schema_doc, &doc, mode);
+        if !errors.is_empty() {
+            anyhow::bail!("json_schema validation failed for column \"{}\": {}", rule.column, errors.join("; "));
+        }
+    }
+    Ok(())
+}
+
 fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
     let schema = db.get_table(&insert.table)?
         .ok_or_else(|| anyhow::anyhow!("table \"{}\" does not exist", insert.table))?;
@@ -1395,6 +1610,7 @@ fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params
         let cells = resolve_insert_row(&schema, &insert.columns, row_values, &db, params)?;
         check_unique_constraints(&schema, &db, &cells, None)?;
         check_foreign_keys(&schema, &db, &cells)?;
+        check_json_schemas(&schema, &cells)?;
 
         let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
         let pk_value = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
@@ -1413,6 +1629,7 @@ fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params
         }
 
         db.write(&insert.table, &pk_value, &value_buf)?;
+        publish_cdc_event(&db, &insert.table, "insert", &pk_value, None, Some(&cells), &schema);
         row_count += 1;
     }
 
@@ -1421,6 +1638,47 @@ fn execute_insert(insert: crate::sql::ast::InsertStmt, db: Arc<Database>, params
         rows: vec![],
         tag: format!("INSERT 0 {row_count}"),
     })
+}
+
+/// Publish a CDC event to `__cdc_<table>` for every successful mutation
+/// (native Change Data Capture, Flux Phase 11) — unconditional, no opt-in
+/// flag. Column values are carried as their wire (Postgres text-format)
+/// representation, the same encoding already used for row storage, so
+/// `before`/`after` are JSON objects of column name -> JSON string (or JSON
+/// null), never typed JSON numbers/booleans. Best-effort: a publish failure
+/// is logged, not propagated — CDC must never fail the mutation it
+/// describes.
+fn publish_cdc_event(
+    db: &Arc<Database>,
+    table: &str,
+    op: &str,
+    row_key: &[u8],
+    before: Option<&[Option<Vec<u8>>]>,
+    after: Option<&[Option<Vec<u8>>]>,
+    schema: &TableSchema,
+) {
+    let cells_to_json = |cells: &[Option<Vec<u8>>]| -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (col, cell) in schema.columns.iter().zip(cells) {
+            let v = match cell {
+                Some(bytes) => serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned()),
+                None => serde_json::Value::Null,
+            };
+            obj.insert(col.name.clone(), v);
+        }
+        serde_json::Value::Object(obj)
+    };
+    let event = serde_json::json!({
+        "op": op,
+        "table": table,
+        "row_key": hex::encode(row_key),
+        "before": before.map(cells_to_json),
+        "after": after.map(cells_to_json),
+        "ts": crate::storage::flux::now_ms(),
+    });
+    if let Err(e) = db.flux_publish_cdc(table, event) {
+        tracing::warn!(table, error = %e, "failed to publish CDC event");
+    }
 }
 
 fn execute_delete(delete: crate::sql::ast::DeleteStmt, db: Arc<Database>, params: &[Value]) -> anyhow::Result<QueryResult> {
@@ -1440,6 +1698,9 @@ fn execute_delete(delete: crate::sql::ast::DeleteStmt, db: Arc<Database>, params
         };
         if matches {
             db.delete(&delete.table, &kv.key)?;
+            if let Some(schema) = &schema {
+                publish_cdc_event(&db, &delete.table, "delete", &kv.key, Some(row), None, schema);
+            }
             deleted += 1;
         }
     }
@@ -1479,6 +1740,7 @@ fn execute_update(update: crate::sql::ast::UpdateStmt, db: Arc<Database>, params
 
         check_unique_constraints(&schema, &db, &new_row, Some(&kv.key))?;
         check_foreign_keys(&schema, &db, &new_row)?;
+        check_json_schemas(&schema, &new_row)?;
 
         let mut value_buf = Vec::new();
         for cell in &new_row {
@@ -1491,6 +1753,7 @@ fn execute_update(update: crate::sql::ast::UpdateStmt, db: Arc<Database>, params
             }
         }
         db.write(&update.table, &kv.key, &value_buf)?;
+        publish_cdc_event(&db, &update.table, "update", &kv.key, Some(row), Some(&new_row), &schema);
         updated += 1;
     }
 

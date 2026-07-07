@@ -2,8 +2,10 @@ mod executor;
 mod geo;
 mod graph;
 mod mcp;
+mod metrics;
 mod sql;
 mod storage;
+mod telemetry;
 mod wire;
 
 use std::sync::Arc;
@@ -18,12 +20,7 @@ use storage::objectstore::ObjectStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    telemetry::init();
 
     let config = StorageConfig::from_env();
     info!(node_id = %config.node_id, role = ?config.role, backend = ?config.backend, "starting TPT Keystone compute node");
@@ -92,6 +89,39 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => error!(error = %e, "MCP listener accept failed"),
             }
+        }
+    });
+
+    // Flux (Phase 11) WebSocket streaming endpoint, alongside the Postgres
+    // and MCP listeners — same "own port, own accept loop" shape as MCP
+    // above. Overridable for the same reason `TPT_MCP_ADDR` is: a fixed
+    // default can collide with an unrelated service already on the host.
+    let flux_ws_addr = std::env::var("TPT_FLUX_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:5434".to_string());
+    let flux_ws_listener = TcpListener::bind(&flux_ws_addr).await?;
+    info!("TPT Keystone Flux WebSocket endpoint listening on {flux_ws_addr}");
+    let flux_ws_db = db.clone();
+    tokio::spawn(async move {
+        loop {
+            match flux_ws_listener.accept().await {
+                Ok((stream, peer)) => {
+                    let db = flux_ws_db.clone();
+                    tokio::spawn(async move {
+                        wire::websocket::handle(stream, peer, db).await;
+                    });
+                }
+                Err(e) => error!(error = %e, "Flux WebSocket listener accept failed"),
+            }
+        }
+    });
+
+    // Prometheus metrics endpoint (Phase 12 — production hardening). Its own
+    // port for the same reason MCP/Flux get their own: independent of the
+    // Postgres wire listener's connection-admission semaphore, since scrapes
+    // shouldn't queue behind client traffic.
+    let metrics_addr = std::env::var("TPT_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9187".to_string());
+    tokio::spawn(async move {
+        if let Err(e) = metrics::serve(&metrics_addr).await {
+            error!(error = %e, "metrics endpoint failed");
         }
     });
 

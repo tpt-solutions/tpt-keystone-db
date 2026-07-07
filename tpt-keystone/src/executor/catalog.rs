@@ -36,7 +36,7 @@ fn col(name: &str, ty: ColumnType) -> ColumnDef {
 }
 
 fn schema(name: &str, columns: Vec<ColumnDef>) -> Arc<TableSchema> {
-    Arc::new(TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![] })
+    Arc::new(TableSchema { name: name.to_string(), columns, pk_columns: vec![], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![] })
 }
 
 fn text(s: impl Into<String>) -> Option<Vec<u8>> {

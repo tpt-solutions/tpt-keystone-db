@@ -185,7 +185,7 @@ mod tests {
                 default: None,
                 is_pk: true,
             }],
-            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![],
+            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![],
         };
         assert!(target_columns(&schema, &["nope".to_string()]).is_err());
     }
@@ -198,7 +198,7 @@ mod tests {
                 ColumnDef { name: "a".into(), col_type: crate::storage::ColumnType::Int4, nullable: false, default: None, is_pk: true },
                 ColumnDef { name: "b".into(), col_type: crate::storage::ColumnType::Text, nullable: true, default: None, is_pk: false },
             ],
-            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![],
+            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![],
         };
         // COPY t (b, a) FROM STDIN — reversed order.
         let target = target_columns(&schema, &["b".to_string(), "a".to_string()]).unwrap();

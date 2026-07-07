@@ -452,8 +452,14 @@ impl RowContext {
             BinOp::Lte => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c <= 0))),
             BinOp::Gt => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c > 0))),
             BinOp::Gte => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c >= 0))),
-            BinOp::Arrow | BinOp::LongArrow => {
-                anyhow::bail!("JSON operators are not yet supported")
+            BinOp::Arrow => json_arrow(&l, &r, false),
+            BinOp::LongArrow => json_arrow(&l, &r, true),
+            BinOp::HashArrow => json_path_arrow(&l, &r, false),
+            BinOp::HashLongArrow => json_path_arrow(&l, &r, true),
+            BinOp::Contains => {
+                let a = json_of(&l)?;
+                let b = json_of(&r)?;
+                Ok(Value::Bool(json_contains(&a, &b)))
             }
             BinOp::And | BinOp::Or => unreachable!(),
         }
@@ -712,6 +718,95 @@ impl RowContext {
                 let ts = self.eval_timestamp_arg(&args[1], "time_bucket")?;
                 Ok(Value::Int(ts.div_euclid(interval_ms) * interval_ms))
             }
+            // Canopy (Phase 10): JSON/JSONB functions. `json_*`/`jsonb_*`
+            // names are accepted interchangeably — this engine has no
+            // separate binary-jsonb-vs-text-json distinction at the `Value`
+            // layer (see the module note above `json_of`).
+            "json_typeof" | "jsonb_typeof" => {
+                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_typeof() requires 1 argument"))?)?)?;
+                Ok(Value::Text(match doc {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => "object",
+                }.to_string()))
+            }
+            "json_valid" | "jsonb_valid" => {
+                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_valid() requires 1 argument"))?)?;
+                Ok(Value::Bool(match v {
+                    Value::Text(s) => serde_json::from_str::<serde_json::Value>(&s).is_ok(),
+                    Value::Null => true,
+                    _ => false,
+                }))
+            }
+            "json_array_length" | "jsonb_array_length" => {
+                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_array_length() requires 1 argument"))?)?)?;
+                match doc {
+                    serde_json::Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+                    _ => anyhow::bail!("json_array_length() requires a JSON array"),
+                }
+            }
+            "json_extract_path" | "jsonb_extract_path" | "json_extract_path_text" | "jsonb_extract_path_text" => {
+                let as_text = name.to_lowercase().ends_with("_text");
+                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires at least 1 argument"))?)?)?;
+                let mut path = Vec::with_capacity(args.len().saturating_sub(1));
+                for a in &args[1..] {
+                    match self.eval(a)? {
+                        Value::Text(s) => path.push(s),
+                        other => anyhow::bail!("{name}(): expected a text path segment, got {}", other.type_name()),
+                    }
+                }
+                Ok(json_to_value(json_at_path(&doc, &path), as_text))
+            }
+            "jsonb_set" | "json_set" => {
+                if args.len() < 3 || args.len() > 4 {
+                    anyhow::bail!("jsonb_set() requires 3 or 4 arguments (target, path, new_value, [create_missing])");
+                }
+                let mut doc = json_of(&self.eval(&args[0])?)?;
+                let path_text = match self.eval(&args[1])? {
+                    Value::Text(s) => s,
+                    other => anyhow::bail!("jsonb_set(): expected a '{{a,b,c}}' path literal, got {}", other.type_name()),
+                };
+                let new_value = json_of(&self.eval(&args[2])?)?;
+                let create_missing = match args.get(3) {
+                    Some(e) => self.eval(e)?.is_truthy(),
+                    None => true,
+                };
+                json_set_path(&mut doc, &parse_path_literal(&path_text), new_value, create_missing);
+                Ok(Value::Text(doc.to_string()))
+            }
+            "jsonb_contains" | "json_contains" => {
+                if args.len() != 2 {
+                    anyhow::bail!("jsonb_contains() requires 2 arguments");
+                }
+                let a = json_of(&self.eval(&args[0])?)?;
+                let b = json_of(&self.eval(&args[1])?)?;
+                Ok(Value::Bool(json_contains(&a, &b)))
+            }
+            "jsonb_build_object" | "json_build_object" => {
+                if args.len() % 2 != 0 {
+                    anyhow::bail!("{name}() requires an even number of arguments (key, value, ...)");
+                }
+                let mut map = serde_json::Map::new();
+                for pair in args.chunks(2) {
+                    let key = match self.eval(&pair[0])? {
+                        Value::Text(s) => s,
+                        other => anyhow::bail!("{name}(): expected a text key, got {}", other.type_name()),
+                    };
+                    map.insert(key, value_to_json(&self.eval(&pair[1])?));
+                }
+                Ok(Value::Text(serde_json::Value::Object(map).to_string()))
+            }
+            "jsonb_build_array" | "json_build_array" => {
+                let items: Vec<serde_json::Value> = args.iter().map(|a| Ok(value_to_json(&self.eval(a)?))).collect::<anyhow::Result<_>>()?;
+                Ok(Value::Text(serde_json::Value::Array(items).to_string()))
+            }
+            "to_json" | "to_jsonb" => {
+                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                Ok(Value::Text(value_to_json(&v).to_string()))
+            }
             other => {
                 let Some(db) = &self.db else {
                     anyhow::bail!("function \"{other}\" does not exist")
@@ -962,6 +1057,152 @@ pub fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
         (Value::Text(x), Value::Text(y)) => Ok(x.cmp(y) as i32),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y) as i32),
         _ => anyhow::bail!("incompatible types for comparison: {} vs {}", a.type_name(), b.type_name()),
+    }
+}
+
+// --- Canopy (Phase 10): JSON operators/functions --------------------------
+//
+// `Value` has no dedicated JSON variant (see its doc comment) — a `Json`
+// column's value is carried as `Value::Text` holding JSON text, exactly the
+// pattern `Geometry` already uses for WKT text. Every JSON operator/function
+// below parses that text with `serde_json` on demand and re-serializes the
+// result, rather than adding a new `Value` variant that would ripple through
+// `to_wire_bytes`/`type_oid`/every other `Value` match arm in this codebase.
+
+/// Parses a `Value::Text` (or `Value::Null`, which passes through as JSON
+/// `null`) as JSON. Any other `Value` variant is a type error — SQL never
+/// produces a "JSON int" or "JSON bool" `Value` on its own, only text that
+/// happens to parse as JSON.
+fn json_of(v: &Value) -> anyhow::Result<serde_json::Value> {
+    match v {
+        Value::Text(s) => serde_json::from_str(s).map_err(|e| anyhow::anyhow!("invalid JSON: {e}")),
+        Value::Null => Ok(serde_json::Value::Null),
+        other => anyhow::bail!("expected JSON (text), got {}", other.type_name()),
+    }
+}
+
+/// Converts a `serde_json::Value` back to a `Value` for the SQL layer.
+/// `as_text` mirrors `->` (`false`, JSON stays JSON — a string result keeps
+/// its quotes as re-serialized JSON text) vs `->>`/`#>>` (`true`, a string
+/// result is unwrapped to plain text, matching Postgres's `->>` semantics).
+fn json_to_value(j: &serde_json::Value, as_text: bool) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::String(s) if as_text => Value::Text(s.clone()),
+        other => Value::Text(other.to_string()),
+    }
+}
+
+/// Converts a SQL `Value` into the `serde_json::Value` it represents as a
+/// JSON scalar — used by `jsonb_build_object`/`jsonb_build_array`/`to_json`.
+/// `Value::Text` becomes a JSON *string* (not re-parsed as JSON) — the SQL
+/// caller passed a text value, not a JSON fragment.
+fn value_to_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(n) => serde_json::json!(n),
+        Value::Float(f) => serde_json::Number::from_f64(*f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+        Value::Text(s) => serde_json::Value::String(s.clone()),
+    }
+}
+
+/// `l -> r` / `l ->> r`: object-key or array-index lookup one level deep.
+fn json_arrow(l: &Value, r: &Value, as_text: bool) -> anyhow::Result<Value> {
+    let doc = json_of(l)?;
+    let sub = match r {
+        Value::Text(key) => doc.as_object().and_then(|o| o.get(key)).cloned(),
+        Value::Int(idx) => doc.as_array().and_then(|a| a.get(*idx as usize)).cloned(),
+        other => anyhow::bail!("invalid JSON key/index: {}", other.type_name()),
+    };
+    Ok(sub.map(|j| json_to_value(&j, as_text)).unwrap_or(Value::Null))
+}
+
+/// Parses a Postgres-style path literal (`'{a,b,c}'`) into its segments.
+/// Also tolerates a bare comma list without braces.
+fn parse_path_literal(s: &str) -> Vec<String> {
+    let s = s.trim();
+    let inner = s.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(s);
+    if inner.is_empty() {
+        Vec::new()
+    } else {
+        inner.split(',').map(|seg| seg.trim().to_string()).collect()
+    }
+}
+
+fn json_at_path<'a>(mut current: &'a serde_json::Value, path: &[String]) -> &'a serde_json::Value {
+    static NULL: serde_json::Value = serde_json::Value::Null;
+    for seg in path {
+        current = match current {
+            serde_json::Value::Object(o) => o.get(seg).unwrap_or(&NULL),
+            serde_json::Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)).unwrap_or(&NULL),
+            _ => &NULL,
+        };
+    }
+    current
+}
+
+/// `l #> r` / `l #>> r`: multi-segment path extraction, `r` a `'{a,b,c}'`
+/// path literal (the array-literal counterpart of `->`/`->>`'s single key).
+fn json_path_arrow(l: &Value, r: &Value, as_text: bool) -> anyhow::Result<Value> {
+    let doc = json_of(l)?;
+    let path_text = match r {
+        Value::Text(s) => s.clone(),
+        other => anyhow::bail!("expected a '{{a,b,c}}' path literal, got {}", other.type_name()),
+    };
+    let path = parse_path_literal(&path_text);
+    Ok(json_to_value(json_at_path(&doc, &path), as_text))
+}
+
+/// `l @> r`: JSONB containment — every key/value in `r` is present (and,
+/// recursively, contained) in `l`; every element of an array `r` is found
+/// somewhere in array `l`. Scalars must match exactly.
+fn json_contains(container: &serde_json::Value, contained: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Object};
+    match (container, contained) {
+        (Object(a), Object(b)) => b.iter().all(|(k, bv)| a.get(k).is_some_and(|av| json_contains(av, bv))),
+        (Array(a), Array(b)) => b.iter().all(|bv| a.iter().any(|av| json_contains(av, bv))),
+        (a, b) => a == b,
+    }
+}
+
+/// `jsonb_set(target, '{path}', new_value, [create_missing])`: returns a new
+/// document with the value at `path` replaced (or inserted, if
+/// `create_missing` — default `true` — and every ancestor along the path
+/// exists as an object/array).
+fn json_set_path(doc: &mut serde_json::Value, path: &[String], new_value: serde_json::Value, create_missing: bool) {
+    let Some((head, rest)) = path.split_first() else {
+        *doc = new_value;
+        return;
+    };
+    match doc {
+        serde_json::Value::Object(map) => {
+            if rest.is_empty() {
+                if create_missing || map.contains_key(head) {
+                    map.insert(head.clone(), new_value);
+                }
+            } else if let Some(sub) = map.get_mut(head) {
+                json_set_path(sub, rest, new_value, create_missing);
+            } else if create_missing {
+                let mut sub = serde_json::Value::Object(Default::default());
+                json_set_path(&mut sub, rest, new_value, create_missing);
+                map.insert(head.clone(), sub);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if let Ok(idx) = head.parse::<usize>() {
+                if rest.is_empty() {
+                    if idx < arr.len() {
+                        arr[idx] = new_value;
+                    } else if create_missing {
+                        arr.push(new_value);
+                    }
+                } else if let Some(sub) = arr.get_mut(idx) {
+                    json_set_path(sub, rest, new_value, create_missing);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

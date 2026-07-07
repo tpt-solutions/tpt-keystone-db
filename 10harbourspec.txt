@@ -6,7 +6,7 @@ What makes Harbor truly revolutionary is its Verification Engine. Migration tool
 Tech Stack:
 Core Migration Engine: Rust (for high-throughput, memory-safe bulk data transfer with zero-copy serialization).
 Orchestration: Go (for managing complex, multi-phase migration workflows, checkpointing, and resumability).
-Source Connectors: Native drivers for PostgreSQL (pgwire/WAL), MongoDB (oplog), MySQL (binlog), Neo4j (Bolt), InfluxDB (TSM), Kafka (consumer protocol), Pinecone/Weaviate/Qdrant (REST/gRPC), Elasticsearch (scroll API).
+Source Connectors: Native drivers for PostgreSQL (pgwire/WAL), MongoDB (oplog), MySQL (binlog), SQL Server (TDS/CDC), Neo4j (Bolt), InfluxDB (TSM), Kafka (consumer protocol), Pinecone/Weaviate/Qdrant (REST/gRPC), Elasticsearch (scroll API).
 CDC Engine: Custom WAL/oplog/binlog tailing for zero-downtime live replication with exactly-once delivery semantics.
 Verification Engine: Rust with parallel checksum computation (xxHash3), statistical distribution analysis, and query regression testing.
 Schema Translator: Rust with a rule-based AST transformation engine that maps source DDL to optimal Keystone/Canopy/Plexus/Chronos schemas.
@@ -27,6 +27,12 @@ Connects as a consumer group, reads all topics/partitions from the earliest offs
 Connects via REST/gRPC APIs, bulk-exports all vector collections including metadata, and writes them into Prism's native HNSW/IVF-PQ indexes. Crucially, it applies Prism's native quantization during the import, meaning the migrated vectors often use 50-75% less storage than the originals while maintaining recall within 1% of the source system.
 7. Harbor/GIS (PostGIS → Meridian)
 Operates as a specialized extension of Harbor/PG. It reads PostGIS geometry and geography columns, validates them against OGC standards, and imports them into Meridian's native S2/H3 hierarchical grid storage. It translates spatial indexes (GiST) into Meridian's distributed spatial partitions and converts PostGIS functions (ST_Contains, ST_Intersects, ST_DWithin) into Meridian's native equivalents.
+8. Harbor/MySQL (MySQL / MariaDB → Keystone)
+Connects via the MySQL protocol for bulk reads and tails the binlog for live replication. Translates MySQL's type quirks (TINYINT(1)-as-bool, ENUM, SET, unsigned integer variants) into their closest Keystone equivalents, and migrates indexes, foreign keys, and AUTO_INCREMENT columns onto Keystone sequences. Stored procedures and triggers get the same treatment as Harbor/PG's PL/pgSQL path, scoped down given MySQL procedural SQL's smaller surface area: automated translation where possible, a manual-review report for the rest.
+9. Harbor/Search (Elasticsearch → Canopy)
+Connects via the scroll API for bulk export of one or more indices. Infers a Canopy JSON Schema from each index's mapping (field types, nested objects, arrays), and translates analyzer/tokenizer configuration into Canopy's GIN/FTS index options — matching, not necessarily replicating exactly, the source's relevance scoring and tokenization behavior. Preserves document `_id`s and per-document `_source` as the migrated JSON payload.
+10. Harbor/MSSQL (SQL Server → Keystone)
+Connects via the TDS protocol for bulk reads, and uses Change Tracking or CDC tables for live replication (whichever the source database has enabled). Translates SQL Server types (`NVARCHAR`, `DATETIME2`, `UNIQUEIDENTIFIER`, etc.) and migrates indexes, foreign keys, and `IDENTITY` columns onto Keystone sequences. T-SQL stored procedures and functions go through the same transpile-or-flag-for-manual-review path as Harbor/PG and Harbor/MySQL.
 The Harbor Migration Lifecycle
 Every migration follows a rigorous, auditable lifecycle:
 Phase 1: DISCOVER
@@ -93,7 +99,7 @@ tpt-harbor cutover --plan migration-plan.yaml --drain-timeout 30s --rollback-on-
 Harbor's Role in the TPT Ecosystem
 Harbor is the adoption engine for the entire TPT stack. Without it, TPT Keystone is a beautiful database that nobody can practically adopt. With it, Keystone becomes a drop-in replacement that teams can migrate to incrementally, safely, and with full mathematical confidence.
 Harbor also serves a secondary purpose: it is the ultimate compatibility test. If Harbor can successfully migrate every Postgres schema, every MongoDB collection, and every Neo4j graph into Keystone without data loss, that is the strongest possible proof that Keystone's data model is truly universal. Every migration that succeeds is a validation of the architecture. Every edge case that Harbor encounters becomes a test case that makes Keystone more robust.
-In the TPT ecosystem, Harbor sits alongside TPT Chisel (which optimizes what you've already built) and TPT Harbor (which brings in everything you've built before). Together, they form a complete lifecycle: migrate in with Harbor, optimize with Chisel, run on Keystone, observe with Scope, and serve through Frontier—all unified, all open source, all Apache 2.0.
+Deeper integration with other tools in the broader ecosystem (optimization, observability, serving layers maintained in separate repos) is a secondary, nice-to-have consideration for later — not tracked as part of this roadmap.
 
 
 
@@ -119,7 +125,7 @@ Oracle has features that have no direct equivalent in open source: Materialized 
 Harbor's Solution:
 Materialized View Logs → TPT Chronos continuous aggregates with automatic refresh
 Advanced Queuing → TPT Flux native event streaming with Oracle AQ protocol compatibility
-VPD/FGAC → TPT Aegis row-level security policies with automatic policy translation
+VPD/FGAC → TPT's Zanzibar-style ReBAC + RBAC access-control layer, with automatic policy translation
 Flashback Query → TPT Flux time-travel queries with point-in-time reconstruction
 Oracle RAC → TPT Keystone's native distributed architecture (no special migration needed)
 4. The Partitioning Nightmare

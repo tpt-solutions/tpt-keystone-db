@@ -72,6 +72,7 @@ impl LeaseManager {
 
     /// Attempt to become (or remain) the writer. Fails if another holder's
     /// lease is still current.
+    #[tracing::instrument(skip_all)]
     pub fn try_acquire(&self) -> Result<()> {
         let current = self.store.get(&self.key)?;
         let (expected_etag, next_token) = match &current {

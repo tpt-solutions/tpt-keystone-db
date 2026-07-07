@@ -146,12 +146,16 @@ fn is_cacheable(key: &str) -> bool {
 
 impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
     fn get(&self, key: &str) -> Result<Option<(Vec<u8>, ObjectMeta)>> {
+        let metrics = crate::metrics::Metrics::global();
+        metrics.object_store_gets_total.fetch_add(1, Ordering::Relaxed);
         if !is_cacheable(key) {
             return self.inner.get(key);
         }
         if let Some(hit) = self.cache.get(key) {
+            metrics.cache_hits_total.fetch_add(1, Ordering::Relaxed);
             return Ok(Some(hit));
         }
+        metrics.cache_misses_total.fetch_add(1, Ordering::Relaxed);
         match self.inner.get(key)? {
             Some((data, meta)) => {
                 self.cache.put(key, &data, &meta);
@@ -162,6 +166,7 @@ impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<ObjectMeta> {
+        crate::metrics::Metrics::global().object_store_puts_total.fetch_add(1, Ordering::Relaxed);
         let meta = self.inner.put(key, data)?;
         if is_cacheable(key) {
             self.cache.put(key, data, &meta);
@@ -170,7 +175,13 @@ impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
     }
 
     fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError> {
-        let meta = self.inner.put_if_match(key, data, expected_etag)?;
+        crate::metrics::Metrics::global().object_store_puts_total.fetch_add(1, Ordering::Relaxed);
+        let meta = self.inner.put_if_match(key, data, expected_etag).map_err(|e| {
+            if matches!(e, CasError::Conflict { .. }) {
+                crate::metrics::Metrics::global().object_store_cas_conflicts_total.fetch_add(1, Ordering::Relaxed);
+            }
+            e
+        })?;
         if is_cacheable(key) {
             self.cache.put(key, data, &meta);
         }

@@ -83,6 +83,7 @@ impl Wal {
         self.file.seek(SeekFrom::End(0))?; // no append(true) mode; keep cursor pinned to end
         self.file.write_all(&buf)?;
         self.file.sync_all()?; // fsync for durability
+        crate::metrics::Metrics::global().wal_fsyncs_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.bytes_written += buf.len() as u64;
 
         Ok(record)

@@ -20,11 +20,17 @@ use std::time::Duration;
 pub struct UdfConfig {
     pub fuel_limit: u64,
     pub memory_limit_bytes: usize,
+    /// Rejected at `CREATE FUNCTION` time (see `executor::udf::validate_module`)
+    /// before the module is ever compiled — the fuel/memory limits above
+    /// only bound *execution*, so an oversized module could otherwise burn
+    /// arbitrary CPU/memory during `wasmtime::Module::new`'s compilation
+    /// step, which no other limit in this struct reaches.
+    pub max_module_bytes: usize,
 }
 
 impl Default for UdfConfig {
     fn default() -> Self {
-        Self { fuel_limit: 100_000_000, memory_limit_bytes: 16 * 1024 * 1024 }
+        Self { fuel_limit: 100_000_000, memory_limit_bytes: 16 * 1024 * 1024, max_module_bytes: 4 * 1024 * 1024 }
     }
 }
 
@@ -108,6 +114,7 @@ impl StorageConfig {
             udf: UdfConfig {
                 fuel_limit: env::var("TPT_UDF_FUEL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().fuel_limit),
                 memory_limit_bytes: env::var("TPT_UDF_MEMORY_LIMIT_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().memory_limit_bytes),
+                max_module_bytes: env::var("TPT_UDF_MAX_MODULE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().max_module_bytes),
             },
             max_connections: env::var("TPT_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
             mcp_token: env::var("TPT_MCP_TOKEN").ok(),

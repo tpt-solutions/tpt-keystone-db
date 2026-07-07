@@ -29,10 +29,13 @@ fn cell_text(cell: &Option<Vec<u8>>) -> String {
     String::from_utf8(cell.clone().unwrap()).unwrap()
 }
 
+// `id` leads every row so it becomes the storage row key (this engine keys
+// an unconstrained table by its first column's value) — without it, two
+// edges sharing a `from_id` would collide and overwrite each other.
 fn make_social_graph(db: &Arc<Database>) {
-    execute_query("CREATE TABLE follows (from_id TEXT, to_id TEXT, rel TEXT)", db.clone()).unwrap();
-    for (a, b) in [("alice", "bob"), ("bob", "carol"), ("carol", "dave"), ("alice", "carol")] {
-        execute_query(&format!("INSERT INTO follows VALUES ('{a}', '{b}', 'FOLLOWS')"), db.clone()).unwrap();
+    execute_query("CREATE TABLE follows (id INT4, from_id TEXT, to_id TEXT, rel TEXT)", db.clone()).unwrap();
+    for (i, (a, b)) in [("alice", "bob"), ("bob", "carol"), ("carol", "dave"), ("alice", "carol")].into_iter().enumerate() {
+        execute_query(&format!("INSERT INTO follows VALUES ({i}, '{a}', '{b}', 'FOLLOWS')"), db.clone()).unwrap();
     }
     execute_query("CREATE INDEX ON follows USING GRAPH (from_id) WITH (to = 'to_id', type = 'rel')", db.clone()).unwrap();
 }
@@ -104,7 +107,7 @@ fn graph_shortest_path_finds_hops() {
 fn graph_connected_components_separates_disjoint_subgraphs() {
     let (db, _b, _l) = test_db();
     make_social_graph(&db);
-    execute_query("INSERT INTO follows VALUES ('xavier', 'yolanda', 'FOLLOWS')", db.clone()).unwrap();
+    execute_query("INSERT INTO follows VALUES (99, 'xavier', 'yolanda', 'FOLLOWS')", db.clone()).unwrap();
     let result = execute_query(
         "SELECT vertex, component FROM graph_connected_components('follows', 'from_id')",
         db.clone(),

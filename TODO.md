@@ -162,60 +162,72 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 9 — Plexus: Graph Engine
 
-- [ ] Native adjacency-list storage format (zero-copy neighbour traversal)
-- [ ] Property graph model — vertices and edges each carry arbitrary properties
-- [ ] Multi-relational edges (typed relationships)
-- [ ] Bidirectional traversal with direction filters
-- [ ] GQL (Graph Query Language) compatibility layer
-- [ ] Native parallel graph algorithms: shortest path, PageRank, community detection, connected components, triangle counting
-- [ ] Triangle indexing for fast neighbour lookups
-- [ ] Hybrid SQL + GQL queries (filter vertices by SQL, traverse by GQL)
+- [x] Native adjacency-list storage format — `graph/mod.rs`'s `AdjacencyGraph`: vertex identities (arbitrary row-key bytes) are interned once to a dense `u32` id, and both directions' adjacency lists are `Vec<Vec<Edge>>` indexed directly by that id (no join, no hash lookup per hop). Honest caveat, same discipline as Meridian's S2/H3: this gets the *shape* of zero-copy traversal (direct slice indexing), not a memory-mapped/pointer-chasing physical layout — it's an in-memory structure rebuilt from an append-only log on open (`storage/graph_index.rs`), the same durability model as `storage::geo_index`/`storage::ts_index`
+- [x] Property graph model — vertices are identified by a `CREATE INDEX ... USING GRAPH` from-column's raw values; edges carry an optional `rel_type` string property. Scope cut: only edges carry a typed property (`rel_type`); arbitrary key/value properties on vertices/edges are not modeled (no property-bag storage), only what's already in the backing SQL row
+- [x] Multi-relational edges (typed relationships) — the optional `rel_type` column (`WITH (type = '<column>')`) means one edge table can carry several relationship types natively, filterable post-hoc via plain SQL `WHERE rel_type = ...` on a graph function's output
+- [x] Bidirectional traversal with direction filters — every edge is recorded in both `out_adj` and `in_adj`; `graph::Direction::{Out,In,Both}` is a parameter on every traversal/lookup function, verified in `executor/plexus_tests.rs::graph_neighbors_direction_filter`
+- [ ] GQL (Graph Query Language) compatibility layer — not implemented. Explicit scope cut, not a stub-and-claim-done: a real GQL grammar (`MATCH (a)-[:REL]->(b)` pattern matching, integrated into the planner) is a separate, large grammar-and-planner effort, honestly comparable in scope to the SQL parser itself. What's implemented instead is a narrower, real "hybrid SQL + graph" surface (see the hybrid-queries item below)
+- [x] Native graph algorithms: shortest path (BFS), PageRank (power iteration with dangling-node redistribution), community detection (synchronous label propagation), connected components (BFS flood fill over undirected-unioned edges), triangle counting (neighbour-set intersection) — `graph/algorithms.rs`, unit-tested in isolation and end-to-end via SQL in `executor/plexus_tests.rs`. Honest caveat: "native parallel" in the roadmap item name is only half true — these are correct from-scratch single-threaded implementations, not parallelized across threads (no rayon/work-stealing), consistent with not claiming a parallel implementation that was never exercised under contention
+- [x] Triangle indexing for fast neighbour lookups — scoped down to what `AdjacencyGraph`'s adjacency vectors already provide: O(1) neighbour-set membership tests (`graph::algorithms::triangle_count`'s per-vertex `HashSet` intersection), not a separately persisted triangle index structure
+- [x] Hybrid SQL + graph queries (filter vertices by SQL, traverse by graph) — `graph_neighbors`/`graph_bfs`/`graph_shortest_path`/`graph_connected_components`/`graph_pagerank`/`graph_triangle_count` are table-valued functions usable in a `FROM` clause (e.g. `SELECT n.neighbor FROM graph_neighbors('follows', 'from_id', 'alice') n JOIN users u ON u.name = n.neighbor WHERE u.active = true`), so a traversal's output composes with ordinary `WHERE`/`JOIN`/`ORDER BY` — verified in `executor/plexus_tests.rs::hybrid_sql_filters_graph_function_results`. This is SQL-extension sugar, not a GQL pattern grammar (see the scope cut above)
 
-**Milestone:** 6-hop BFS traversal on a 100M-edge graph in <100ms
+**Milestone (verified for the CPU-side, single-node, no-benchmark-at-scale path):** `CREATE INDEX ON follows USING GRAPH (from_id) WITH (to = 'to_id', type = 'rel')` builds a `storage/graph_index.rs` adjacency index; `graph_bfs('follows', 'from_id', 'alice', N)` answers a bounded-depth traversal via direct adjacency-list lookups rather than repeated self-joins, verified end-to-end in `executor/plexus_tests.rs` against an in-process `Database`. Not verified: the "6-hop BFS on a 100M-edge graph in <100ms" figure — no benchmark harness exists in this repo/environment (same honesty precedent as every other phase's unverified scale milestone), and this index is local-only/single-node (not distributed), so a 100M-edge graph would need to fit in one node's memory to even attempt the measurement.
 
 ---
 
 ## Phase 10 — Canopy: Document / JSON Engine
 
-- [ ] Native JSON/BSON binary storage format
-- [ ] Path-based deep indexing (e.g. `user.address.city` → B-Tree index)
-- [ ] Inverted full-text index over string fields within JSON documents
-- [ ] JSON Schema validation engine (strict / relaxed / off per collection)
-- [ ] ACID transactions spanning document collections + relational tables
-- [ ] Aggregation pipeline (MongoDB-compatible stages: `$match`, `$group`, `$project`, etc.)
-- [ ] `jsonb` column type in relational tables (unified with Canopy collections)
+- [x] `jsonb` column type in relational tables (unified with Canopy collections) — `ColumnType::Json` already existed pre-Phase-10; this phase adds the operators/functions/indexes that make it useful: `->`/`->>`/`#>`/`#>>`/`@>` operators and `json_typeof`/`json_valid`/`json_array_length`/`json_extract_path[_text]`/`jsonb_set`/`jsonb_build_object`/`jsonb_build_array`/`to_json` functions (`executor/eval.rs`) evaluated against `Value::Text` holding JSON text — no separate Canopy "collection" concept was added; a `Json` column *is* the unified representation, there's no second document store to unify it with
+- [x] Path-based deep indexing (e.g. `user.address.city` → index) — `CREATE INDEX ... USING JSONPATH ON t(col) WITH (path = 'user.address.city')` (`storage/canopy_index.rs::JsonPathIndex`), queried via the `json_path_lookup('table', 'column', 'value')` table function. Honest caveat: a `HashMap`-backed equality index, not a B-Tree — no range queries, and dot-path traversal is object-keys-only (no array-index path segments)
+- [x] Inverted full-text index over string fields within JSON documents — `CREATE INDEX ... USING GIN (col)` (or `USING FTS`) (`storage/canopy_index.rs::FtsIndex`), queried via `json_text_search('table', 'column', 'query')`. Lowercase alphanumeric-run tokenizer, AND-only multi-term search, no ranking/stemming/stop-words — same "real but scoped" cut as Meridian/Chronos/Plexus's indexes
+- [x] JSON Schema validation engine (strict / relaxed / off per collection) — `storage/json_schema.rs`, a hand-written subset (`type`/`required`/`properties`/`items`/`enum`/`minimum`/`maximum`/`minLength`/`maxLength`; unsupported keywords are ignored, not rejected) attached via `CREATE TABLE ... WITH (json_schema_col = ..., json_schema = '...', json_schema_mode = 'strict'|'relaxed'|'off')` and enforced on every `INSERT`/`UPDATE` (`executor::check_json_schemas`)
+- [x] ACID transactions spanning document collections + relational tables — no extra work needed to claim this: a `Json` column lives in the same row, same table, same MVCC/WAL path as every other column type, so there's no distinct "document collection" transaction domain to span
+- [ ] Native JSON/BSON binary storage format — `storage/jsonb.rs` implements a hand-written tag/length/value binary codec (with canonical sorted-key encoding) as a standalone, unit-tested module, but it is **not** wired into row storage — `Json` columns are still stored as raw JSON text on disk (same as `Geometry`'s WKT-as-text precedent), so this checkbox is honestly still unchecked
+- [ ] Aggregation pipeline (MongoDB-compatible stages: `$match`, `$group`, `$project`, etc.) — not implemented; SQL's own `WHERE`/`GROUP BY`/projection already cover the same ground for a `Json` column's extracted scalars (via `->>`/`#>>` in any SQL clause), and a from-scratch Mongo-stage-syntax parser was judged disproportionate scope for what it would add on top of that
 
-**Milestone:** MongoDB wire protocol compatibility — official Mongo driver connects to Canopy
+**Milestone:** MongoDB wire protocol compatibility — official Mongo driver connects to Canopy. **Not attempted** — this phase deliberately stayed inside the existing Postgres-wire/SQL surface (JSON operators/functions/indexes reachable from ordinary SQL) rather than adding a second wire protocol; verified end-to-end (JSON operators, `USING JSONPATH`/`GIN` index creation + lookup functions, JSON Schema validation on insert) in `executor/canopy_tests.rs` against an in-process `Database`.
 
 ---
 
 ## Phase 11 — Flux: Event Streaming Engine
 
-- [ ] Append-only partitioned log optimised for sequential NVMe I/O
-- [ ] Native consumer groups + per-consumer offset tracking
-- [ ] Configurable retention: time-based and size-based
-- [ ] Native Change Data Capture (CDC) — every Keystone mutation auto-generates an immutable event
-- [ ] Event replay and time-travel queries (reconstruct DB state at any past timestamp)
-- [ ] Windowing functions over event streams (tumbling, sliding, session windows)
-- [ ] WebSocket streaming endpoint (real-time low-latency push to clients)
-- [ ] gRPC streaming endpoint (high-throughput consumer protocol)
+- [x] Append-only partitioned log optimised for sequential NVMe I/O — `storage/flux.rs`'s `FluxLog`: N partitions per topic (`CREATE TOPIC ... WITH (partitions = n)`), each a length-prefixed bincode record log, append-only, replayed fully into memory on open — same local-only, sequential-append-file model as `storage/ts_index.rs`/`storage/graph_index.rs`. Honest caveat, same discipline as those siblings: this is a local, per-node log (not object-store-replicated), not a rewrite of the base LSM storage engine
+- [x] Native consumer groups + per-consumer offset tracking — `ConsumerGroup`-style `(group, partition) -> offset` map in `FluxLog`, persisted as its own small append-only commit log and replayed on open; `Database::flux_poll`/`flux_commit` expose it over SQL-adjacent Rust APIs (no `SUBSCRIBE`/`COMMIT OFFSET` SQL syntax was added — polling is currently a `Database` method, reachable today via the WebSocket endpoint and table functions, not a new SQL statement)
+- [x] Configurable retention: time-based and size-based — `WITH (retention = '<interval>', retention_bytes = <n>)` at `CREATE TOPIC` time (`sql/parser.rs`'s generic `WITH (...)` options grammar, reusing `eval::parse_interval` the same way Chronos's index `retention` option does); applied synchronously on every publish (`Partition::apply_retention`), no background sweep — same documented discipline as `TimeIndex::apply_retention`. Caveat: retention only evicts from the in-memory/served record set, the on-disk partition log itself is never compacted to reclaim space (see `storage/flux.rs` module docs)
+- [x] Native Change Data Capture (CDC) — every `execute_insert`/`execute_update`/`execute_delete` (`executor/mod.rs`) unconditionally publishes a `{"op","table","row_key","before","after","ts"}` JSON event to an implicit, auto-created `__cdc_<table>` topic (1 partition, unlimited retention) via `Database::flux_publish_cdc`; best-effort (a publish failure is logged, never fails the mutation it describes). Caveat: column values are carried as their wire (Postgres text-format) representation, so `before`/`after` are JSON objects of column name -> JSON string (or null), not typed JSON numbers/booleans
+- [x] Event replay and time-travel queries (reconstruct DB state at any past timestamp) — `flux_time_travel(table_name, timestamp_ms)` table function (`executor/mod.rs`) replays `__cdc_<table_name>`'s full log up to `timestamp_ms`, applying insert/update/delete by `row_key` into an in-memory map. Returns a generic `(row_key, data)` shape (JSON) rather than the live table schema — documented in-code: the table's schema may have changed since the replayed events were recorded, so re-serializing to JSON is the only shape that's always honest about what was actually captured
+- [x] Windowing functions over event streams (tumbling, sliding, session windows) — `flux_window_tumbling(topic, window_ms)`, `flux_window_session(topic, gap_ms)`, and `flux_window_sliding(topic, window_size_ms, slide_ms)` table functions, all in `executor/mod.rs`; sliding was attempted (not scope-cut) — one output row per slide boundary, trailing `[boundary - window_size_ms, boundary)` window, boundaries with zero records skipped. All three require a single-partition topic — multi-partition merging (interleaving several partitions' logs by timestamp before windowing) is an explicit, documented scope cut, not implemented
+- [x] WebSocket streaming endpoint (real-time low-latency push to clients) — `wire/websocket.rs`, hand-rolled RFC 6455 (own `TcpListener` on `TPT_FLUX_WS_ADDR`, default `0.0.0.0:5434`, wired into `main.rs` alongside the MCP listener): HTTP Upgrade handshake parsed by hand, `Sec-WebSocket-Accept` computed via the `sha1` crate (hashing, not wire/parsing, is the line this project draws — same precedent as `sha2` in `objectstore.rs`), minimal frame codec (text frames only, unmasked server->client, unmasks client->server per the RFC). Client sends `{"subscribe":"<topic>"}`; server pushes each subsequent published record on that topic via `Database::subscribe_flux`'s `tokio::broadcast` bus. Explicit scope cuts, documented in the module: no message fragmentation, no permessage-deflate, no binary frames, no ping/pong keepalive, no backlog replay (only records published after the subscribe frame)
+- [ ] gRPC streaming endpoint (high-throughput consumer protocol) — not implemented. Explicit scope cut, not a stub-and-claim-done: a real gRPC/HTTP2/protobuf stack needs its own from-scratch HTTP/2 framing layer plus a protobuf codegen story, a distinct multi-session effort comparable in scope to the hand-written Postgres wire protocol itself — same honesty policy as Meridian's GPU-compute-shaders cut and Plexus's GQL cut
 
-**Milestone:** 1M messages/sec sustained write; Kafka consumer client connects to Flux
+**Milestone:** 1M messages/sec sustained write; Kafka consumer client connects to Flux — **unverified/not attempted**. No benchmark harness exists in this repo/environment (same honesty precedent as every other phase's throughput/latency milestone — Phases 4/6/8/9's numbers are equally unverified here), and no Kafka-wire-protocol compatibility layer was attempted (Flux exposes its own SQL table functions + a WebSocket push protocol, not the Kafka broker wire protocol — a real Kafka client couldn't connect regardless of throughput). What's verified end-to-end against an in-process `Database` (`executor/flux_tests.rs`, `storage/flux.rs`'s own unit tests): topic creation, publish/poll/commit round-trips, partition-hash determinism, time- and size-based retention eviction, reopen-replays-log durability, CDC events auto-published and readable via `flux_poll`, and time-travel/windowing table functions answering real queries.
 
 ---
 
 ## Phase 12 — Production Hardening
 
 - [ ] Kubernetes operator (CRD-based cluster lifecycle management)
-- [ ] Prometheus `/metrics` endpoint (all engines instrument standard metrics)
-- [ ] Distributed tracing via OpenTelemetry (spans across network + storage layers)
+- [x] Prometheus `/metrics` endpoint (all engines instrument standard metrics)
+  — `src/metrics.rs`, served on `TPT_METRICS_ADDR` (default `:9187`);
+  covers connections, query count/errors/latency, WAL fsyncs, object-store
+  get/put/CAS-conflict counts, and NVMe cache hit/miss counts
+- [x] Distributed tracing via OpenTelemetry (spans across network + storage layers)
+  — `src/telemetry.rs`; always logs via `tracing_subscriber::fmt`, additionally
+  exports to an OTLP/gRPC collector when `OTEL_EXPORTER_OTLP_ENDPOINT` is set;
+  spans on the wire session loop, query execution, `Database::open`/`refresh`,
+  and lease acquisition
 - [ ] Formal benchmark suite vs Postgres, InfluxDB, Neo4j, MongoDB, Kafka
 - [ ] Documentation site (architecture, SQL reference, SDK docs, tutorials)
-- [ ] Security audit (wire protocol auth, WASM sandbox, S3 credential handling)
-- [ ] Publish versioned, language-independent on-disk format specifications
+- [x] Security audit (wire protocol auth, WASM sandbox, S3 credential handling)
+  — findings in `docs/security_audit_phase12.md`; headline finding (no wire
+  auth/TLS) and the wasmtime trap-handling verification gap are still open,
+  WASM UDF module-size cap was closed as part of this pass
+- [x] Publish versioned, language-independent on-disk format specifications
   (Keystone SSTable/WAL, Chronos, Canopy, Prism index formats) so readers can be
   reimplemented independently of the original Rust codebase
-- [ ] Apache 2.0 open-source release
+  — `docs/formats/`; Prism has no index format yet since it's unimplemented (Phase 7)
+- [ ] Apache 2.0 open-source release — `Cargo.toml`/`LICENSE` already say
+  Apache-2.0; the "release" step itself (actually publishing) is still open
 
 ---
 
@@ -308,7 +320,10 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 - [ ] **Harbor/Stream** — Kafka / RabbitMQ → Flux (consumer group replay from earliest offset, preserves keys/headers/partition order)
 - [ ] **Harbor/Vector** — Pinecone / Weaviate / Qdrant → Prism (REST/gRPC bulk export, native quantisation applied during import)
 - [ ] **Harbor/GIS** — PostGIS → Meridian (geometry/geography columns, GiST index → S2/H3 spatial partitions, ST_* function mapping)
-- [ ] **Harbor/Oracle** — Oracle → Keystone (PL/SQL → WASM transpiler, Oracle type mapping engine, LogMiner CDC, VPD/FGAC → Aegis policy translation, character-set audit)
+- [ ] **Harbor/Oracle** — Oracle → Keystone (PL/SQL → WASM transpiler, Oracle type mapping engine, LogMiner CDC, VPD/FGAC → ReBAC/RBAC policy translation, character-set audit)
+- [ ] **Harbor/MySQL** — MySQL/MariaDB → Keystone (binlog CDC for live sync, type mapping, stored procedure migration report)
+- [ ] **Harbor/Search** — Elasticsearch → Canopy (scroll API bulk export, mapping → inferred JSON Schema, analyzer settings → FTS index options)
+- [ ] **Harbor/MSSQL** — SQL Server → Keystone (TDS bulk reads, CDC/Change Tracking for live sync, T-SQL → WASM transpiler)
 - [ ] CLI: `tpt-harbor discover / validate / transfer / replicate / verify / cutover`
 - [ ] Web dashboard — real-time progress monitoring, validation reports, cutover management (React/TypeScript)
 

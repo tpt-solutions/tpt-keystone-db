@@ -1,10 +1,14 @@
 pub mod btree;
 pub mod cache;
+pub mod canopy_index;
 pub mod compress;
 pub mod config;
 pub mod database;
+pub mod flux;
 pub mod geo_index;
 pub mod graph_index;
+pub mod json_schema;
+pub mod jsonb;
 pub mod lease;
 pub mod lsm;
 pub mod manifest;
@@ -154,6 +158,25 @@ pub struct TableSchema {
     pub unique_groups: Vec<Vec<usize>>,
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKey>,
+    /// Canopy (Phase 10) JSON Schema validation rules, one per validated
+    /// `Json` column, set by `CREATE TABLE ... WITH (json_schema_col = ...,
+    /// json_schema = '<json schema text>', json_schema_mode = 'strict' |
+    /// 'relaxed' | 'off')`. Empty for a table with no JSON Schema attached.
+    #[serde(default)]
+    pub json_schemas: Vec<JsonSchemaRule>,
+}
+
+/// One JSON Schema validation rule attached to a `Json` column.
+/// `mode` is `"strict"` (reject on any violation), `"relaxed"` (only the
+/// top-level `type` is checked; unknown/extra properties and nested
+/// violations are tolerated), or `"off"` (rule is stored but never
+/// evaluated — lets a table keep its schema on file while validation is
+/// temporarily disabled).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonSchemaRule {
+    pub column: String,
+    pub mode: String,
+    pub schema: String,
 }
 
 impl TableSchema {

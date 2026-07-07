@@ -21,6 +21,8 @@ pub enum Token {
     Copy, Stdin, Stdout, To,
     Function, Returns, Language,
     Alter, Column, Unique, References, Foreign, Sequence, Increment, Start,
+    /// `CREATE TOPIC` (Flux, Phase 11).
+    Topic,
 
     // Identifiers
     Ident(String),
@@ -29,6 +31,11 @@ pub enum Token {
     Star, Plus, Minus, Slash, Percent, Eq, NotEq, Lt, Lte, Gt, Gte,
     Concat, Arrow, LongArrow, Comma, Dot, Semicolon, LParen, RParen,
     LBracket, RBracket, Colon, DoubleColon, Dollar(u32),
+    /// `@>` — JSON/JSONB containment (Canopy, Phase 10).
+    AtArrow,
+    /// `#>` / `#>>` — JSON path extraction (object/array result vs text
+    /// result), the array-path-literal counterpart of `->`/`->>`.
+    HashArrow, HashLongArrow,
 
     Eof,
 }
@@ -146,6 +153,12 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some(b':') { self.pos += 1; Token::DoubleColon }
                 else { Token::Colon }
             }
+            b'@' if self.peek() == Some(b'>') => { self.pos += 1; Token::AtArrow }
+            b'#' if self.peek() == Some(b'>') => {
+                self.pos += 1;
+                if self.peek() == Some(b'>') { self.pos += 1; Token::HashLongArrow }
+                else { Token::HashArrow }
+            }
             other => anyhow::bail!("unexpected character: {}", other as char),
         };
         Ok(tok)
@@ -251,7 +264,7 @@ fn keyword_or_ident(s: &str) -> Token {
         "FUNCTION" => Token::Function, "RETURNS" => Token::Returns, "LANGUAGE" => Token::Language,
         "ALTER" => Token::Alter, "COLUMN" => Token::Column, "UNIQUE" => Token::Unique,
         "REFERENCES" => Token::References, "FOREIGN" => Token::Foreign, "SEQUENCE" => Token::Sequence,
-        "INCREMENT" => Token::Increment, "START" => Token::Start,
+        "INCREMENT" => Token::Increment, "START" => Token::Start, "TOPIC" => Token::Topic,
         _ => Token::Ident(s.to_string()),
     }
 }

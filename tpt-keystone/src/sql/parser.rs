@@ -205,7 +205,8 @@ impl Parser {
             Token::Index => { self.advance(); self.parse_create_index() }
             Token::Function => { self.advance(); self.parse_create_function() }
             Token::Sequence => { self.advance(); self.parse_create_sequence() }
-            other => anyhow::bail!("expected TABLE, INDEX, FUNCTION, or SEQUENCE after CREATE, got {:?}", other),
+            Token::Topic => { self.advance(); self.parse_create_topic() }
+            other => anyhow::bail!("expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}", other),
         }
     }
 
@@ -375,7 +376,19 @@ impl Parser {
             }
         }
 
-        Ok(Stmt::CreateTable(CreateTableStmt { table, columns, table_constraints }))
+        let options = if self.eat(&Token::With) {
+            self.expect(&Token::LParen)?;
+            let mut opts = vec![self.parse_kv_option()?];
+            while self.eat(&Token::Comma) {
+                opts.push(self.parse_kv_option()?);
+            }
+            self.expect(&Token::RParen)?;
+            opts
+        } else {
+            Vec::new()
+        };
+
+        Ok(Stmt::CreateTable(CreateTableStmt { table, columns, table_constraints, options }))
     }
 
     /// `ALTER TABLE [ONLY] table ALTER [COLUMN] col SET DEFAULT expr |
@@ -500,6 +513,32 @@ impl Parser {
         Ok(Stmt::CreateSequence(CreateSequenceStmt { name, start, increment }))
     }
 
+    /// `CREATE TOPIC [IF NOT EXISTS] name [WITH (key = 'value', ...)]`,
+    /// mirroring `parse_create_sequence`'s `IF NOT EXISTS` handling and
+    /// `parse_create_index`'s generic `WITH (...)` options grammar.
+    fn parse_create_topic(&mut self) -> anyhow::Result<Stmt> {
+        let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
+            self.advance(); self.advance();
+            self.expect(&Token::Exists)?;
+            true
+        } else {
+            false
+        };
+        let name = self.parse_object_name()?;
+        let options = if self.eat(&Token::With) {
+            self.expect(&Token::LParen)?;
+            let mut opts = vec![self.parse_kv_option()?];
+            while self.eat(&Token::Comma) {
+                opts.push(self.parse_kv_option()?);
+            }
+            self.expect(&Token::RParen)?;
+            opts
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::CreateTopic(CreateTopicStmt { name, if_not_exists, options }))
+    }
+
     fn parse_signed_int(&mut self) -> anyhow::Result<i64> {
         let neg = self.eat(&Token::Minus);
         match self.advance().clone() {
@@ -545,9 +584,9 @@ impl Parser {
         self.expect(&Token::RParen)?;
         let options = if self.eat(&Token::With) {
             self.expect(&Token::LParen)?;
-            let mut opts = vec![self.parse_index_option()?];
+            let mut opts = vec![self.parse_kv_option()?];
             while self.eat(&Token::Comma) {
-                opts.push(self.parse_index_option()?);
+                opts.push(self.parse_kv_option()?);
             }
             self.expect(&Token::RParen)?;
             opts
@@ -557,12 +596,12 @@ impl Parser {
         Ok(Stmt::CreateIndex(CreateIndexStmt { table, column, name: _name, using, options }))
     }
 
-    /// One `key = 'value'` pair inside a `CREATE INDEX ... WITH (...)`
-    /// clause. The key is usually a plain identifier (`retention`, `value`),
-    /// but `interval` collides with the reserved `INTERVAL` keyword token
-    /// (and Plexus's `to`/`type` options with `TO`/`TYPE`), so those are
-    /// accepted too.
-    fn parse_index_option(&mut self) -> anyhow::Result<(String, String)> {
+    /// One `key = 'value'` pair inside a `CREATE INDEX ... WITH (...)` or
+    /// `CREATE TABLE ... WITH (...)` clause. The key is usually a plain
+    /// identifier (`retention`, `value`, `json_schema`), but `interval`
+    /// collides with the reserved `INTERVAL` keyword token (and Plexus's
+    /// `to`/`type` options with `TO`/`TYPE`), so those are accepted too.
+    fn parse_kv_option(&mut self) -> anyhow::Result<(String, String)> {
         let key = match self.advance().clone() {
             Token::Ident(s) => s,
             Token::Interval => "interval".to_string(),
@@ -1070,6 +1109,9 @@ fn infix_bp(tok: &Token) -> Option<(u8, u8, BinOp)> {
         Token::Percent => (11, 12, BinOp::Mod),
         Token::Arrow => (13, 14, BinOp::Arrow),
         Token::LongArrow => (13, 14, BinOp::LongArrow),
+        Token::HashArrow => (13, 14, BinOp::HashArrow),
+        Token::HashLongArrow => (13, 14, BinOp::HashLongArrow),
+        Token::AtArrow => (5, 6, BinOp::Contains),
         Token::Is | Token::Between | Token::Like | Token::In | Token::Not => (5, 6, BinOp::Eq),
         _ => return None,
     };

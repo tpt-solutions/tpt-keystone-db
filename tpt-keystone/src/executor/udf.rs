@@ -41,7 +41,17 @@ fn wasm_type(ty: &ColumnType) -> anyhow::Result<ValType> {
 /// Wasm signature exactly matches `arg_types`/`return_type`. Called once at
 /// `CREATE FUNCTION` time so a bad module/signature is a creation-time
 /// error, not a surprise on first call.
-pub fn validate_module(wasm_bytes: &[u8], name: &str, arg_types: &[ColumnType], return_type: &ColumnType) -> anyhow::Result<()> {
+pub fn validate_module(
+    wasm_bytes: &[u8],
+    name: &str,
+    arg_types: &[ColumnType],
+    return_type: &ColumnType,
+    max_module_bytes: usize,
+) -> anyhow::Result<()> {
+    if wasm_bytes.len() > max_module_bytes {
+        anyhow::bail!("WASM module for function \"{name}\" is {} bytes, exceeding the {max_module_bytes}-byte limit", wasm_bytes.len());
+    }
+
     let engine = Engine::default();
     let module = Module::new(&engine, wasm_bytes)?;
 
@@ -209,5 +219,20 @@ mod tests {
         let wasm_b64 = wat_base64(r#"(module (func (export "f") (param i64) (result i64) (local.get 0)))"#);
         let sql = format!("CREATE FUNCTION f(n text) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
         assert!(execute_query(&sql, db.clone()).is_err());
+    }
+
+    #[test]
+    fn create_function_rejects_oversized_module() {
+        let (db, _b, _l) = test_db_with_udf_config(UdfConfig { max_module_bytes: 4, ..UdfConfig::default() });
+        let wasm_b64 = wat_base64(
+            r#"(module (func (export "add_one") (param i64) (result i64)
+                 (i64.add (local.get 0) (i64.const 1))))"#,
+        );
+        let sql = format!("CREATE FUNCTION add_one(n int8) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
+        let err = match execute_query(&sql, db.clone()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected oversized module to be rejected"),
+        };
+        assert!(err.to_string().contains("exceeding the 4-byte limit"), "unexpected error: {err}");
     }
 }

@@ -63,7 +63,14 @@ impl BTree {
 
         match self.root {
             None => {
-                // Create a new leaf node
+                // Reserve the 8-byte root-pointer header (bytes 0..8) before
+                // writing the first node, so the node lands at offset 8+
+                // instead of offset 0 — otherwise the `write_root` call
+                // below would overwrite the node's own header with the root
+                // pointer, corrupting the just-inserted entry.
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&0u64.to_be_bytes())?;
+
                 let leaf = Node::Leaf {
                     keys: vec![key.to_vec()],
                     values: vec![value.to_vec()],
@@ -375,5 +382,22 @@ impl BTree {
         file.write_all(&offset.to_be_bytes())?;
         file.sync_all()?;
         Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_insert_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.bt");
+        {
+            let mut bt = BTree::open(&path).unwrap();
+            bt.insert(b"k1", b"v1").unwrap();
+        }
+        let bt = BTree::open(&path).unwrap();
+        assert_eq!(bt.search(b"k1").unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(bt.scan().unwrap(), vec![(b"k1".to_vec(), b"v1".to_vec())]);
     }
 }

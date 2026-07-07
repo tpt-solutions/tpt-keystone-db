@@ -25,6 +25,20 @@ pub enum Stmt {
     CopyOut(CopyStmt),
     CreateFunction(CreateFunctionStmt),
     CreateSequence(CreateSequenceStmt),
+    CreateTopic(CreateTopicStmt),
+}
+
+/// `CREATE TOPIC [IF NOT EXISTS] name [WITH (partitions = n, retention =
+/// '<interval>', retention_bytes = n)]` (Flux, Phase 11). Reuses the same
+/// generic `WITH (...)` options grammar as `CreateIndexStmt`/
+/// `CreateTableStmt` — `partitions`/`retention`/`retention_bytes` are parsed
+/// out of `options` at execution time (`executor::execute_create_topic`),
+/// same division of labor as Chronos's `interval`/`retention` index options.
+#[derive(Debug, Clone)]
+pub struct CreateTopicStmt {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub options: Vec<(String, String)>,
 }
 
 /// `CREATE SEQUENCE [IF NOT EXISTS] name [START [WITH] n] [INCREMENT [BY] n]`.
@@ -103,6 +117,11 @@ pub struct CreateTableStmt {
     pub table: String,
     pub columns: Vec<ColumnDef>,
     pub table_constraints: Vec<TableConstraint>,
+    /// `WITH (key = 'value', ...)` trailing the column/constraint list —
+    /// currently used by Canopy's JSON Schema validation (`json_schema_col`,
+    /// `json_schema`, `json_schema_mode`), mirroring `CreateIndexStmt`'s
+    /// generic `WITH (...)` options grammar. Empty for a plain table.
+    pub options: Vec<(String, String)>,
 }
 
 /// A table-level constraint, e.g. `UNIQUE (a, b)` or
@@ -352,6 +371,9 @@ pub enum BinOp {
     Concat,    // ||
     Arrow,     // ->
     LongArrow, // ->>
+    Contains,      // @> (JSON/JSONB containment)
+    HashArrow,     // #> (JSON path extraction, array-literal path)
+    HashLongArrow, // #>> (JSON path extraction as text)
 }
 
 #[derive(Debug, Clone, Copy)]

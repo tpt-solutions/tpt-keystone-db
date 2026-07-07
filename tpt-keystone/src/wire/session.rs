@@ -50,12 +50,15 @@ pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Datab
     info!(%peer, "client connected");
     let mut conn = Conn::new(stream);
 
+    crate::metrics::Metrics::global().connection_opened();
     if let Err(e) = run(&mut conn, peer, db).await {
         debug!(%peer, "session ended: {e}");
     }
+    crate::metrics::Metrics::global().connection_closed();
     info!(%peer, "client disconnected");
 }
 
+#[tracing::instrument(skip_all, fields(%peer))]
 async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> anyhow::Result<()> {
     // --- Startup handshake ---
     let startup = conn.read_startup().await?;

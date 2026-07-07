@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 use super::btree::BTree;
+use super::canopy_index::{FtsIndex, JsonPathIndex};
 use super::config::{NodeRole, UdfConfig};
+use super::flux::{FluxLog, FluxRecord, RetentionPolicy};
 use super::geo_index::GeoIndex;
 use super::graph_index::GraphIndex;
 use super::lease::LeaseHandle;
@@ -14,7 +16,7 @@ use super::mvcc::MvccStore;
 use super::objectstore::ObjectStore;
 use super::ts_index::{Rollup, TimeBucketPolicy, TimeIndex};
 use super::tx::{IsolationLevel, Transaction, TransactionManager};
-use super::{ColumnDef, ColumnType, KeyValue, Sequence, StorageEngine, StorageStats, TableSchema, UserFunction};
+use super::{ColumnDef, ColumnType, JsonSchemaRule, KeyValue, Sequence, StorageEngine, StorageStats, TableSchema, UserFunction};
 
 /// A Chronos time index plus the name of the numeric column it tracks
 /// alongside the indexed timestamp column (the index is keyed by
@@ -47,6 +49,25 @@ pub struct Database {
     /// `(table, from_column)` — same local-only accelerator scope cut as
     /// `indexes`/`geo_indexes`/`ts_indexes`.
     graph_indexes: Arc<Mutex<HashMap<String, HashMap<String, GraphIndex>>>>,
+    /// Canopy path indexes, `CREATE INDEX ... USING JSONPATH`, keyed by
+    /// `(table, column)` — same local-only accelerator scope cut as the
+    /// other index maps. One indexed path per `(table, column)`.
+    json_indexes: Arc<Mutex<HashMap<String, HashMap<String, JsonPathIndex>>>>,
+    /// Canopy inverted full-text indexes, `CREATE INDEX ... USING GIN/FTS`,
+    /// keyed by `(table, column)`.
+    fts_indexes: Arc<Mutex<HashMap<String, HashMap<String, FtsIndex>>>>,
+    /// Flux topics (`CREATE TOPIC`), keyed by topic name — local-only, not
+    /// object-store-replicated (see `storage::flux` module docs). Includes
+    /// the implicit `__cdc_<table>` topics auto-created by
+    /// `executor::execute_insert`/`update`/`delete`.
+    topics: Arc<Mutex<HashMap<String, FluxLog>>>,
+    /// Directory each topic's subdirectory lives under (`<local_dir>/flux/<topic>/`).
+    flux_dir: PathBuf,
+    /// In-process pub/sub bus for Flux publishes, keyed by topic name — the
+    /// WebSocket streaming endpoint (`wire::websocket`) subscribes here to
+    /// push newly published records to a connected client. Same "process-
+    /// local, not cross-node" scope as `notify_bus` below.
+    flux_bus: tokio::sync::broadcast::Sender<(String, FluxRecord)>,
     store: Arc<dyn ObjectStore>,
     local_index_dir: PathBuf,
     role: NodeRole,
@@ -68,6 +89,7 @@ impl Database {
     /// at. `lease` gates whether this node is allowed to flush (see
     /// `storage::lease`); `role` gates whether it's allowed to accept writes
     /// at all.
+    #[tracing::instrument(skip_all)]
     pub fn open(local_dir: &Path, store: Arc<dyn ObjectStore>, lease: Arc<LeaseHandle>, role: NodeRole, udf_config: UdfConfig) -> Result<Self> {
         std::fs::create_dir_all(local_dir)?;
 
@@ -81,6 +103,9 @@ impl Database {
         let geo_indexes = Arc::new(Mutex::new(HashMap::new()));
         let ts_indexes = Arc::new(Mutex::new(HashMap::new()));
         let graph_indexes = Arc::new(Mutex::new(HashMap::new()));
+        let json_indexes = Arc::new(Mutex::new(HashMap::new()));
+        let fts_indexes = Arc::new(Mutex::new(HashMap::new()));
+        let topics = Arc::new(Mutex::new(HashMap::new()));
 
         // Schemas live in the shared object store (not local disk) so every
         // compute node — writer or reader — sees the same table catalog.
@@ -122,6 +147,8 @@ impl Database {
                     let is_geo = path.extension().is_some_and(|e| e == "geo");
                     let is_ts = path.extension().is_some_and(|e| e == "ts");
                     let is_graph = path.extension().is_some_and(|e| e == "graph");
+                    let is_jsonpath = path.extension().is_some_and(|e| e == "jsonpath");
+                    let is_fts = path.extension().is_some_and(|e| e == "fts");
                     if let Some(name) = path.file_stem() {
                         if let Some(name_str) = name.to_str() {
                             if let Some((table, col)) = name_str.split_once('_') {
@@ -166,6 +193,27 @@ impl Database {
                                             .or_insert_with(HashMap::new)
                                             .insert(col.to_string(), graph);
                                     }
+                                } else if is_jsonpath {
+                                    // json_path is read back from the file's own
+                                    // header (see `JsonPathIndex::open`) — the
+                                    // fallback value here is only used if the file
+                                    // doesn't exist yet, which can't happen on this
+                                    // read_dir-driven path.
+                                    if let Ok(jp) = JsonPathIndex::open(&path, "") {
+                                        let mut idx_map = json_indexes.lock().unwrap();
+                                        idx_map
+                                            .entry(table.to_string())
+                                            .or_insert_with(HashMap::new)
+                                            .insert(col.to_string(), jp);
+                                    }
+                                } else if is_fts {
+                                    if let Ok(fts) = FtsIndex::open(&path) {
+                                        let mut idx_map = fts_indexes.lock().unwrap();
+                                        idx_map
+                                            .entry(table.to_string())
+                                            .or_insert_with(HashMap::new)
+                                            .insert(col.to_string(), fts);
+                                    }
                                 } else if let Ok(btree) = BTree::open(&path) {
                                     let mut idx_map = indexes.lock().unwrap();
                                     idx_map
@@ -180,9 +228,29 @@ impl Database {
             }
         }
 
+        // Flux topics are a local-only accelerator (see `storage::flux`
+        // module docs); each node rebuilds its own from `flux/<topic>/`
+        // rather than sharing them through the object store.
+        let flux_dir = local_dir.join("flux");
+        if flux_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&flux_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                    if let Ok(log) = FluxLog::open(&path) {
+                        topics.lock().unwrap().insert(name.to_string(), log);
+                    }
+                }
+            }
+        }
+
         info!(schemas = schemas.lock().unwrap().len(), ?role, "Database opened");
 
         let (notify_bus, _) = tokio::sync::broadcast::channel(1024);
+        let (flux_bus, _) = tokio::sync::broadcast::channel(1024);
 
         Ok(Self {
             lsm,
@@ -195,6 +263,11 @@ impl Database {
             geo_indexes,
             ts_indexes,
             graph_indexes,
+            json_indexes,
+            fts_indexes,
+            topics,
+            flux_dir,
+            flux_bus,
             store,
             local_index_dir,
             role,
@@ -229,6 +302,7 @@ impl Database {
 
     /// Poll the shared manifest and schema catalog for changes made by the
     /// writer node. Reader-role nodes call this on an interval to converge.
+    #[tracing::instrument(skip_all)]
     pub fn refresh(&self) -> Result<()> {
         self.lsm.lock().unwrap().refresh()?;
         for key in self.store.list("schemas/")? {
@@ -383,6 +457,62 @@ impl StorageEngine for Database {
                 }
             }
         }
+
+        // Maintain any Canopy JSON path indexes defined on this table.
+        let json_cols: Vec<(String, usize)> = {
+            let schemas = self.schemas.lock().unwrap();
+            let idx_map = self.json_indexes.lock().unwrap();
+            match (schemas.get(table), idx_map.get(table)) {
+                (Some(schema), Some(cols)) => cols.keys().filter_map(|col| {
+                    schema.columns.iter().position(|c| c.name == *col).map(|i| (col.clone(), i))
+                }).collect(),
+                _ => Vec::new(),
+            }
+        };
+        if !json_cols.is_empty() {
+            let mut idx_map = self.json_indexes.lock().unwrap();
+            if let Some(cols) = idx_map.get_mut(table) {
+                for (col, pos) in json_cols {
+                    if let Some(text_bytes) = decode_column(value, pos) {
+                        if let (Ok(text), Some(jp)) = (String::from_utf8(text_bytes), cols.get_mut(&col)) {
+                            jp.insert(key, &text)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Maintain any Canopy full-text indexes defined on this table.
+        let fts_cols: Vec<(String, usize)> = {
+            let schemas = self.schemas.lock().unwrap();
+            let idx_map = self.fts_indexes.lock().unwrap();
+            match (schemas.get(table), idx_map.get(table)) {
+                (Some(schema), Some(cols)) => cols.keys().filter_map(|col| {
+                    schema.columns.iter().position(|c| c.name == *col).map(|i| (col.clone(), i))
+                }).collect(),
+                _ => Vec::new(),
+            }
+        };
+        if !fts_cols.is_empty() {
+            let mut idx_map = self.fts_indexes.lock().unwrap();
+            if let Some(cols) = idx_map.get_mut(table) {
+                for (col, pos) in fts_cols {
+                    if let Some(text_bytes) = decode_column(value, pos) {
+                        if let (Ok(text), Some(fts)) = (String::from_utf8(text_bytes), cols.get_mut(&col)) {
+                            let searchable = match serde_json::from_str::<serde_json::Value>(&text) {
+                                Ok(doc) => {
+                                    let mut s = String::new();
+                                    super::canopy_index::collect_json_strings(&doc, &mut s);
+                                    if s.is_empty() { text.clone() } else { s }
+                                }
+                                Err(_) => text.clone(),
+                            };
+                            fts.insert(key, &searchable)?;
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -488,6 +618,7 @@ impl Database {
             pk_columns,
             unique_groups,
             foreign_keys,
+            json_schemas: vec![],
         };
 
         // Persist schema to the shared object store so every compute node
@@ -913,6 +1044,230 @@ impl Database {
         let graph = idx_map.get(table)?.get(from_column)?.graph();
         let (counts, _total) = crate::graph::algorithms::triangle_count(graph);
         Some(graph.vertex_ids().filter_map(|id| graph.key_of(id).map(|k| (k.to_vec(), counts[id as usize]))).collect())
+    }
+
+    /// Create a Canopy path index (`CREATE INDEX ... USING JSONPATH ON
+    /// t(col) WITH (path = 'user.address.city')`) on a `Json` column,
+    /// backfilling from existing rows.
+    pub fn create_json_path_index(&self, table: &str, column: &str, json_path: &str) -> Result<()> {
+        self.check_writable()?;
+        let index_dir = &self.local_index_dir;
+        std::fs::create_dir_all(index_dir)?;
+        let index_path = index_dir.join(format!("{}_{}.jsonpath", table, column));
+
+        let mut jp = JsonPathIndex::open(&index_path, json_path)?;
+
+        let schema = self.schemas.lock().unwrap().get(table).cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        let col_idx = schema.columns.iter().position(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
+
+        for kv in self.scan(table)? {
+            if let Some(text_bytes) = decode_column(&kv.value, col_idx) {
+                if let Ok(text) = String::from_utf8(text_bytes) {
+                    jp.insert(&kv.key, &text)?;
+                }
+            }
+        }
+
+        let mut idx_map = self.json_indexes.lock().unwrap();
+        idx_map.entry(table.to_string()).or_insert_with(HashMap::new).insert(column.to_string(), jp);
+
+        info!(table, column, json_path, "json path index created");
+        Ok(())
+    }
+
+    /// Whether a Canopy path index exists for `table.column`.
+    pub fn indexed_column_json_path(&self, table: &str, column: &str) -> bool {
+        self.json_indexes.lock().unwrap().get(table).is_some_and(|m| m.contains_key(column))
+    }
+
+    /// List all `(table, column)` pairs that have a JSON path index, for
+    /// `pg_catalog.pg_indexes` introspection.
+    pub fn list_json_indexes(&self) -> Vec<(String, String)> {
+        self.json_indexes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(table, cols)| cols.keys().map(move |col| (table.clone(), col.clone())))
+            .collect()
+    }
+
+    /// Row keys whose `table.column` document has `value_text` at the
+    /// indexed path. `None` if no path index exists.
+    pub fn json_path_lookup(&self, table: &str, column: &str, value_text: &str) -> Option<Vec<Vec<u8>>> {
+        let idx_map = self.json_indexes.lock().unwrap();
+        Some(idx_map.get(table)?.get(column)?.lookup(value_text))
+    }
+
+    /// Create a Canopy inverted full-text index (`CREATE INDEX ... USING
+    /// GIN`/`USING FTS`) over a `Json` or `Text` column, backfilling from
+    /// existing rows. For a `Json` column, only the string leaf values in
+    /// each document are tokenized (see `canopy_index::collect_json_strings`).
+    pub fn create_fts_index(&self, table: &str, column: &str) -> Result<()> {
+        self.check_writable()?;
+        let index_dir = &self.local_index_dir;
+        std::fs::create_dir_all(index_dir)?;
+        let index_path = index_dir.join(format!("{}_{}.fts", table, column));
+
+        let mut fts = FtsIndex::open(&index_path)?;
+
+        let schema = self.schemas.lock().unwrap().get(table).cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        let col_idx = schema.columns.iter().position(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
+
+        for kv in self.scan(table)? {
+            if let Some(text_bytes) = decode_column(&kv.value, col_idx) {
+                if let Ok(text) = String::from_utf8(text_bytes) {
+                    let searchable = match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(doc) => {
+                            let mut s = String::new();
+                            super::canopy_index::collect_json_strings(&doc, &mut s);
+                            if s.is_empty() { text.clone() } else { s }
+                        }
+                        Err(_) => text.clone(),
+                    };
+                    fts.insert(&kv.key, &searchable)?;
+                }
+            }
+        }
+
+        let mut idx_map = self.fts_indexes.lock().unwrap();
+        idx_map.entry(table.to_string()).or_insert_with(HashMap::new).insert(column.to_string(), fts);
+
+        info!(table, column, "full-text index created");
+        Ok(())
+    }
+
+    /// Whether a full-text index exists for `table.column`.
+    pub fn indexed_column_fts(&self, table: &str, column: &str) -> bool {
+        self.fts_indexes.lock().unwrap().get(table).is_some_and(|m| m.contains_key(column))
+    }
+
+    /// List all `(table, column)` pairs that have a full-text index, for
+    /// `pg_catalog.pg_indexes` introspection.
+    pub fn list_fts_indexes(&self) -> Vec<(String, String)> {
+        self.fts_indexes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(table, cols)| cols.keys().map(move |col| (table.clone(), col.clone())))
+            .collect()
+    }
+
+    /// Row keys whose `table.column` text contains every token in `query`
+    /// (AND semantics). `None` if no full-text index exists.
+    pub fn fts_search(&self, table: &str, column: &str, query: &str) -> Option<Vec<Vec<u8>>> {
+        let idx_map = self.fts_indexes.lock().unwrap();
+        Some(idx_map.get(table)?.get(column)?.search_and(query))
+    }
+
+    /// Create a named Flux topic (`CREATE TOPIC`), failing if one with this
+    /// name already exists — callers implementing `IF NOT EXISTS` check
+    /// `list_topics` first (mirrors `create_sequence`).
+    pub fn create_topic(&self, name: &str, partitions: u32, retention_ms: Option<i64>, retention_bytes: Option<u64>) -> Result<()> {
+        self.check_writable()?;
+        let mut topics = self.topics.lock().unwrap();
+        if topics.contains_key(name) {
+            anyhow::bail!("topic \"{name}\" already exists");
+        }
+        let dir = self.flux_dir.join(name);
+        let log = FluxLog::create(&dir, partitions, RetentionPolicy { retention_ms, retention_bytes })?;
+        topics.insert(name.to_string(), log);
+        info!(topic = name, partitions, "topic created");
+        Ok(())
+    }
+
+    /// Creates `__cdc_<table>` (1 partition, unlimited retention) the first
+    /// time a mutation happens on `table`, otherwise a no-op. Unlike
+    /// `create_topic`, this never errors on "already exists" — it's called
+    /// unconditionally on every insert/update/delete.
+    fn ensure_cdc_topic(&self, table: &str) -> Result<String> {
+        let topic = format!("__cdc_{table}");
+        let mut topics = self.topics.lock().unwrap();
+        if !topics.contains_key(&topic) {
+            let dir = self.flux_dir.join(&topic);
+            let log = FluxLog::create(&dir, 1, RetentionPolicy::default())?;
+            topics.insert(topic.clone(), log);
+        }
+        Ok(topic)
+    }
+
+    /// Publish one record to `topic`. See `storage::flux` module docs for
+    /// partition assignment when `partition` is `None`.
+    pub fn flux_publish(&self, topic: &str, partition: Option<u32>, key: Option<Vec<u8>>, value: Vec<u8>) -> Result<(u32, u64)> {
+        self.check_writable()?;
+        let mut topics = self.topics.lock().unwrap();
+        let log = topics.get_mut(topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+        let (p, offset) = log.publish(partition, key.clone(), value.clone())?;
+        let _ = self.flux_bus.send((topic.to_string(), FluxRecord { offset, key, value, timestamp_ms: super::flux::now_ms() }));
+        Ok((p, offset))
+    }
+
+    /// Publish a native CDC event (see `executor::execute_insert`/`update`/
+    /// `delete`) to `table`'s implicit `__cdc_<table>` topic, auto-creating
+    /// it on first use.
+    pub fn flux_publish_cdc(&self, table: &str, event: serde_json::Value) -> Result<()> {
+        let topic = self.ensure_cdc_topic(table)?;
+        let bytes = serde_json::to_vec(&event)?;
+        self.flux_publish(&topic, None, None, bytes)?;
+        Ok(())
+    }
+
+    /// Records at/after `group`'s tracked offset on `topic`'s `partition`,
+    /// without advancing it.
+    pub fn flux_poll(&self, topic: &str, partition: u32, group: &str, max: usize) -> Result<Vec<FluxRecord>> {
+        let topics = self.topics.lock().unwrap();
+        let log = topics.get(topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+        log.poll(group, partition, max)
+    }
+
+    /// Advances `group`'s tracked offset on `topic`'s `partition`.
+    pub fn flux_commit(&self, topic: &str, partition: u32, group: &str, offset: u64) -> Result<()> {
+        let mut topics = self.topics.lock().unwrap();
+        let log = topics.get_mut(topic).ok_or_else(|| anyhow::anyhow!("topic \"{topic}\" does not exist"))?;
+        log.commit(group, partition, offset)
+    }
+
+    /// Every record currently retained on `topic`'s `partition`, bypassing
+    /// consumer-group tracking — used by the time-travel/windowing table
+    /// functions, which replay the whole log rather than one consumer's
+    /// unread tail.
+    pub fn flux_all(&self, topic: &str, partition: u32) -> Option<Vec<FluxRecord>> {
+        let topics = self.topics.lock().unwrap();
+        topics.get(topic)?.all_records(partition)
+    }
+
+    /// Number of partitions on `topic`, or `None` if it doesn't exist.
+    pub fn flux_num_partitions(&self, topic: &str) -> Option<u32> {
+        self.topics.lock().unwrap().get(topic).map(|t| t.num_partitions())
+    }
+
+    /// `(name, partition_count)` for every topic — `pg_catalog`-style
+    /// introspection, mirrors `list_sequences`.
+    pub fn list_topics(&self) -> Vec<(String, u32)> {
+        self.topics.lock().unwrap().iter().map(|(name, log)| (name.clone(), log.num_partitions())).collect()
+    }
+
+    /// Subscribe to every Flux publish across every topic; the WebSocket
+    /// endpoint filters by topic name itself (mirrors
+    /// `subscribe_notifications`).
+    pub fn subscribe_flux(&self) -> tokio::sync::broadcast::Receiver<(String, FluxRecord)> {
+        self.flux_bus.subscribe()
+    }
+
+    /// Attach or replace a JSON Schema validation rule for one `Json` column
+    /// (`CREATE TABLE ... WITH (json_schema_col = ..., json_schema = ...,
+    /// json_schema_mode = ...)`). Persisted like any other schema mutation
+    /// (`update_table_schema`).
+    pub fn set_json_schema(&self, table: &str, rule: JsonSchemaRule) -> Result<()> {
+        self.check_writable()?;
+        let mut schema = self.schemas.lock().unwrap().get(table).cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        schema.json_schemas.retain(|r| r.column != rule.column);
+        schema.json_schemas.push(rule);
+        self.update_table_schema(schema)
     }
 }
 
