@@ -1,0 +1,48 @@
+[package]
+name = "tpt-canvas"
+version = "0.1.0"
+edition = "2021"
+description = "TPT Canvas — the data-aware frontend framework for TPT Keystone (Rust -> WASM)"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "tsgen"
+path = "src/bin/tsgen.rs"
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "MouseEvent",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "BinaryType",
+    "console",
+]
+
+# `tsgen` (Part 2) speaks a hand-rolled HTTP GET over `std::net::TcpStream`
+# against `/schema` on the host target — same "no HTTP client crate" ethos as
+# `tpt-keystone`'s own wire code, and it avoids dragging a reqwest-style
+# dependency into a crate whose main build target is the browser.

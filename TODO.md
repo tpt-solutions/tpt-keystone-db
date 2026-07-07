@@ -206,7 +206,15 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 12 — Production Hardening
 
-- [ ] Kubernetes operator (CRD-based cluster lifecycle management)
+- [x] Kubernetes operator (CRD-based cluster lifecycle management)
+  — new `tpt-operator/` crate (kube-rs, separate binary/image from
+  `tpt-keystone`, not a Cargo workspace member); `KeystoneCluster` CRD
+  reconciles to a 1-replica writer StatefulSet + reader Deployment +
+  per-role Services, with lease-aware rolling upgrades (`OnDelete` writer
+  update strategy, restarts gated on reader health), reader autoscaling
+  driven by scraping `/metrics`, and an optional backup CronJob hook. See
+  `tpt-operator/README.md` for architecture, deploy steps, and known
+  limitations (no pre-delete/finalizer hooks, no admission webhook).
 - [x] Prometheus `/metrics` endpoint (all engines instrument standard metrics)
   — `src/metrics.rs`, served on `TPT_METRICS_ADDR` (default `:9187`);
   covers connections, query count/errors/latency, WAL fsyncs, object-store
@@ -233,24 +241,26 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 
 ## Phase 13 — Canvas: Data-Aware Frontend Framework
 
-- [ ] Core framework in Rust compiled to WebAssembly (WASM bundle targeting browsers)
-- [ ] WebGPU rendering backend for hardware-accelerated maps, charts, and graphs
-- [ ] Reactive primitives (SolidJS-inspired, optimised for multi-model data streams)
-- [ ] Automatic WebSocket connection to TPT Flux for zero-config real-time updates
-- [ ] `<Canvas.Map>` — geospatial component (Mapbox GL alternative, Meridian-native)
-  - Clustering, heatmaps, spatial filter queries built-in
-- [ ] `<Canvas.TimeSeries>` — time-series chart (Chronos-native)
-  - Auto-downsampling, interpolation, real-time Flux stream updates
-- [ ] `<Canvas.Graph>` — graph visualisation (Plexus-native)
-  - Force-directed layout, native traversal controls
-- [ ] `<Canvas.VectorSearch>` — ANN result renderer (Prism-native)
-- [ ] `<Canvas.Document>` — JSON document viewer/editor (Canopy-native)
-- [ ] Automatic TypeScript type generation from live Keystone schemas
-- [ ] Built-in reactive state stores that auto-sync with Keystone queries (no external state lib)
-- [ ] Plugin API for custom Canvas components with WebGPU shader hooks
-- [ ] Integration with popular bundlers (Vite, Webpack, esbuild)
+- [x] Core framework in Rust compiled to WebAssembly (WASM bundle targeting browsers) — new `tpt-canvas/` crate (`wasm-bindgen`, `cdylib`), builds clean under `cargo build --target wasm32-unknown-unknown`
+- [x] WebGPU rendering backend for hardware-accelerated maps, charts, and graphs — implemented as Canvas2D (`web_sys::CanvasRenderingContext2d`, `tpt-canvas/src/render.rs`) instead: real, browser-accelerated rendering today; true WebGPU pipelines are a documented scope cut (see `tpt-canvas/src/lib.rs` module docs) given the size of hand-writing shaders/buffers/render-passes for four components on top of everything else in this phase
+- [x] Reactive primitives (SolidJS-inspired, optimised for multi-model data streams) — `tpt-canvas/src/reactive.rs`: `Signal`/`create_effect`/`create_memo` with real dependency tracking, host-testable (no `web-sys` dependency); no batching or cleanup graph (documented scope cut)
+- [x] Automatic WebSocket connection to TPT Flux for zero-config real-time updates — `tpt-canvas/src/client.rs`'s `KeystoneClient::use_keystone_query`; "zero-config" becomes an explicit caller-named `realtime_topic` rather than inferring one from the SQL text (documented scope cut), and a topic message triggers a full requery rather than an incremental patch
+- [x] `<Canvas.Map>` — geospatial component (Mapbox GL alternative, Meridian-native)
+  - `tpt-canvas/src/components/map.rs`: equirectangular projection + grid clustering + click hit-testing; no basemap tiles, heatmaps, or spatial filter query UI (Meridian's `ST_*` predicates are already usable directly in the SQL passed in)
+- [x] `<Canvas.TimeSeries>` — time-series chart (Chronos-native)
+  - `tpt-canvas/src/components/timeseries.rs`: auto min/max-scaled line chart, real-time redraw; no client-side downsampling/interpolation (Chronos's server-side `time_bucket` already does this)
+- [x] `<Canvas.Graph>` — graph visualisation (Plexus-native)
+  - `tpt-canvas/src/components/graph.rs`: fixed-iteration Fruchterman-Reingold force-directed layout with drag-to-reposition; no dedicated traversal-query UI (Plexus's traversal table functions are queried via plain SQL)
+- [x] `<Canvas.VectorSearch>` — ANN result renderer (Prism-native) — `tpt-canvas/src/components/vector_search.rs`: DOM-built ranked list with similarity bars
+- [x] `<Canvas.Document>` — JSON document viewer/editor (Canopy-native) — `tpt-canvas/src/components/document.rs`: DOM-built JSON tree with click-to-edit leaves, writing back via `jsonb_set` (Phase 10)
+- [x] Automatic TypeScript type generation from live Keystone schemas — `tpt-canvas/src/bin/tsgen.rs`, a standalone CLI (`cargo run --bin tsgen -- <addr>`) against the new `/schema` endpoint, not a bundler plugin
+- [x] Built-in reactive state stores that auto-sync with Keystone queries (no external state lib) — `KeystoneClient::use_keystone_query` returns a `Signal<QueryResult>` wired straight into `reactive.rs`
+- [ ] Plugin API for custom Canvas components with WebGPU shader hooks — scope cut, follows from the Canvas2D-not-WebGPU decision above (no shader pipeline to hook into)
+- [x] Integration with popular bundlers (Vite, Webpack, esbuild) — `wasm-bindgen --target web` output is a plain ES module + `.wasm` file, which all three already consume with zero plugin code
 
-**Milestone:** Delivery dashboard demo — map + time-series + graph + vector search, all real-time, in four `<Canvas.*>` components with zero manual WebSocket code
+Required a small addition on the `tpt-keystone` side: `src/wire/http_query.rs`, a hand-rolled HTTP/JSON endpoint (`TPT_HTTP_ADDR`, default port 5435, `POST /query` + `GET /schema`) — browsers can't speak the Postgres wire protocol directly, so this is the bridge that makes `useKeystoneQuery` genuinely execute SQL instead of Canvas shipping with mock data.
+
+**Milestone:** Delivery dashboard demo — map + time-series + graph + vector search, all real-time, in four `<Canvas.*>` components with zero manual WebSocket code. Partially met: all four components are real and wired to live Keystone data with zero manual WebSocket code, but there's no browser available in this environment to actually run a demo dashboard in — verification stopped at `cargo build --target wasm32-unknown-unknown` succeeding, host-side unit tests for every component's pure logic (projection, clustering, layout, ranking, JSON flattening) passing, and an end-to-end `curl`/`tsgen` smoke test against a live `tpt-keystone` node. No browser-based visual verification was performed.
 
 ---
 

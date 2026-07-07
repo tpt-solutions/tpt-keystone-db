@@ -114,6 +114,27 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Canvas (Phase 13) HTTP/JSON query endpoint, alongside the other
+    // auxiliary listeners — browsers can't speak the Postgres wire protocol
+    // directly, so this is the bridge `tpt-canvas`'s `useKeystoneQuery` hits.
+    let http_addr = std::env::var("TPT_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:5435".to_string());
+    let http_listener = TcpListener::bind(&http_addr).await?;
+    info!("TPT Keystone Canvas HTTP query endpoint listening on {http_addr}");
+    let http_db = db.clone();
+    tokio::spawn(async move {
+        loop {
+            match http_listener.accept().await {
+                Ok((stream, peer)) => {
+                    let db = http_db.clone();
+                    tokio::spawn(async move {
+                        wire::http_query::handle(stream, peer, db).await;
+                    });
+                }
+                Err(e) => error!(error = %e, "Canvas HTTP listener accept failed"),
+            }
+        }
+    });
+
     // Prometheus metrics endpoint (Phase 12 — production hardening). Its own
     // port for the same reason MCP/Flux get their own: independent of the
     // Postgres wire listener's connection-admission semaphore, since scrapes

@@ -1,0 +1,35 @@
+apiVersion: tpt.dev/v1alpha1
+kind: KeystoneCluster
+metadata:
+  name: demo
+  namespace: default
+spec:
+  image: ghcr.io/example/tpt-keystone:0.1.0 # replace with your built/pushed image
+  readerReplicas: 2
+  storage:
+    backend: S3
+    bucket: my-tpt-bucket
+    region: us-east-1
+    # endpoint: http://minio.default.svc:9000   # for a MinIO/S3-compatible dev bucket
+    # credentialsSecret: tpt-s3-credentials      # Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 6
+    targetConnectionsPerReader: 50
+  backup:
+    schedule: "0 3 * * *"
+    command: ["/bin/sh", "-c", "echo replace-with-a-real-object-store-snapshot-command"]
+---
+# Example of the Local (dev-only) storage backend instead of S3 — requires a
+# pre-existing PVC with ReadWriteMany access mode named "tpt-demo-store".
+# apiVersion: tpt.dev/v1alpha1
+# kind: KeystoneCluster
+# metadata:
+#   name: demo-local
+#   namespace: default
+# spec:
+#   image: ghcr.io/example/tpt-keystone:0.1.0
+#   readerReplicas: 1
+#   storage:
+#     backend: Local
+#     claimName: tpt-demo-store
