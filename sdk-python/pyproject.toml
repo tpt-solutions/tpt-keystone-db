@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tpt-sdk"
+version = "0.1.0"
+description = "Python client SDK for TPT Keystone, a hand-written Postgres-wire-compatible database engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "TPT" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+    "Intended Audience :: Developers",
+]
+dependencies = []
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5", "numpy>=1.23"]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tpt_sdk = ["py.typed"]

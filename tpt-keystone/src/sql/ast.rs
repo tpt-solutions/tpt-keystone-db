@@ -115,6 +115,7 @@ pub struct UpdateStmt {
 #[derive(Debug, Clone)]
 pub struct CreateTableStmt {
     pub table: String,
+    pub if_not_exists: bool,
     pub columns: Vec<ColumnDef>,
     pub table_constraints: Vec<TableConstraint>,
     /// `WITH (key = 'value', ...)` trailing the column/constraint list —

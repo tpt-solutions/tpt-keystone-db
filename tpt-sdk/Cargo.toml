@@ -1,0 +1,33 @@
+[package]
+name = "tpt-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "TPT SDK/Rust — native desktop & server access to TPT Keystone and TPT Canvas"
+license = "Apache-2.0"
+
+[lib]
+name = "tpt_sdk"
+# cdylib/staticlib so the `ffi` feature produces a linkable C ABI; rlib for
+# normal Rust consumers (Tauri/GTK apps, servers).
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = ["keystone"]
+# Embedded/native Keystone client (sync + async), over the same hand-written
+# Postgres-wire-v3 protocol `tpt-keystone/src/wire` speaks — see src/keystone/wire.rs.
+keystone = ["tokio", "bytes", "anyhow"]
+# Pulls in `tpt-canvas`'s target-agnostic reactive core. Does NOT provide
+# native WebGPU/Vulkan rendering — see the module doc on src/canvas.rs for why.
+canvas = ["tpt-canvas"]
+# extern "C" bindings for C/C++ interop (src/ffi.rs).
+ffi = ["keystone"]
+
+[dependencies]
+tpt-canvas = { path = "../tpt-canvas", optional = true }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "io-util", "macros"], optional = true }
+bytes = { version = "1", optional = true }
+thiserror = "1"
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

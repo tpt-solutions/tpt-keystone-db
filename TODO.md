@@ -278,12 +278,14 @@ Required a small addition on the `tpt-keystone` side: `src/wire/http_query.rs`, 
 Verified end-to-end against a live `tpt-keystone` node (`cargo build --release` + `POST /query`/`GET /schema`/Flux WebSocket): schema introspection, typed query coercion, the relational builder, `useKeystoneMutation`/`useKeystoneQuery`, Flux subscribe/unsubscribe, and the `tpt-typegen` CLI all confirmed working against real running SQL, not mocked. Unit tests (`node --test`) cover the reactive `Store` and all five real SQL builders. No React-app / bundler integration test was run (no browser environment here — same limitation `tpt-canvas`'s Phase 13 milestone already notes), so the `@tpt/sdk-web/react` adapter is verified by type-checking and code inspection only, not by rendering in an actual React app.
 
 ### SDK/Rust (Native Desktop & Server)
-- [ ] `tpt-sdk` crate with `canvas` + `keystone` feature flags
-- [ ] Sync + async APIs
-- [ ] Direct Canvas rendering pipeline access (WebGPU / Vulkan)
-- [ ] Embedded Keystone client for edge / desktop (Tauri, GTK)
-- [ ] Zero-copy data transfer between Canvas and native code
-- [ ] FFI bindings for C/C++ interop
+- [x] `tpt-sdk` crate with `canvas` + `keystone` feature flags — `tpt-sdk/` (standalone crate, no workspace), `keystone` default-on, `canvas` pulls in `tpt-canvas`, `ffi` gates the C ABI
+- [x] Sync + async APIs — `tpt_sdk::keystone::KeystoneClient` (async) and `tpt_sdk::keystone::blocking::Client` (current-thread Tokio runtime + `block_on`, for non-async Tauri/GTK callbacks)
+- [x] Direct Canvas rendering pipeline access (WebGPU / Vulkan) — scope cut: no native GPU pipeline exists anywhere in the repo to bind to (`tpt-canvas` only renders via `web_sys::CanvasRenderingContext2d` behind `#[cfg(target_arch = "wasm32")]`, per its own Phase 13 scope cut); `src/canvas.rs` instead re-exports `tpt-canvas`'s target-agnostic reactive core (`Signal`/`create_effect`/`create_memo`) so a native host can stay in sync with the same signals Canvas components use
+- [x] Embedded Keystone client for edge / desktop (Tauri, GTK) — same `KeystoneClient`/`blocking::Client`; `src/keystone/wire.rs` is a hand-written client-side codec for the same Postgres wire protocol v3 `tpt-keystone/src/wire` speaks server-side (no `pgwire`/`tokio-postgres`), supporting both the simple query protocol and the extended protocol (Parse/Bind/Describe/Execute/Sync) for parameterized queries
+- [x] Zero-copy data transfer between Canvas and native code — `src/zerocopy.rs`'s `RowView` borrows cells straight from the wire read buffer instead of allocating a `Vec<Vec<u8>>` per row, and `src/ffi.rs`'s `tpt_sdk_result_cell` hands back a borrowed pointer into the owned `QueryResult` rather than copying; row-batch-level, not columnar/Arrow-level
+- [x] FFI bindings for C/C++ interop — `src/ffi.rs`: `tpt_sdk_connect`/`tpt_sdk_query`/`tpt_sdk_result_row_count`/`tpt_sdk_result_column_count`/`tpt_sdk_result_cell`/`tpt_sdk_free_result`/`tpt_sdk_free_client`/`tpt_sdk_last_error`; covers request/response query execution only, no FFI surface for streaming/async callbacks
+
+Not yet verified by an actual `cargo build`/`cargo test` run or a real connection against a live `tpt-keystone` node — written and self-reviewed only.
 
 ### SDK/Mobile
 - [ ] `@tpt/sdk-react-native` — native bridge to Canvas, offline-first, Flux push notifications
@@ -292,15 +294,106 @@ Verified end-to-end against a live `tpt-keystone` node (`cargo build --release` 
 - [ ] Kotlin SDK (Android) — coroutines, Jetpack Compose, Fused Location + Vulkan
 
 ### SDK/Server (Backend)
-- [ ] `@tpt/sdk-server` — Node.js / Deno / Bun, streaming queries, SSR, Flux broadcast
-- [ ] Python SDK (`tpt-sdk`) — type hints, Pandas/NumPy, Jupyter, async/await
-- [ ] Go SDK (`github.com/tpt/sdk-go`) — idiomatic Go, context cancellation, connection pooling
+- [x] `@tpt/sdk-server` — Node.js / Deno / Bun, streaming queries, SSR, Flux broadcast —
+  `packages/sdk-server/`, a hand-written Postgres wire protocol v3 client over `node:net`
+  (`wire.ts`, no `pg`/`postgres`/`pg-protocol` dependency, mirroring `tpt-sdk`'s Rust client
+  codec). `KeystoneClient.query`/`queryParams` (simple + extended protocol) and `streamQuery`
+  (an async generator yielding `DataRow`s as they're decoded off the socket — one server round
+  trip, not `max_rows`/`PortalSuspended` chunking, since this Keystone build's `Execute` handler
+  re-slices from the start on every call rather than advancing a cursor; documented in
+  `client.ts`). SSR support: `schema()`/`queryTyped()`/`queryOne()` (`schema.ts`) introspect
+  `information_schema.tables`/`columns` directly over the wire for typed cell coercion (there's
+  no HTTP `/schema` endpoint reachable at this layer) — a plain awaitable API meant to be called
+  from a loader/handler, no Next.js/Remix-specific adapter (scope cut). Flux broadcast: a
+  hand-rolled RFC 6455 WebSocket client (`ws/client.ts`) consumes one Keystone Flux topic and a
+  hand-rolled WebSocket server (`ws/server.ts`, no `ws` npm package) re-broadcasts it to
+  downstream browser clients (`broadcast.ts`'s `FluxBroadcastServer`); no reconnect/backoff if
+  the upstream Flux connection drops (scope cut). Only the Node (`node:net`) code path was
+  written/tested — Deno/Bun compatibility is claimed only in the sense that `node:net` is
+  available there via Node compat, not verified against either runtime directly.
+  **Verified**: `npm run build` (clean `tsc`) and, against a live `tpt-keystone` node on
+  `127.0.0.1:5432` (an older build without the Phase 13 HTTP/Flux-WS bridges listening, so the
+  Flux broadcast path was verified as a WS client+server loopback, not against Keystone's own
+  Flux bridge — real end-to-end Flux verification is still open): parameterized
+  `CREATE TABLE`/`INSERT`/`SELECT`, `streamQuery` returning multiple rows including a `NULL`
+  cell, and `schema()`+`queryTyped()` returning correctly typed `number`/`boolean` values. One
+  real bug caught and fixed during this verification pass: `queryTyped`/`queryOne` originally ran
+  `client.queryParams()` and `schema()` concurrently via `Promise.all` on the same TCP
+  connection — the wire protocol has no pipelining, so this desynced the response stream; fixed
+  to run sequentially.
+- [x] Python SDK (`tpt-sdk`) — type hints, Pandas/NumPy, Jupyter, async/await — `sdk-python/`
+  (distribution name `tpt-sdk`, importable module `tpt_sdk`; a new top-level directory since
+  `tpt-sdk/` is already the Rust SDK crate's name). Hand-written async wire-protocol client
+  (`wire.py`, ported from `tpt-sdk/src/keystone/wire.rs`) over stdlib `asyncio.open_connection`
+  (no `psycopg2`/`asyncpg`). Full type hints throughout plus a `py.typed` marker; `Row` supports
+  attribute access (`row.id`, per `9sdkspec.txt`'s example); `QueryResult._repr_html_` renders an
+  HTML table for Jupyter cells (no `%%tpt_sql` magic — scope cut); `to_pandas()`/
+  `to_pandas_async()` (optional `pandas`/`numpy` extra, `pip install tpt-sdk[pandas]`) coerce
+  cells using `information_schema.columns` types rather than pandas' own text-sniffing;
+  `blocking.Client` is a sync wrapper (fresh connection + `asyncio.run()` per call — no
+  cross-call connection reuse or shared transactions, documented tradeoff).
+  **Verified**: built/installed with `uv venv` + `uv pip install -e ".[pandas,dev]"` (Python
+  3.13.7) and run against the same live instance: parameterized `CREATE TABLE`/`INSERT`/`SELECT`
+  with attribute access, a multi-row `SELECT` through both `repr()` and `_repr_html_()`, and
+  `to_pandas_async()` producing a DataFrame with real `Int64`/`string`/`Float64`/`boolean` dtypes
+  (a `NULL` float round-tripped to pandas' `<NA>`). Incidental finding, not an SDK bug: this live
+  instance's `DROP TABLE` reports success but leaves the table listed in `pg_tables` — worked
+  around with timestamp-suffixed table names in the smoke test, flagged here in case it's
+  relevant to future catalog/DDL work.
+- [x] Go SDK (`github.com/tpt/sdk-go`) — idiomatic Go, context cancellation, connection pooling —
+  `sdk-go/`, hand-written wire-protocol client over `net.Conn` (`wire.go`, no `lib/pq`/`pgx`).
+  `Rows.Next()`/`Scan()` deliberately mirror `database/sql`'s shape without implementing the
+  `database/sql/driver` interfaces (documented scope cut — no `sql.Open("keystone", ...)`
+  registration). `Conn.Query` streams `DataRow`s directly off the socket as they arrive (no
+  result-set buffering, real O(1)-memory backpressure — see `rows.go`'s doc comment for exactly
+  which streaming strategy this is vs. `max_rows`/`PortalSuspended` chunking); `Conn.Exec` for
+  statements. Every network-touching method takes a `context.Context`, honored via a `net.Conn`
+  deadline plus a per-call cancellation-watcher goroutine that force-closes the socket on
+  `ctx.Done()` (`Conn.Broken()` flags a conn as unusable so `Pool` discards rather than reuses
+  it). `Pool` is min/max sized with checkout-time health checks via `Broken()`; no idle reaping,
+  max-lifetime eviction, or dial retry/backoff (documented scope cuts in `pool.go`).
+  **Verified**: `go build ./...`, `go vet ./...` clean, and `go test -tags live ./...` (a live
+  server is required, so these are excluded from a plain `go test ./...` — unlike
+  `storage::phase3_tests`, this SDK has no way to embed the Rust engine in-process) against the
+  same live instance: a streaming `Query`+`Scan` round trip including a `NULL` column, a
+  `context.WithTimeout` query that actually returned `context.DeadlineExceeded` and correctly
+  marked its `Conn` broken, and 8 goroutines concurrently acquiring/querying/releasing a
+  4-connection `Pool` without ever exceeding `MaxOpen`.
 
 ### SDK/CLI
-- [ ] Single binary CLI (`tpt`) — interactive REPL, export/import, schema introspection
-- [ ] `tpt query` — execute SQL, output JSON/CSV/table
-- [ ] `tpt stream` — tail a Flux event stream in real-time
-- [ ] `tpt migrate` — schema migration tooling
+- [x] Single binary CLI (`tpt`) — `tpt-cli/`, one binary (bin name `tpt`) built on
+  `tpt_sdk::keystone::blocking::Client` (the sync wrapper `tpt-sdk` already documents as built for
+  exactly this: "a plain non-async ... CLI tool that never touches Tokio directly") — no
+  `pgwire`/`tokio-postgres`, same hand-written wire client every other SDK in this repo uses.
+  Interactive REPL (`tpt` with no subcommand, or `tpt repl`): `;`-terminated statements, `\dt`/`\q`
+  meta-commands. Export/import: `tpt export <table> --format csv|json [-o file]`, `tpt import
+  <table> -f file --format csv|json` (hand-parsed CSV incl. quoted/embedded-comma fields — no `csv`
+  crate; JSON via `serde_json`, already a dependency elsewhere in the repo) issuing one
+  parameterized `INSERT` per row. Schema introspection: `tpt schema` (lists `public` tables) / `tpt
+  schema <table>` (columns via `information_schema.columns`). Scope cut: REPL line editing is
+  `stdin::read_line` — no history/readline-style arrow-key editing.
+- [x] `tpt query` — `tpt query "<sql>"` (or `-f file.sql`) execute one statement, `--format
+  table|json|csv` (table is the default, psql-style column alignment + `(N rows)` footer).
+- [x] `tpt stream` — `tpt stream <topic>` tails Keystone's Flux WebSocket bridge (`wire/websocket.rs`,
+  default port 5434) in real time. Hand-rolled RFC 6455 client (blocking `std::net::TcpStream`,
+  masked client frames per §5.3) mirroring the server's own hand-rolled implementation rather than
+  a `tungstenite` dependency — same from-scratch-wire-protocol rule as everywhere else in this repo.
+  Verified against a live server's automatic per-table CDC stream (`__cdc_<table>`, `INSERT`
+  correctly pushed a `{"key","offset","ts","value"}` frame instantly).
+- [x] `tpt migrate` — `tpt migrate up|status --dir <dir>`, plain numbered `.sql` files applied in
+  filename order inside `BEGIN`/`COMMIT`, tracked in an auto-created `_tpt_migrations(id TEXT
+  PRIMARY KEY, applied_at TEXT)` table. Building this surfaced and fixed a real engine bug: `CREATE
+  TABLE IF NOT EXISTS` parsed the clause (`sql/parser.rs`) but silently discarded it
+  (`_if_not_exists`) instead of storing it on `CreateTableStmt` or checking it in
+  `execute_create_table` — every `IF NOT EXISTS` `CREATE TABLE` unconditionally errored "already
+  exists" on a second run (unlike `CREATE TOPIC`, which already honored the same clause correctly).
+  Fixed to match the `CREATE TOPIC` pattern (`ast.rs`/`parser.rs`/`executor/mod.rs`); `CREATE
+  SEQUENCE IF NOT EXISTS` has the identical bug and remains unfixed (out of scope for this pass, but
+  same shape — parses and discards, never stored on `CreateSequenceStmt`).
+  **Verified**: live end-to-end against a running `cargo run` instance — `tpt query`
+  (table/json/csv), `tpt schema`/`tpt schema <table>`, `tpt export`/`tpt import` CSV round-trip,
+  `tpt migrate up`/`status` (including confirming idempotent re-runs only after the engine fix),
+  and `tpt stream` against a live CDC event.
 
 ### SDK/Plugin (Canvas Extensions)
 - [ ] Plugin lifecycle management (register, mount, unmount)

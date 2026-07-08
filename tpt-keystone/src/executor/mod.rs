@@ -1228,6 +1228,10 @@ fn resolve_column_indices(columns: &[ColumnDef], names: &[String]) -> anyhow::Re
 }
 
 fn execute_create_table(ct: crate::sql::ast::CreateTableStmt, db: Arc<Database>) -> anyhow::Result<QueryResult> {
+    if ct.if_not_exists && db.list_tables()?.iter().any(|name| name == &ct.table) {
+        return Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE TABLE".into() });
+    }
+
     let mut columns: Vec<ColumnDef> = Vec::with_capacity(ct.columns.len());
     let mut unique_groups: Vec<Vec<usize>> = Vec::new();
     let mut foreign_keys: Vec<ForeignKey> = Vec::new();

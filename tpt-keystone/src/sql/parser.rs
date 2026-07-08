@@ -237,7 +237,7 @@ impl Parser {
     }
 
     fn parse_create_table(&mut self) -> anyhow::Result<Stmt> {
-        let _if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
+        let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
             self.advance(); self.advance();
             self.expect(&Token::Exists)?;
             true
@@ -388,7 +388,7 @@ impl Parser {
             Vec::new()
         };
 
-        Ok(Stmt::CreateTable(CreateTableStmt { table, columns, table_constraints, options }))
+        Ok(Stmt::CreateTable(CreateTableStmt { table, if_not_exists, columns, table_constraints, options }))
     }
 
     /// `ALTER TABLE [ONLY] table ALTER [COLUMN] col SET DEFAULT expr |
