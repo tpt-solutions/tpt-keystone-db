@@ -267,13 +267,15 @@ Required a small addition on the `tpt-keystone` side: `src/wire/http_query.rs`, 
 ## Phase 14 — SDK Ecosystem
 
 ### SDK/Web (TypeScript / JavaScript)
-- [ ] `@tpt/sdk-web` npm package
-- [ ] Full TypeScript type definitions auto-generated from Keystone schemas
-- [ ] `useKeystoneQuery` / `useKeystoneMutation` reactive hooks
-- [ ] Native WebSocket integration with TPT Flux
-- [ ] Type-safe builders for all 7 data models
-- [ ] Plugin API for custom Canvas components
-- [ ] Bundler integration (Vite, Webpack, esbuild)
+- [x] `@tpt/sdk-web` npm package — `packages/sdk-web/`, plain ESM + `.d.ts` output (`tsc`, no bundler-specific build step)
+- [x] Full TypeScript type definitions auto-generated from Keystone schemas — `packages/sdk-web/src/bin/typegen.ts` (`npx tpt-typegen <url>`), a TS sibling of `tpt-canvas/src/bin/tsgen.rs` against the same `GET /schema` endpoint
+- [x] `useKeystoneQuery` / `useKeystoneMutation` reactive hooks — `src/hooks.ts` (framework-agnostic, built on a minimal `Store` in `src/reactive.ts`) plus a React adapter (`src/react.tsx`, `useSyncExternalStore`) exported from `@tpt/sdk-web/react`
+- [x] Native WebSocket integration with TPT Flux — `src/flux.ts`'s `subscribeFlux` speaks `wire::websocket`'s subscribe/push protocol directly; `useKeystoneQuery`'s `realtimeTopic` option wires a topic to an automatic requery, same "full requery, not incremental patch" scope cut as `tpt-canvas`'s `use_keystone_query`
+- [x] Type-safe builders for all 7 data models — `src/models.ts`: `relational`/`geospatial`/`timeseries`/`graph`/`document` build real SQL against function names verified in `executor/*_tests.rs` (`ST_DWithin`, `time_bucket`, `graph_neighbors`/`graph_bfs`/`graph_shortest_path`, `jsonb_set`); `vector` takes a caller-supplied distance expression since Prism (Phase 7) has no native ANN operator yet; `events` is a thin topic-name helper since the poll/commit cursor API is Postgres-wire-only, unreachable from a browser
+- [x] Plugin API for custom Canvas components — `src/plugin.ts`'s `definePlugin`/`PluginRegistry`; components draw into a supplied `CanvasRenderingContext2D` (no WebGPU shader hooks, following `tpt-canvas`'s own Canvas2D-not-WebGPU scope cut)
+- [x] Bundler integration (Vite, Webpack, esbuild) — plain ESM output via `"exports"` in `package.json`, zero plugin code required, same story as `tpt-canvas`'s `wasm-bindgen --target web` output
+
+Verified end-to-end against a live `tpt-keystone` node (`cargo build --release` + `POST /query`/`GET /schema`/Flux WebSocket): schema introspection, typed query coercion, the relational builder, `useKeystoneMutation`/`useKeystoneQuery`, Flux subscribe/unsubscribe, and the `tpt-typegen` CLI all confirmed working against real running SQL, not mocked. Unit tests (`node --test`) cover the reactive `Store` and all five real SQL builders. No React-app / bundler integration test was run (no browser environment here — same limitation `tpt-canvas`'s Phase 13 milestone already notes), so the `@tpt/sdk-web/react` adapter is verified by type-checking and code inspection only, not by rendering in an actual React app.
 
 ### SDK/Rust (Native Desktop & Server)
 - [ ] `tpt-sdk` crate with `canvas` + `keystone` feature flags

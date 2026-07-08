@@ -16,3 +16,9 @@ Thumbs.db
 # Keystone runtime data (local object-store emulation, NVMe cache, WAL/indexes)
 **/tpt-data/
 
+# Node / JS packages
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
