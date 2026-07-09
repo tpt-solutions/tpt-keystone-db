@@ -13,5 +13,17 @@ export type { QueryState, QueryHandle, MutationState, MutationHandle, UseKeyston
 export { relational, geospatial, timeseries, graph, document, vector, events } from "./models.js";
 export type { BuiltQuery, SelectOptions, GraphDirection } from "./models.js";
 
-export { definePlugin, installPlugins, PluginRegistry } from "./plugin.js";
-export type { CanvasPlugin, CanvasComponentDefinition, CanvasPluginContext } from "./plugin.js";
+export { definePlugin, installPlugins, PluginRegistry, PluginEventBus } from "./plugin.js";
+export type {
+  CanvasPlugin,
+  CanvasComponentDefinition,
+  CanvasPluginContext,
+  MountedComponent,
+  PluginEventHandler,
+} from "./plugin.js";
+
+export { CanvasGpuContext, createGpuContext, isWebGpuSupported, GpuBufferUsage, GpuMapMode } from "./plugin-gpu.js";
+export type { ComputeBufferSpec, RunComputeOptions, RenderFragmentOptions } from "./plugin-gpu.js";
+
+export { validateManifest, loadManifest } from "./plugin-manifest.js";
+export type { PluginManifest } from "./plugin-manifest.js";

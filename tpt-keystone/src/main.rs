@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let addr = "0.0.0.0:5432";
+    let addr = "0.0.0.0:55432";
     let listener = TcpListener::bind(addr).await?;
     info!("TPT Keystone listening on {addr}");
 

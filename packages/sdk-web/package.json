@@ -17,7 +17,8 @@
     }
   },
   "bin": {
-    "tpt-typegen": "./dist/bin/typegen.js"
+    "tpt-typegen": "./dist/bin/typegen.js",
+    "tpt-plugin-publish": "./dist/bin/plugin-publish.js"
   },
   "files": [
     "dist"

@@ -1,0 +1,30 @@
+{
+  "name": "@tpt/sdk-edge",
+  "version": "0.1.0",
+  "description": "TPT SDK/Edge — zero-dependency TypeScript client for TPT Keystone's Canvas HTTP/JSON query bridge and Flux WebSocket stream, built for V8-isolate edge runtimes (Cloudflare Workers, Fastly Compute, Vercel Edge, Lambda@Edge).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

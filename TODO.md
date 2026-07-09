@@ -396,15 +396,59 @@ Not yet verified by an actual `cargo build`/`cargo test` run or a real connectio
   and `tpt stream` against a live CDC event.
 
 ### SDK/Plugin (Canvas Extensions)
-- [ ] Plugin lifecycle management (register, mount, unmount)
-- [ ] Custom rendering hooks (WebGPU compute + fragment shaders)
-- [ ] Inter-plugin event system
-- [ ] Marketplace publishing toolchain
+- [x] Plugin lifecycle management (register, mount, unmount) — `packages/sdk-web/src/plugin.ts`'s
+  `PluginRegistry.install`/`uninstall` (plugin-level: `setup` → `mount`, and `unmount` on teardown)
+  plus `mountComponent`/`MountedComponent.update`/`unmount` (per-instance render lifecycle); uninstalling
+  a plugin also tears down any live component instances it owns before calling its `unmount` hook
+- [x] Custom rendering hooks (WebGPU compute + fragment shaders) — `packages/sdk-web/src/plugin-gpu.ts`'s
+  `createGpuContext`/`CanvasGpuContext.runCompute`/`renderFragment`, a real `navigator.gpu` compute +
+  vertex/fragment pipeline a `CanvasComponentDefinition.renderGpu` can opt into; lives in the JS/TS SDK
+  layer rather than `tpt-canvas`'s Rust core since that crate's own Phase 13 scope cut already committed
+  to Canvas2D over WebGPU (see `tpt-canvas/src/lib.rs`) — there's no Rust shader pipeline to hook into,
+  so this hooks the browser's native WebGPU API directly instead. Only exercisable in a real browser
+  (no `node --test` coverage, same DOM-availability limitation as Phase 13's milestone)
+- [x] Inter-plugin event system — `packages/sdk-web/src/plugin-events.ts`'s `PluginEventBus`
+  (`on`/`once`/`off`/`emit`/`clear`), exposed per-registry as `PluginRegistry.events` so any installed
+  plugin's `setup`/component `render` can publish/subscribe without importing another plugin directly
+- [x] Marketplace publishing toolchain — `packages/sdk-web/src/plugin-manifest.ts` (manifest schema +
+  validation) and `src/bin/plugin-publish.ts` (`npx tpt-plugin-publish <manifest> [--out dir] [--registry
+  url]`): validates the manifest, dynamically imports the built entry file to confirm it actually exports
+  a `CanvasPlugin` shape, packages it into a self-contained `<name>-<version>.tptplugin.json` artifact
+  (sha256 checksum + base64 code), and optionally POSTs it to a caller-supplied registry URL. There's no
+  hosted TPT plugin registry to publish to yet, so `--registry` was verified against a local `node:http`
+  server in `plugin-publish.test.ts`, not a real marketplace.
+
+**Verified**: `npm run build` (clean `tsc`) and `node --test` — 29 passing tests across `plugin.test.ts`,
+`plugin-events.test.ts`, `plugin-manifest.test.ts`, and `plugin-publish.test.ts` (existing suites
+unaffected); `tpt-plugin-publish` run end-to-end against a real fixture plugin + manifest, producing a
+valid `.tptplugin.json` artifact with a checksum verified against the source file by hand. `plugin-gpu.ts`
+is written and self-reviewed only — no browser environment here to exercise `navigator.gpu` for real.
 
 ### SDK/Edge (Wasm Workers)
-- [ ] `@tpt/sdk-edge` — <50KB WASM bundle for Cloudflare Workers / Fastly / Lambda@Edge
-- [ ] Streaming responses + edge caching integration
-- [ ] Zero cold-start profile
+- [x] `@tpt/sdk-edge` — `packages/sdk-edge/`, zero-dependency TS client (no `node:*` imports) for
+  Cloudflare Workers / Fastly Compute / Vercel Edge / Lambda@Edge. Deliberate scope adjustment from the
+  literal "WASM bundle" phrasing: these runtimes already expose `fetch`/`WebSocket`/`Cache` as ambient
+  globals, and most (Fastly, Vercel Edge, Lambda@Edge) can't open a raw outbound TCP socket at all — only
+  Cloudflare Workers can via `connect()`. Talking the same Canvas HTTP/JSON bridge `@tpt/sdk-web` uses
+  (`src/client.ts`, `wire::http_query.rs`) keeps one code path working on every target instead of a
+  Workers-only fast path plus a fallback, and avoids shipping/instantiating an actual `.wasm` binary,
+  which would cost cold-start time for no benefit here (no compute-heavy inner loop to justify it)
+- [x] Streaming responses + edge caching integration — `src/stream.ts`'s `subscribeFlux` reuses the Flux
+  WebSocket bridge (`wire::websocket.rs`) for real-time push (the HTTP/JSON bridge is explicitly
+  non-streaming server-side, see that file's module doc); throws a clear error instead of hanging on
+  runtimes without global `WebSocket` (e.g. Lambda@Edge). `src/cache.ts`'s `cachedQuery`/
+  `invalidateCachedQuery` synthesize a GET `Request` keyed by `sql`+`params` against the standard Web
+  `Cache` API (`caches.default` / `caches.open`), so repeat reads skip Keystone entirely within a
+  caller-set `ttlSeconds`
+- [x] Zero cold-start profile — no `.wasm` instantiation step and no runtime dependencies at all; built
+  output is ~4.6KB across `client.js`/`stream.js`/`cache.js`/`index.js`, well under the 50KB budget
+
+**Verified**: `npm run build` (clean `tsc`) and `node --test` — 5 passing tests (`client.test.ts`,
+`cache.test.ts`) mocking global `fetch`/`Cache` to cover query zipping, typed coercion via `schema()`,
+error propagation, Flux URL derivation, and cache hit/miss/invalidate behavior. No real edge-runtime
+deployment (Cloudflare Workers/Fastly/Vercel) was exercised — verification stopped at Node-based unit
+tests against mocked globals plus a clean build; `subscribeFlux`'s "no global `WebSocket`" guard is
+unit-tested but not confirmed against a real Lambda@Edge environment.
 
 **Milestone:** Single-line connection to Keystone works from Web, Rust, Python, and CLI; `tpt query "SELECT 1"` returns a result
 
@@ -414,25 +458,34 @@ Not yet verified by an actual `cargo build`/`cargo test` run or a real connectio
 
 ## Phase 15 — Harbor: Universal Data Migration Platform
 
-- [ ] Core migration engine (Rust, zero-copy bulk transfer, parallel workers, checkpoint/resume on failure)
-- [ ] Schema Translator — rule-based AST engine mapping source DDL to optimal TPT engine schemas
-- [ ] Verification Engine — xxHash3 per-row/per-column checksums, distribution analysis, query regression testing
-- [ ] Migration lifecycle: Discover → Validate (Dry Run) → Snapshot → Replicate (Live CDC) → Verify → Cutover
-- [ ] **Harbor/PG** — PostgreSQL → Keystone (pgwire bulk reads + WAL logical replication for live sync; PL/pgSQL → WASM UDFs)
-- [ ] **Harbor/Mongo** — MongoDB → Canopy (wire protocol bulk export + oplog for live sync; inferred JSON Schema)
-- [ ] **Harbor/Graph** — Neo4j → Plexus (Bolt protocol export, adjacency-list bulk rebuild)
-- [ ] **Harbor/TimeSeries** — InfluxDB / TimescaleDB → Chronos (TSM direct read, hypertable introspection, Gorilla compression on import)
-- [ ] **Harbor/Stream** — Kafka / RabbitMQ → Flux (consumer group replay from earliest offset, preserves keys/headers/partition order)
-- [ ] **Harbor/Vector** — Pinecone / Weaviate / Qdrant → Prism (REST/gRPC bulk export, native quantisation applied during import)
-- [ ] **Harbor/GIS** — PostGIS → Meridian (geometry/geography columns, GiST index → S2/H3 spatial partitions, ST_* function mapping)
-- [ ] **Harbor/Oracle** — Oracle → Keystone (PL/SQL → WASM transpiler, Oracle type mapping engine, LogMiner CDC, VPD/FGAC → ReBAC/RBAC policy translation, character-set audit)
-- [ ] **Harbor/MySQL** — MySQL/MariaDB → Keystone (binlog CDC for live sync, type mapping, stored procedure migration report)
-- [ ] **Harbor/Search** — Elasticsearch → Canopy (scroll API bulk export, mapping → inferred JSON Schema, analyzer settings → FTS index options)
-- [ ] **Harbor/MSSQL** — SQL Server → Keystone (TDS bulk reads, CDC/Change Tracking for live sync, T-SQL → WASM transpiler)
-- [ ] CLI: `tpt-harbor discover / validate / transfer / replicate / verify / cutover`
-- [ ] Web dashboard — real-time progress monitoring, validation reports, cutover management (React/TypeScript)
+New crate `tpt-harbor/`. Scope for this pass (see PR/commit): core engine + Harbor/PG only, per an
+explicit scope-down decision — 10 source-specific wire protocols plus a web dashboard is multiple
+projects' worth of work; every other connector is a named stub so the CLI/trait surface is ready for
+whichever gets built next, but none of their protocol code exists.
 
-**Milestone:** Zero-downtime migration of a full Postgres production database to Keystone with every row checksum-verified
+- [x] Core migration engine (Rust, checkpoint/resume on failure) — `engine/mod.rs` + `engine/checkpoint.rs`. Not "zero-copy": snapshot reads go through `DECLARE CURSOR`/`FETCH` batches (bounded memory, not zero-copy) rather than the `COPY` sub-protocol; "parallel workers" is also not implemented — tables are migrated one at a time, not in parallel.
+- [x] Schema Translator — `schema.rs`: Postgres `information_schema` type names → Keystone SQL DDL. Not a "rule-based AST engine" — it's a direct type-name lookup table, not an AST-to-AST rewrite (Postgres DDL has no AST here to rewrite; column type + nullability + PK is all Harbor discovers).
+- [x] Verification Engine — `verify.rs`: xxHash3 per-row checksums (via `xxhash-rust`) + row-count diffing. Not implemented: per-column checksums (only whole-row) and query regression testing (would need a captured query corpus + a judgment call on acceptable plan/latency drift — out of scope for this pass).
+- [x] Migration lifecycle: Discover → Validate (Dry Run) → Snapshot → Replicate (Live CDC) → Verify → Cutover — all six phases implemented as `MigrationEngine` methods and CLI subcommands. Cutover doesn't pause application traffic or flip connection strings itself (environment-specific); it confirms verification passed and tells the operator to redirect writes.
+- [x] **Harbor/PG** — PostgreSQL → Keystone. Bulk reads via cursor-batched `SELECT`/`FETCH` (see core-engine note above, not raw `COPY`); live sync via real `pgoutput` logical replication (`CREATE_REPLICATION_SLOT`/`START_REPLICATION`, hand-decoded `Begin`/`Relation`/`Insert`/`Update`/`Delete`/`Commit` messages — no `pgwire` crate, consistent with this repo's from-scratch rule). **Not implemented:** PL/pgSQL → WASM UDF transpilation (would need a PL/pgSQL parser this repo doesn't have — only table data/DDL migrates, not stored procedures). **Not verified in this environment:** an end-to-end run against a real standalone PostgreSQL server (no Postgres install available here) — verified instead by pointing Harbor/PG's source connector at a live `tpt-keystone` node (which is itself Postgres-wire/`information_schema`-compatible per Phase 4) for `discover`/`validate`/`transfer`; logical replication was exercised against `tpt-harbor`'s unit tests and code review, not a live `START_REPLICATION` session (`tpt-keystone` doesn't implement the replication sub-protocol server-side, so that path has no counterpart to test against in this repo).
+- [ ] **Harbor/Mongo** — MongoDB → Canopy. Stub only (`sources::MongoSource`, returns "not yet implemented").
+- [ ] **Harbor/Graph** — Neo4j → Plexus. Stub only.
+- [ ] **Harbor/TimeSeries** — InfluxDB / TimescaleDB → Chronos. Stub only.
+- [ ] **Harbor/Stream** — Kafka / RabbitMQ → Flux. Stub only.
+- [ ] **Harbor/Vector** — Pinecone / Weaviate / Qdrant → Prism. Stub only.
+- [ ] **Harbor/GIS** — PostGIS → Meridian. Stub only.
+- [ ] **Harbor/Oracle** — Oracle → Keystone. Stub only.
+- [ ] **Harbor/MySQL** — MySQL/MariaDB → Keystone. Stub only.
+- [ ] **Harbor/Search** — Elasticsearch → Canopy. Stub only.
+- [ ] **Harbor/MSSQL** — SQL Server → Keystone. Stub only.
+- [x] CLI: `tpt-harbor discover / validate / transfer / replicate / verify / cutover` — `tpt-harbor/src/main.rs`, all six subcommands wired to the engine.
+- [ ] Web dashboard — not attempted (out of scope for this pass; CLI-only).
+
+**Milestone:** Zero-downtime migration of a full Postgres production database to Keystone with every row
+checksum-verified — **not attempted at production scale.** Harbor/PG's `discover`/`validate`/`transfer`/
+`verify` path is verified end-to-end against a live `tpt-keystone` node standing in for a Postgres source
+(see the Harbor/PG note above for why); no live multi-GB dataset or real zero-downtime cutover (source
+writes continuing during `replicate`, then a real `cutover`) was exercised in this environment.
 
 ---
 

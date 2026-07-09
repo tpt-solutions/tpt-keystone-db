@@ -1,0 +1,29 @@
+[package]
+name = "tpt-harbor"
+version = "0.1.0"
+edition = "2021"
+description = "tpt-harbor — universal data migration platform: discover/validate/snapshot/replicate/verify/cutover pipelines onto TPT engines. Harbor/PG (PostgreSQL -> Keystone) is fully implemented; other sources are trait-level stubs (see src/sources)."
+license = "Apache-2.0"
+
+[[bin]]
+name = "tpt-harbor"
+path = "src/main.rs"
+
+[dependencies]
+# Hand-written Postgres-wire-v3 client (src/pgwire.rs) — same "no pgwire crate"
+# rule as tpt-keystone itself. Harbor needs COPY-both / logical-replication
+# message support tpt-sdk's client doesn't have, so it isn't reused as-is;
+# both Harbor/PG's source (real Postgres) and its target (Keystone) connect
+# through this one client, since both speak the same wire protocol.
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "time", "fs", "sync", "signal"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
