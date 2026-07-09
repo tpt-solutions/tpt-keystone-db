@@ -129,7 +129,7 @@ pub fn from_mongodb_type(bson_type: &str) -> String {
         "double" | "float" | "number_double" => "DOUBLE PRECISION".to_string(),
         "int32" | "int" | "number_int" => "INTEGER".to_string(),
         "int64" | "long" | "number_long" => "BIGINT".to_string(),
-        "bool" | "boolean" | "bool" => "BOOLEAN".to_string(),
+        "bool" | "boolean" => "BOOLEAN".to_string(),
         "string" | "utf8" | "stringutf8" => "TEXT".to_string(),
         "date" | "timestamp" => "TIMESTAMP".to_string(),
         "objectid" => "TEXT".to_string(), // ObjectId hex string
