@@ -57,6 +57,7 @@ impl MigrationEngine {
             self.checkpoint.mark_table_snapshotted(&table.qualified_name());
             let _ = self.save();
         }
+        let _ = self.save(); // persist the Snapshot phase transition even if every table was already done
         Ok(())
     }
 

@@ -20,6 +20,7 @@
 
 pub mod connector;
 pub mod engine;
+pub mod http;
 pub mod pgwire;
 pub mod schema;
 pub mod sources;

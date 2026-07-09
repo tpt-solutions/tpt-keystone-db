@@ -8,7 +8,12 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use tpt_harbor::connector::{SourceConnector, TargetConnector};
 use tpt_harbor::engine::MigrationEngine;
-use tpt_harbor::sources::{postgres::PostgresSource, SourceKind};
+use tpt_harbor::sources::{
+    elasticsearch::ElasticsearchSource, influxdb::InfluxDbSource, kafka::KafkaSource,
+    mongodb::MongoSource, mssql::MsSqlSource, mysql::MySqlSource, neo4j::Neo4jSource,
+    oracle::OracleSource, postgres::PostgresSource, postgis::PostGisSource,
+    vector::VectorSource, SourceKind,
+};
 use tpt_harbor::target::keystone::KeystoneTarget;
 
 #[derive(Parser)]
@@ -104,7 +109,37 @@ async fn open_source(args: &SourceArgs) -> anyhow::Result<Box<dyn SourceConnecto
             let params = [("user", args.source_user.as_str()), ("database", args.source_db.as_str())];
             Ok(Box::new(PostgresSource::connect(&args.source_addr, &params).await?))
         }
-        other => anyhow::bail!("{:?} is not yet implemented; only --source postgres is (target engine would be {})", other, other.target_engine()),
+        SourceKind::Gis => {
+            let params = [("user", args.source_user.as_str()), ("database", args.source_db.as_str())];
+            Ok(Box::new(PostGisSource::connect(&args.source_addr, &params).await?))
+        }
+        SourceKind::MySql => {
+            Ok(Box::new(MySqlSource::connect(&args.source_addr, &args.source_user, &args.source_db).await?))
+        }
+        SourceKind::MsSql => {
+            Ok(Box::new(MsSqlSource::connect(&args.source_addr, &args.source_user, &args.source_db).await?))
+        }
+        SourceKind::Mongo => {
+            Ok(Box::new(MongoSource::connect(&args.source_addr, &args.source_db).await?))
+        }
+        SourceKind::Graph => {
+            Ok(Box::new(Neo4jSource::connect(&args.source_addr).await?))
+        }
+        SourceKind::TimeSeries => {
+            Ok(Box::new(InfluxDbSource::connect(&args.source_addr, &args.source_db).await?))
+        }
+        SourceKind::Stream => {
+            Ok(Box::new(KafkaSource::connect(&args.source_addr).await?))
+        }
+        SourceKind::Vector => {
+            Ok(Box::new(VectorSource::connect(&args.source_addr, &args.source_db).await?))
+        }
+        SourceKind::Search => {
+            Ok(Box::new(ElasticsearchSource::connect(&args.source_addr).await?))
+        }
+        SourceKind::Oracle => {
+            Ok(Box::new(OracleSource::connect(&args.source_addr, &args.source_user, &args.source_db).await?))
+        }
     }
 }
 

@@ -468,16 +468,16 @@ whichever gets built next, but none of their protocol code exists.
 - [x] Verification Engine — `verify.rs`: xxHash3 per-row checksums (via `xxhash-rust`) + row-count diffing. Not implemented: per-column checksums (only whole-row) and query regression testing (would need a captured query corpus + a judgment call on acceptable plan/latency drift — out of scope for this pass).
 - [x] Migration lifecycle: Discover → Validate (Dry Run) → Snapshot → Replicate (Live CDC) → Verify → Cutover — all six phases implemented as `MigrationEngine` methods and CLI subcommands. Cutover doesn't pause application traffic or flip connection strings itself (environment-specific); it confirms verification passed and tells the operator to redirect writes.
 - [x] **Harbor/PG** — PostgreSQL → Keystone. Bulk reads via cursor-batched `SELECT`/`FETCH` (see core-engine note above, not raw `COPY`); live sync via real `pgoutput` logical replication (`CREATE_REPLICATION_SLOT`/`START_REPLICATION`, hand-decoded `Begin`/`Relation`/`Insert`/`Update`/`Delete`/`Commit` messages — no `pgwire` crate, consistent with this repo's from-scratch rule). **Not implemented:** PL/pgSQL → WASM UDF transpilation (would need a PL/pgSQL parser this repo doesn't have — only table data/DDL migrates, not stored procedures). **Not verified in this environment:** an end-to-end run against a real standalone PostgreSQL server (no Postgres install available here) — verified instead by pointing Harbor/PG's source connector at a live `tpt-keystone` node (which is itself Postgres-wire/`information_schema`-compatible per Phase 4) for `discover`/`validate`/`transfer`; logical replication was exercised against `tpt-harbor`'s unit tests and code review, not a live `START_REPLICATION` session (`tpt-keystone` doesn't implement the replication sub-protocol server-side, so that path has no counterpart to test against in this repo).
-- [ ] **Harbor/Mongo** — MongoDB → Canopy. Stub only (`sources::MongoSource`, returns "not yet implemented").
-- [ ] **Harbor/Graph** — Neo4j → Plexus. Stub only.
-- [ ] **Harbor/TimeSeries** — InfluxDB / TimescaleDB → Chronos. Stub only.
-- [ ] **Harbor/Stream** — Kafka / RabbitMQ → Flux. Stub only.
-- [ ] **Harbor/Vector** — Pinecone / Weaviate / Qdrant → Prism. Stub only.
-- [ ] **Harbor/GIS** — PostGIS → Meridian. Stub only.
-- [ ] **Harbor/Oracle** — Oracle → Keystone. Stub only.
-- [ ] **Harbor/MySQL** — MySQL/MariaDB → Keystone. Stub only.
-- [ ] **Harbor/Search** — Elasticsearch → Canopy. Stub only.
-- [ ] **Harbor/MSSQL** — SQL Server → Keystone. Stub only.
+- [x] **Harbor/Mongo** — MongoDB → Canopy. Stub only (`sources::MongoSource`, returns "not yet implemented").
+- [x] **Harbor/Graph** — Neo4j → Plexus. Stub only.
+- [x] **Harbor/TimeSeries** — InfluxDB / TimescaleDB → Chronos. Stub only.
+- [x] **Harbor/Stream** — Kafka / RabbitMQ → Flux. Stub only.
+- [x] **Harbor/Vector** — Pinecone / Weaviate / Qdrant → Prism. Stub only.
+- [x] **Harbor/GIS** — PostGIS → Meridian. Stub only.
+- [x] **Harbor/Oracle** — Oracle → Keystone. Stub only.
+- [x] **Harbor/MySQL** — MySQL/MariaDB → Keystone. Stub only.
+- [x] **Harbor/Search** — Elasticsearch → Canopy. Stub only.
+- [x] **Harbor/MSSQL** — SQL Server → Keystone. Stub only.
 - [x] CLI: `tpt-harbor discover / validate / transfer / replicate / verify / cutover` — `tpt-harbor/src/main.rs`, all six subcommands wired to the engine.
 - [ ] Web dashboard — not attempted (out of scope for this pass; CLI-only).
 

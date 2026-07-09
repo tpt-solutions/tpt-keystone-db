@@ -140,7 +140,7 @@ impl SourceConnector for PostgresSource {
         loop {
             let res = self
                 .client
-                .query(&format!("FETCH FORWARD {SNAPSHOT_BATCH_SIZE} FROM {cursor_name}"))
+                .query(&format!("FETCH {SNAPSHOT_BATCH_SIZE} FROM {cursor_name}"))
                 .await
                 .map_err(ConnectorError::Other)?;
             if res.rows.is_empty() {
