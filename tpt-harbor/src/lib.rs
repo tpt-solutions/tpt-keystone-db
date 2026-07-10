@@ -15,10 +15,14 @@
 //! Vector, GIS, Oracle, MySQL, Search, MSSQL) is a named stub in
 //! [`sources`] that reports [`connector::ConnectorError::Unimplemented`] —
 //! present so the CLI's connector matrix and the engine's trait plumbing
-//! are already in place for whichever gets built next. The web dashboard
-//! listed in TODO.md is not attempted here; this crate is CLI-only.
+//! are already in place for whichever gets built next.
+//! - Web dashboard: a hand-rolled, read-only HTTP status server + embedded
+//!   polling page ([`dashboard`]), opt-in via `--dashboard-addr` on
+//!   `transfer`/`replicate`/`verify`/`cutover` — a status view over a
+//!   CLI-driven migration, not a second way to drive one.
 
 pub mod connector;
+pub mod dashboard;
 pub mod engine;
 pub mod http;
 pub mod pgwire;

@@ -5,6 +5,10 @@ edition = "2021"
 description = "TPT Keystone — cloud-native relational database engine"
 license = "Apache-2.0"
 
+[lib]
+name = "tpt_keystone"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tpt-keystone"
 path = "src/main.rs"
@@ -31,6 +35,9 @@ opentelemetry = { version = "0.32.0", default-features = false, features = ["tra
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["trace", "grpc-tonic"] }
 tracing-opentelemetry = "0.33.0"
+wgpu = { version = "22", default-features = false, features = ["wgsl"] }
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

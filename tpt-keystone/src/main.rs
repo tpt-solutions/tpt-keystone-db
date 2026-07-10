@@ -3,9 +3,12 @@ mod geo;
 mod graph;
 mod mcp;
 mod metrics;
+mod mirror;
 mod sql;
 mod storage;
+mod synapse;
 mod telemetry;
+mod vector;
 mod wire;
 
 use std::sync::Arc;

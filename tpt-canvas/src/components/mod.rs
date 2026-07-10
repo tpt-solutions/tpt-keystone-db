@@ -1,3 +1,4 @@
+pub mod agent_monitor;
 pub mod document;
 pub mod graph;
 pub mod map;

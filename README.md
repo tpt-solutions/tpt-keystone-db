@@ -1,39 +1,84 @@
 # TPT Keystone DB
 
-TPT Keystone DB is a ground-up, multi-engine data platform written in Rust, developed by TPT Solutions.
-The long-term plan (see
-[`TODO.md`](TODO.md)) is seven purpose-built data engines — relational, geospatial, vector, time-series,
-graph, document, and event-streaming — plus an AI layer, a WebGPU frontend framework, a multi-language
-SDK ecosystem, a universal migration platform, and an agent orchestration/observability layer, all
-sharing one storage substrate.
+TPT is a ground-up, multi-engine data platform written in Rust, developed by TPT Solutions. The
+long-term plan (see [`TODO.md`](TODO.md)) is seven purpose-built data engines — relational, geospatial,
+vector, time-series, graph, document, and event-streaming — plus an AI/MCP layer, a WebGPU-adjacent
+frontend framework, a multi-language SDK ecosystem, a universal migration platform, and an agent
+orchestration/observability layer, all sharing one storage substrate.
 
-**Only the first engine, Keystone, is implemented.** Everything else described below the "Roadmap"
-section is design intent, not working code.
+**All 17 roadmap phases have an implementation now** (see [`TODO.md`](TODO.md) for the authoritative,
+line-by-line status of every checklist item, including explicit scope cuts and what has/hasn't been
+verified against real external services). This is still a from-scratch, single-team project, not a
+production-hardened platform — most components are verified in-process or against each other, not at
+scale or against third-party servers. Treat every "implemented" claim below as "implemented and
+unit/integration-tested in this repo," not "battle-tested in production."
 
-## Keystone
+## Keystone — the relational engine (core)
 
-Keystone (`tpt-keystone/`) is TPT Keystone DB's relational engine — a cloud-native,
-PostgreSQL-wire-compatible database, built from scratch with no `pgwire` or `sqlparser-rs` dependency —
-the wire protocol codec and the SQL lexer/parser are hand-written. It is currently the only implemented
-engine in the platform.
+Keystone (`tpt-keystone/`) is the only engine every other piece in this repo is built on top of — a
+cloud-native, PostgreSQL-wire-compatible database, built from scratch with no `pgwire` or
+`sqlparser-rs` dependency (the wire protocol codec and the SQL lexer/parser are hand-written). It now
+also hosts every other engine's SQL-extension surface (see below) as additional modules in the same
+binary, plus an MCP server, an HTTP/JSON bridge for browsers, and a WebSocket streaming bridge.
 
-Implemented so far (Phases 0–3 of the roadmap):
+Implemented (Phases 0–4, 12): full `SELECT`/`JOIN`/subqueries/CTEs/window functions/DDL, a
+write-ahead-logged LSM storage engine (MemTable → SSTables with bloom filters, levelled compaction),
+MVCC with a transaction manager and local B-Tree indexes, disaggregated cloud-native storage
+(`ObjectStore` trait over S3 or a local-fs emulation, NVMe cache-aside, shared manifest, CAS-based write
+lease with fencing), WASM UDFs (sandboxed via `wasmtime`), `pg_catalog`/`information_schema`, COPY/
+cursors/LISTEN-NOTIFY, a connection admission limiter + statement cache, `pg_dump`-plain-compatible DDL
+(sequences, SERIAL, UNIQUE/FOREIGN KEY), a Kubernetes operator, Prometheus metrics, and OpenTelemetry
+tracing. See `TODO.md` Phase 4/12 for exact scope cuts (no TLS/auth on the wire protocol, no
+`ALTER TABLE ADD/DROP COLUMN`, etc.).
 
-- PostgreSQL wire protocol v3 — startup handshake, simple query protocol, and the extended query
-  protocol (Parse/Bind/Describe/Execute/Sync/Close)
-- Hand-written SQL lexer, recursive-descent parser, and AST
-- Full `SELECT` (`WHERE`, `GROUP BY`/`HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`), `JOIN`s (hash/merge/nested
-  loop), subqueries, CTEs (including `RECURSIVE`), window functions, `INSERT`/`UPDATE`/`DELETE`, and DDL
-- A write-ahead log, MemTable, SSTables with bloom filters, and levelled LSM compaction
-- MVCC with a transaction manager (`BEGIN`/`COMMIT`/`ROLLBACK`) and local B-Tree secondary indexes
-- Disaggregated cloud-native storage: an `ObjectStore` trait backed by S3 (`aws-sdk-s3`) or a local-fs
-  emulation, a cache-aside NVMe layer, a shared manifest, and a CAS-based write lease with fencing —
-  stateless compute nodes can scale out and share one bucket, with a single enforced writer
+## The other six engines (SQL extensions over Keystone, same binary)
 
-Not yet implemented: WASM UDFs, full `pg_catalog`, a connection pooler, `pg_dump`/`pg_restore`
-compatibility, and everything from Phase 5 onward.
+Rather than separate storage engines, Phases 6–11 each add indexes, functions, and DDL options onto
+Keystone's existing row storage — a `USING SPATIAL`/`USING VECTOR`/`USING GRAPH`/`USING TIME`/
+`USING JSONPATH` index option, plus table-valued SQL functions to query it:
+
+- **Meridian** (geospatial) — `geo/`: hand-written WKT geometry, S2/H3-inspired grid indexing,
+  `ST_*` functions, GPU-accelerated (`wgpu`) spatial joins above a row-count threshold.
+- **Prism** (vector/AI) — `vector/`: a from-scratch HNSW index, `vector_search()`, cosine/L2/dot-product
+  functions.
+- **Chronos** (time-series) — `storage/ts_index.rs`, `storage/compress.rs`: Gorilla + delta-of-delta
+  compression, time-bucketed indexes, retention/rollups, `time_bucket()`/`moving_average()`.
+- **Plexus** (graph) — `graph/`: adjacency-list indexing, BFS/PageRank/label-propagation/connected-
+  components/triangle-count, `graph_neighbors()`/`graph_bfs()`/etc. as table functions.
+- **Canopy** (document/JSON) — `->`/`->>`/`@>` JSON operators, JSONPath + full-text (GIN-style) indexes,
+  JSON Schema validation on insert.
+- **Flux** (event streaming) — `storage/flux.rs`: append-only partitioned logs, consumer groups,
+  automatic per-table CDC, tumbling/sliding/session windowing, a hand-rolled WebSocket push bridge
+  (`wire/websocket.rs`).
+
+Plus two agent-facing layers built the same way — **Synapse** (`synapse/`: actor runtime, tiered agent
+memory over Chronos/Prism, tool registry, task delegation over Flux) and **Mirror** (`mirror/`: agent
+action tracing, session replay, hash-chained audit log, provenance tracking) — and an MCP server
+(`mcp/`, port 5433) exposing `query`/`schema`/`explain`/`related` tools to AI agents.
+
+## Frontend, SDKs, and migration tooling (separate crates/packages)
+
+- **`tpt-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, reactive
+  primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/`<Canvas.Graph>`/`<Canvas.VectorSearch>`/
+  `<Canvas.Document>`/`<Canvas.AgentMonitor>` components, auto WebSocket sync with Flux).
+- **`packages/sdk-web`**, **`packages/sdk-server`**, **`packages/sdk-edge`** — TypeScript SDKs for
+  browsers, Node/Deno/Bun, and edge/Workers runtimes, each with a hand-written Postgres-wire or
+  HTTP/JSON client (no `pg`/`postgres` deps).
+- **`tpt-sdk/`** — the Rust native SDK (sync + async clients, FFI/C ABI, zero-copy row views).
+- **`sdk-go/`**, **`sdk-python/`** — Go and Python clients, both hand-written wire-protocol codecs.
+- **`tpt-cli/`** — the `tpt` binary: REPL, `query`/`export`/`import`/`schema`/`stream`/`migrate`
+  subcommands.
+- **`tpt-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
+  verify → cutover) targeting Keystone. PostgreSQL and PostGIS sources are fully implemented and
+  verified against a live server; MongoDB/Neo4j/MySQL/MSSQL have real protocol clients but are
+  unverified against a live server of that kind; InfluxDB/Kafka/vector-DB/Oracle/Elasticsearch sources
+  are named stubs only. See `TODO.md` Phase 15 for the exact per-connector state.
+- **`tpt-operator/`** — a Kubernetes operator (kube-rs) for cluster lifecycle management.
 
 ## Getting started
+
+Every crate above builds independently — there is no Cargo workspace at the repo root. To run the core
+engine:
 
 ```bash
 cd tpt-keystone
@@ -42,7 +87,10 @@ cargo run                      # starts a single-node writer on 0.0.0.0:5432, lo
 cargo test                     # unit tests + the Phase 3 multi-node cloud-storage integration tests
 ```
 
-Once running, connect with any Postgres client, e.g. `psql -h localhost -p 5432`.
+Once running, connect with any Postgres client, e.g. `psql -h localhost -p 5432`, or use the `tpt` CLI
+(`cd tpt-cli && cargo run -- query "SELECT 1"`). Other services on the same node: MCP on `:5433`
+(`TPT_MCP_ADDR`), the HTTP/JSON bridge for browsers on `:5435` (`TPT_HTTP_ADDR`), the Flux WebSocket
+bridge on `:5434` (`TPT_FLUX_WS_ADDR`), and Prometheus metrics on `:9187` (`TPT_METRICS_ADDR`).
 
 Compute nodes are configured entirely through environment variables (storage backend, node role, cache
 sizing, lease TTL, etc.) — see `tpt-keystone/src/storage/config.rs` for the full list, or
@@ -50,18 +98,27 @@ sizing, lease TTL, etc.) — see `tpt-keystone/src/storage/config.rs` for the fu
 
 ## Repository layout
 
-- `tpt-keystone/` — the Keystone engine crate (the only implemented engine)
-- `TODO.md` — the authoritative, phase-by-phase build roadmap for the whole platform
+- `tpt-keystone/` — the core engine crate: relational storage/SQL/wire protocol, plus every other
+  engine's SQL-extension modules (`geo/`, `vector/`, `graph/`, `synapse/`, `mirror/`), the MCP server,
+  and the HTTP/WebSocket bridges
+- `tpt-canvas/` — the WASM frontend framework
+- `tpt-harbor/` — the migration platform crate
+- `tpt-cli/`, `tpt-sdk/`, `tpt-operator/` — the CLI, Rust SDK, and Kubernetes operator crates
+- `sdk-go/`, `sdk-python/`, `packages/` — the Go, Python, and TypeScript (web/server/edge) SDKs
+- `docs/formats/` — versioned, language-independent on-disk format specs (SSTable, WAL, manifest/lease,
+  and each engine's index format) for reimplementing a reader outside this codebase
+- `TODO.md` — the authoritative, phase-by-phase build roadmap and status for the whole platform
 - `PHASE2_PLAN.md` — detailed implementation notes for Keystone's SQL engine phase
-- `1keystonespec.txt` … `10harbourspec.txt` — per-engine design specs for current and future phases
+- `1keystonespec.txt` … `10harbourspec.txt` — the original per-engine design specs
 - `CLAUDE.md` — architecture notes and build/test commands for AI-assisted development in this repo
 
 ## Roadmap
 
-See [`TODO.md`](TODO.md) for the full 17-phase plan: Keystone extensions/Postgres compatibility, an AI/MCP
-layer, six additional engines (Meridian/geospatial, Prism/vector, Chronos/time-series, Plexus/graph,
-Canopy/document, Flux/streaming), production hardening, the Canvas frontend framework, a multi-language
-SDK ecosystem, Harbor (universal migration), and Synapse/Mirror (agent orchestration and observability).
+See [`TODO.md`](TODO.md) for the full 17-phase plan and, critically, the per-item honesty notes on what's
+verified vs. stubbed vs. explicitly scope-cut. Known open gaps across the whole platform: no wire-level
+auth/TLS anywhere, no distributed (multi-node) secondary indexes for any of the six extension engines
+(all local/single-node), no benchmark harness (every throughput/latency figure in the specs is
+unverified), and several Harbor source connectors and SDK-mobile targets remain stubs.
 
 ## License
 

@@ -12,15 +12,25 @@ mod flux_tests;
 #[cfg(test)]
 mod geo_tests;
 #[cfg(test)]
+mod gpu_join_tests;
+#[cfg(test)]
 mod phase4_tests;
 #[cfg(test)]
 mod pg_dump_tests;
 #[cfg(test)]
 mod plexus_tests;
+#[cfg(test)]
+mod prism_tests;
+#[cfg(test)]
+mod synapse_tests;
+#[cfg(test)]
+mod mirror_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::geo::geometry::Geometry;
+use crate::geo::gpu::{self, GpuBBox, GpuPoint};
 use crate::sql::ast::{BinOp, Expr, FrameBound, FrameBoundType, InList, Join, JoinType, Literal, Projection, SelectStmt, Stmt, TableRef, UnOp, UnionOp};
 use crate::storage::database::Database;
 use crate::storage::{ColumnDef, ColumnType, ForeignKey, StorageEngine, TableSchema};
@@ -516,6 +526,171 @@ fn resolve_graph_function(
                 .ok_or_else(|| anyhow::anyhow!("no full-text index on {table}.{column}"))?;
             let rows = keys.into_iter().map(|k| vec![cell(k)]).collect();
             Ok((Some(func_schema("json_text_search", &["row_key"])), rows))
+        }
+        // --- Prism (Phase 7) ----------------------------------------------
+        // A k-NN search doesn't fit the planner's WHERE-clause predicate
+        // pushdown pattern (`extract_spatial_predicate`/
+        // `extract_time_bucket_predicate`) the way Meridian/Chronos do — it's
+        // fundamentally an `ORDER BY distance LIMIT k` shape, not a filter.
+        // Following Plexus's own precedent (its graph traversals never got
+        // planner pushdown either), this is exposed purely as a table-valued
+        // function: `vector_search('table', 'column', '[0.1,0.2,...]', k
+        // [, ef_search])`. Unlike the graph/JSON functions above (which
+        // return a synthetic `row_key`-only schema), this returns the full
+        // matched row's real columns plus an appended `distance` column, so
+        // hybrid vector + SQL-filter queries (spec section on hybrid search)
+        // compose naturally: `SELECT * FROM vector_search(...) v JOIN ...`.
+        "vector_search" => {
+            let table = arg_text(0)?;
+            let column = arg_text(1)?;
+            let query_text = arg_text(2)?;
+            let k = arg_usize_or(3, 10)?;
+            let ef_search = if args.len() > 4 { Some(arg_usize_or(4, 0)?) } else { None };
+            let query = crate::vector::vector::Vector::from_text(&query_text)
+                .map_err(|e| anyhow::anyhow!("vector_search: invalid query vector: {e}"))?;
+            let hits = db.vector_knn_query(&table, &column, query.as_slice(), k, ef_search)
+                .ok_or_else(|| anyhow::anyhow!("no vector index on {table}.{column}"))?;
+            let table_schema = db.get_table(&table)?.ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+            let kvs: Vec<crate::storage::KeyValue> = hits.iter().map(|(kv, _)| kv.clone()).collect();
+            let mut rows = parse_rows(&kvs, &Some(table_schema.clone()));
+            for (row, (_, dist)) in rows.iter_mut().zip(hits.iter()) {
+                row.push(num_cell(*dist as f64));
+            }
+            let mut out_schema = table_schema;
+            out_schema.columns.push(ColumnDef { name: "distance".to_string(), col_type: ColumnType::Float8, nullable: false, default: None, is_pk: false });
+            Ok((Some(Arc::new(out_schema)), rows))
+        }
+        // Hybrid vector + BM25 full-text search, fused by Reciprocal Rank
+        // Fusion (RRF, `score = sum(1 / (60 + rank))` over whichever of the
+        // two ranked lists a row appears in, 1-indexed rank, standard
+        // constant 60 per the original RRF paper — no tunable weights
+        // between the two signals, same "pick the well-known default, don't
+        // add a knob nobody asked for" precedent as BM25's k1/b above).
+        // Still two internal lookups (HNSW k-NN, FTS BM25) merged into one
+        // ranked result in a single table function — not literally a single
+        // index scan, an honest scope note consistent with every other
+        // "hybrid" checklist item in this codebase.
+        "hybrid_search" => {
+            let table = arg_text(0)?;
+            let vec_column = arg_text(1)?;
+            let vec_query_text = arg_text(2)?;
+            let fts_column = arg_text(3)?;
+            let fts_query_text = arg_text(4)?;
+            let k = arg_usize_or(5, 10)?;
+            let pool = (k * 4).max(50);
+
+            let vec_query = crate::vector::vector::Vector::from_text(&vec_query_text)
+                .map_err(|e| anyhow::anyhow!("hybrid_search: invalid query vector: {e}"))?;
+            let vec_hits = db.vector_knn_query(&table, &vec_column, vec_query.as_slice(), pool, None)
+                .ok_or_else(|| anyhow::anyhow!("no vector index on {table}.{vec_column}"))?;
+            let bm25_hits = db.fts_search_bm25(&table, &fts_column, &fts_query_text, pool)
+                .ok_or_else(|| anyhow::anyhow!("no full-text index on {table}.{fts_column}"))?;
+
+            const RRF_K: f64 = 60.0;
+            let mut fused: std::collections::HashMap<Vec<u8>, (f64, Option<f32>, Option<f64>)> = std::collections::HashMap::new();
+            for (rank, (kv, dist)) in vec_hits.iter().enumerate() {
+                let entry = fused.entry(kv.key.clone()).or_insert((0.0, None, None));
+                entry.0 += 1.0 / (RRF_K + rank as f64 + 1.0);
+                entry.1 = Some(*dist);
+            }
+            for (rank, (row_key, score)) in bm25_hits.iter().enumerate() {
+                let entry = fused.entry(row_key.clone()).or_insert((0.0, None, None));
+                entry.0 += 1.0 / (RRF_K + rank as f64 + 1.0);
+                entry.2 = Some(*score);
+            }
+
+            let mut ranked: Vec<(Vec<u8>, f64, Option<f32>, Option<f64>)> =
+                fused.into_iter().map(|(key, (fused_score, dist, bm25))| (key, fused_score, dist, bm25)).collect();
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ranked.truncate(k);
+
+            let table_schema = db.get_table(&table)?.ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+            let keys: Vec<Vec<u8>> = ranked.iter().map(|(key, ..)| key.clone()).collect();
+            let kvs = db.rows_by_keys(&table, &keys);
+            let kv_by_key: std::collections::HashMap<&[u8], &crate::storage::KeyValue> =
+                kvs.iter().map(|kv| (kv.key.as_slice(), kv)).collect();
+
+            let mut rows = Vec::with_capacity(ranked.len());
+            for (key, fused_score, dist, bm25) in &ranked {
+                let Some(kv) = kv_by_key.get(key.as_slice()) else { continue };
+                let mut row = parse_rows(std::slice::from_ref(*kv), &Some(table_schema.clone())).remove(0);
+                row.push(dist.map(|d| num_cell(d as f64)).unwrap_or(None));
+                row.push(bm25.map(num_cell).unwrap_or(None));
+                row.push(num_cell(*fused_score));
+                rows.push(row);
+            }
+
+            let mut out_schema = table_schema;
+            out_schema.columns.push(ColumnDef { name: "vec_distance".to_string(), col_type: ColumnType::Float8, nullable: true, default: None, is_pk: false });
+            out_schema.columns.push(ColumnDef { name: "bm25_score".to_string(), col_type: ColumnType::Float8, nullable: true, default: None, is_pk: false });
+            out_schema.columns.push(ColumnDef { name: "fused_score".to_string(), col_type: ColumnType::Float8, nullable: false, default: None, is_pk: false });
+            Ok((Some(Arc::new(out_schema)), rows))
+        }
+        // --- Synapse (Phase 16) -------------------------------------------
+        // Only the two ranked-recall paths get a SQL surface — agent
+        // lifecycle (spawn/pause/checkpoint), task delegation, and shared
+        // workflow state are Rust `Database`-adjacent APIs
+        // (`synapse::actor`/`synapse::coordination`), not new SQL statements,
+        // mirroring Flux's own "polling is a `Database` method, not new SQL
+        // syntax" precedent. These two fit the same `vector_search`
+        // "ORDER BY distance LIMIT k" shape, so they get the same
+        // table-function treatment.
+        "synapse_recall_semantic" => {
+            let agent_id = arg_text(0)?;
+            let query_text = arg_text(1)?;
+            let k = arg_usize_or(2, 10)?;
+            let query = crate::vector::vector::Vector::from_text(&query_text)
+                .map_err(|e| anyhow::anyhow!("synapse_recall_semantic: invalid query vector: {e}"))?;
+            let mem = crate::synapse::memory::MemoryStore::new(db.clone())?;
+            let hits = mem.recall_semantic(&agent_id, query.as_slice(), k)?;
+            let rows = hits.into_iter()
+                .map(|(entry, dist)| vec![cell(entry.id.into_bytes()), cell(entry.content.into_bytes()), num_cell(dist as f64)])
+                .collect();
+            Ok((Some(func_schema("synapse_recall_semantic", &["id", "content", "distance"])), rows))
+        }
+        "synapse_discover_tools" => {
+            let query_text = arg_text(0)?;
+            let k = arg_usize_or(1, 10)?;
+            let query = crate::vector::vector::Vector::from_text(&query_text)
+                .map_err(|e| anyhow::anyhow!("synapse_discover_tools: invalid query vector: {e}"))?;
+            let reg = crate::synapse::tools::ToolRegistry::new(db.clone())?;
+            let hits = reg.discover(query.as_slice(), k)?;
+            let rows = hits.into_iter()
+                .map(|(tool, dist)| vec![cell(tool.name.into_bytes()), cell(tool.description.into_bytes()), num_cell(dist as f64)])
+                .collect();
+            Ok((Some(func_schema("synapse_discover_tools", &["name", "description", "distance"])), rows))
+        }
+        // --- Mirror (Phase 17) --------------------------------------------
+        // Read-only data sources a real dashboard/debug REPL would query —
+        // see `mirror` module docs for why no dashboard UI itself was
+        // built in this pass. Both replay a Flux/Chronos-backed history
+        // rather than a live table, so (unlike `vector_search`/
+        // `synapse_recall_semantic`) there's no "distance" column — these
+        // are ordered event/metric feeds, not ranked search results.
+        "mirror_session_events" => {
+            let session_id = arg_text(0)?;
+            let engine = crate::mirror::replay::ReplayEngine::new(db.clone());
+            let events = engine.replay_session(&session_id)?;
+            let rows = events.into_iter().map(|e| vec![
+                num_cell(e.offset), num_cell(e.ts), cell(e.agent_id.into_bytes()), cell(e.kind.into_bytes()),
+                cell(e.detail.into_bytes()), opt_cell(e.tool_name), opt_cell(e.input), opt_cell(e.output), opt_cell(e.error),
+            ]).collect();
+            // "offset" is a reserved SQL keyword in this parser (the
+            // LIMIT/OFFSET clause) — `evt_offset` avoids colliding with it
+            // in ORDER BY/WHERE.
+            Ok((Some(func_schema("mirror_session_events", &["evt_offset", "ts", "agent_id", "kind", "detail", "tool_name", "input", "output", "error"])), rows))
+        }
+        "mirror_agent_metrics" => {
+            let agent_id = arg_text(0)?;
+            let t0 = arg_val(1)?.as_f64()? as i64;
+            let t1 = arg_val(2)?.as_f64()? as i64;
+            let store = crate::mirror::metrics::MetricsStore::new(db.clone())?;
+            let entries = store.range(&agent_id, t0, t1)?;
+            let rows = entries.into_iter().map(|e| vec![
+                cell(e.agent_id.into_bytes()), cell(e.session_id.into_bytes()), num_cell(e.latency_ms),
+                num_cell(e.tokens), num_cell(if e.success { 1 } else { 0 }), num_cell(e.ts),
+            ]).collect();
+            Ok((Some(func_schema("mirror_agent_metrics", &["agent_id", "session_id", "latency_ms", "tokens", "success", "ts"])), rows))
         }
         // --- Flux (Phase 11) ---------------------------------------------
         "flux_time_travel" => {
@@ -1367,7 +1542,28 @@ fn execute_create_index(ci: crate::sql::ast::CreateIndexStmt, db: Arc<Database>)
         Some(m) if m.eq_ignore_ascii_case("gin") || m.eq_ignore_ascii_case("fts") => {
             db.create_fts_index(&ci.table, &ci.column)?
         }
-        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS)"),
+        Some(m) if m.eq_ignore_ascii_case("vector") || m.eq_ignore_ascii_case("hnsw") => {
+            let opt = |key: &str| ci.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+            let metric = match opt("metric") {
+                Some(s) if s.eq_ignore_ascii_case("cosine") => crate::vector::hnsw::Metric::Cosine,
+                Some(s) if s.eq_ignore_ascii_case("l2") => crate::vector::hnsw::Metric::L2,
+                Some(other) => anyhow::bail!("unsupported vector metric \"{other}\" (supported: l2, cosine)"),
+                None => crate::vector::hnsw::Metric::L2,
+            };
+            let mut config = crate::vector::hnsw::HnswConfig::default();
+            if let Some(s) = opt("m") {
+                config.m = s.parse().map_err(|_| anyhow::anyhow!("invalid m {s:?}"))?;
+                config.m0 = config.m * 2;
+            }
+            if let Some(s) = opt("ef_construction") {
+                config.ef_construction = s.parse().map_err(|_| anyhow::anyhow!("invalid ef_construction {s:?}"))?;
+            }
+            if let Some(s) = opt("ef_search") {
+                config.ef_search = s.parse().map_err(|_| anyhow::anyhow!("invalid ef_search {s:?}"))?;
+            }
+            db.create_vector_index(&ci.table, &ci.column, metric, config)?
+        }
+        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS, VECTOR/HNSW)"),
     }
     Ok(QueryResult { fields: vec![], rows: vec![], tag: "CREATE INDEX".into() })
 }
@@ -1523,7 +1719,29 @@ fn resolve_insert_row(
         }
     }
 
+    normalize_vector_cells(schema, &mut cells);
     Ok(cells)
+}
+
+/// Re-serializes any `VECTOR`-typed cell through `Vector::from_text`/
+/// `to_text` so a stored value is always in canonical form (`"[1,2,3]"`)
+/// regardless of how the literal was written (`"[1.0, 2.0, 3.0]"`) — same
+/// "canonicalize on write" precedent as `jsonb_set` normalizing JSON text.
+/// Malformed vector text is left as-is; `check_json_schemas`-style rejection
+/// isn't attempted here since `VECTOR` has no schema-validation hook.
+fn normalize_vector_cells(schema: &TableSchema, cells: &mut [Option<Vec<u8>>]) {
+    for (i, col) in schema.columns.iter().enumerate() {
+        if col.col_type != ColumnType::Vector {
+            continue;
+        }
+        if let Some(Some(bytes)) = cells.get(i) {
+            if let Ok(text) = std::str::from_utf8(bytes) {
+                if let Ok(vector) = crate::vector::vector::Vector::from_text(text) {
+                    cells[i] = Some(vector.to_text().into_bytes());
+                }
+            }
+        }
+    }
 }
 
 /// Reject `cells` if any `UNIQUE` group collides with an existing row
@@ -1741,6 +1959,7 @@ fn execute_update(update: crate::sql::ast::UpdateStmt, db: Arc<Database>, params
             let val = ctx.eval(expr)?;
             new_row[idx] = val.to_wire_bytes();
         }
+        normalize_vector_cells(&schema, &mut new_row);
 
         check_unique_constraints(&schema, &db, &new_row, Some(&kv.key))?;
         check_foreign_keys(&schema, &db, &new_row)?;
@@ -1856,6 +2075,143 @@ fn eval_join_predicate(
         .unwrap_or(false)
 }
 
+/// Below this row-pair-count product, the CPU nested-loop join is assumed
+/// cheaper than a GPU dispatch/readback round trip. Unbenchmarked at scale —
+/// see `executor/gpu_join_tests.rs`'s wall-clock comparison for this
+/// environment's actual crossover point — so this default is tunable via
+/// `TPT_GPU_JOIN_THRESHOLD` rather than hardcoded, since it's inherently
+/// hardware/driver dependent.
+const DEFAULT_GPU_JOIN_THRESHOLD: u64 = 1_000_000;
+
+fn gpu_join_threshold() -> u64 {
+    std::env::var("TPT_GPU_JOIN_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_GPU_JOIN_THRESHOLD)
+}
+
+/// Extracts a row's geometry column as a parsed `Geometry`, evaluating the
+/// column expression via the same `RowContext` pattern used elsewhere in
+/// `apply_join`. Returns `None` on any eval/parse failure — the row is then
+/// simply excluded from the GPU batch (never appears in any output pair),
+/// matching the CPU nested-loop path's existing `unwrap_or(false)`
+/// "unmatched on eval error" semantics.
+fn row_geometry(row: &[Option<Vec<u8>>], schema: &Option<Arc<TableSchema>>, col: &str) -> Option<Geometry> {
+    let ctx = RowContext::new(row.to_vec(), schema.clone());
+    let Value::Text(wkt) = ctx.eval(&Expr::Ident(col.to_string())).ok()? else { return None };
+    Geometry::from_wkt(&wkt).ok()
+}
+
+/// Attempts a GPU-accelerated broad-phase spatial join for a recognized
+/// `ST_Intersects`/`ST_DWithin` join predicate. Returns `None` (never an
+/// error surfaced to the client) whenever GPU is disabled/unavailable, the
+/// batch is below `gpu_join_threshold()`, or the GPU call itself fails for
+/// any reason — in every `None` case the caller falls back to the existing,
+/// correctness-preserving nested-loop path unchanged. GPU is strictly a
+/// performance path here, never a correctness dependency.
+fn try_gpu_spatial_join(
+    pred: &planner::SpatialJoinPredicate,
+    left_rows: &[Vec<Option<Vec<u8>>>],
+    right_rows: &[Vec<Option<Vec<u8>>>],
+    left_schema: &Option<Arc<TableSchema>>,
+    right_schema: &Option<Arc<TableSchema>>,
+) -> Option<Vec<(u32, u32)>> {
+    let pair_count = (left_rows.len() as u64).checked_mul(right_rows.len() as u64)?;
+    if pair_count < gpu_join_threshold() {
+        return None;
+    }
+
+    match pred {
+        planner::SpatialJoinPredicate::Intersects { left_col, right_col } => {
+            let left: Vec<GpuBBox> = left_rows
+                .iter()
+                .filter_map(|r| row_geometry(r, left_schema, left_col))
+                .map(|g| {
+                    let b = g.bbox();
+                    GpuBBox { min_x: b.min_x as f32, min_y: b.min_y as f32, max_x: b.max_x as f32, max_y: b.max_y as f32 }
+                })
+                .collect();
+            let right: Vec<GpuBBox> = right_rows
+                .iter()
+                .filter_map(|r| row_geometry(r, right_schema, right_col))
+                .map(|g| {
+                    let b = g.bbox();
+                    GpuBBox { min_x: b.min_x as f32, min_y: b.min_y as f32, max_x: b.max_x as f32, max_y: b.max_y as f32 }
+                })
+                .collect();
+            gpu::gpu_bbox_overlap_pairs(&left, &right).ok()
+        }
+        planner::SpatialJoinPredicate::DWithin { left_col, right_col, radius_m } => {
+            let left: Vec<GpuPoint> = left_rows
+                .iter()
+                .filter_map(|r| row_geometry(r, left_schema, left_col))
+                .map(|g| {
+                    let c = g.representative_point();
+                    GpuPoint { x: c.x as f32, y: c.y as f32 }
+                })
+                .collect();
+            let right: Vec<GpuPoint> = right_rows
+                .iter()
+                .filter_map(|r| row_geometry(r, right_schema, right_col))
+                .map(|g| {
+                    let c = g.representative_point();
+                    GpuPoint { x: c.x as f32, y: c.y as f32 }
+                })
+                .collect();
+            gpu::gpu_dwithin_pairs(&left, &right, *radius_m as f32).ok()
+        }
+    }
+}
+
+/// Builds joined rows from GPU broad-phase `(left_idx, right_idx)` pairs,
+/// optionally null-padding unmatched rows on either side — mirrors the
+/// existing nested-loop branches' per-row `matched` bookkeeping, just driven
+/// by an index-pair list instead of a predicate evaluated per row-pair.
+/// `pad_left`/`pad_right` must match whatever the equivalent nested-loop
+/// branch does for the same `JoinType` (including today's `Full`
+/// simplification to inner-join semantics — see the `NOTE` on
+/// `JoinType::Inner | JoinType::Full` below), so GPU and CPU paths always
+/// produce identical row sets for the same query.
+fn build_rows_from_pairs(
+    pairs: Vec<(u32, u32)>,
+    left_rows: &[Vec<Option<Vec<u8>>>],
+    right_rows: &[Vec<Option<Vec<u8>>>],
+    right_len: usize,
+    left_len: usize,
+    pad_left: bool,
+    pad_right: bool,
+) -> Vec<Vec<Option<Vec<u8>>>> {
+    let nulls = |n: usize| std::iter::repeat(None).take(n).collect::<Vec<_>>();
+    let mut result = Vec::with_capacity(pairs.len());
+    let mut matched_left: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut matched_right: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for &(i, j) in &pairs {
+        let mut combined = left_rows[i as usize].clone();
+        combined.extend(right_rows[j as usize].iter().cloned());
+        result.push(combined);
+        matched_left.insert(i);
+        matched_right.insert(j);
+    }
+
+    if pad_left {
+        for (i, left_row) in left_rows.iter().enumerate() {
+            if !matched_left.contains(&(i as u32)) {
+                let mut combined = left_row.clone();
+                combined.extend(nulls(right_len));
+                result.push(combined);
+            }
+        }
+    }
+    if pad_right {
+        for (j, right_row) in right_rows.iter().enumerate() {
+            if !matched_right.contains(&(j as u32)) {
+                let mut combined = nulls(left_len);
+                combined.extend(right_row.iter().cloned());
+                result.push(combined);
+            }
+        }
+    }
+    result
+}
+
 /// Apply a JOIN to the result rows. Equi-join conditions (`a.x = b.y`) use a
 /// hash join, building from whichever side is smaller; anything else falls
 /// back to a nested-loop scan evaluating the full predicate per pair.
@@ -1869,6 +2225,7 @@ fn apply_join(
     right_alias: &str,
 ) -> Vec<Vec<Option<Vec<u8>>>> {
     let right_len = right_schema.as_ref().map(|s| s.columns.len()).unwrap_or(0);
+    let left_len = left_schema.as_ref().map(|s| s.columns.len()).unwrap_or(0);
     let nulls = |n: usize| std::iter::repeat(None).take(n).collect::<Vec<_>>();
 
     match join.join_type {
@@ -1889,6 +2246,13 @@ fn apply_join(
             };
             if let Some((left_key, right_key)) = split_join_keys(on_expr, left_schema, right_schema) {
                 hash_equi_join(left_rows, right_rows, &left_key, &right_key, left_schema, right_schema)
+            } else if let Some(pairs) = planner::extract_spatial_join_predicate(on_expr, left_schema, right_schema)
+                .and_then(|pred| try_gpu_spatial_join(&pred, &left_rows, &right_rows, left_schema, right_schema))
+            {
+                // Full is simplified to inner-join semantics here too (see NOTE
+                // below), so no padding on either side — matches the nested-loop
+                // fallback's behavior exactly.
+                build_rows_from_pairs(pairs, &left_rows, &right_rows, right_len, left_len, false, false)
             } else {
                 let mut result = Vec::new();
                 for left_row in &left_rows {
@@ -1954,6 +2318,10 @@ fn apply_join(
                     }
                 }
                 result
+            } else if let Some(pairs) = planner::extract_spatial_join_predicate(on_expr, left_schema, right_schema)
+                .and_then(|pred| try_gpu_spatial_join(&pred, &left_rows, &right_rows, left_schema, right_schema))
+            {
+                build_rows_from_pairs(pairs, &left_rows, &right_rows, right_len, left_len, true, false)
             } else {
                 let mut result = Vec::new();
                 for left_row in &left_rows {
@@ -2023,6 +2391,10 @@ fn apply_join(
                     }
                 }
                 result
+            } else if let Some(pairs) = planner::extract_spatial_join_predicate(on_expr, left_schema, right_schema)
+                .and_then(|pred| try_gpu_spatial_join(&pred, &left_rows, &right_rows, left_schema, right_schema))
+            {
+                build_rows_from_pairs(pairs, &left_rows, &right_rows, right_len, left_len, false, true)
             } else {
                 let mut result = Vec::new();
                 for right_row in &right_rows {

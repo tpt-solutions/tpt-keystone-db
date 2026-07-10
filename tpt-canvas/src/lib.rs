@@ -31,14 +31,17 @@
 //!   bundler plugin that runs on every build.
 //!
 //! See `reactive.rs` for the fine-grained reactive core, `client.rs` for the
-//! Keystone HTTP/WebSocket bridge, and `components/` for the five
-//! `Canvas.*` components.
+//! Keystone HTTP/WebSocket bridge, and `components/` for the six
+//! `Canvas.*` components (the sixth, `AgentMonitor`, is Mirror-native,
+//! Phase 17).
 
 pub mod client;
 pub mod components;
 pub mod reactive;
 pub mod render;
 
+#[cfg(target_arch = "wasm32")]
+pub use components::agent_monitor::CanvasAgentMonitor;
 #[cfg(target_arch = "wasm32")]
 pub use components::document::CanvasDocument;
 #[cfg(target_arch = "wasm32")]

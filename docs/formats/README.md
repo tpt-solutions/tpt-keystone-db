@@ -30,10 +30,7 @@ All multi-byte integers are **big-endian** unless a document says otherwise.
 | [`chronos_ts_index.md`](chronos_ts_index.md) | Chronos (Phase 8) time-bucketed index + Gorilla/delta-of-delta compression |
 | [`plexus_graph_index.md`](plexus_graph_index.md) | Plexus (Phase 9) adjacency index |
 | [`canopy_formats.md`](canopy_formats.md) | Canopy (Phase 10): native JSONB binary encoding, JSON path index, full-text index |
-
-**Not included:** Prism (Phase 7, vector/AI engine) has no on-disk index
-format yet — it's unimplemented roadmap (see root `TODO.md`), not a
-documentation gap.
+| [`prism_vector_index.md`](prism_vector_index.md) | Prism (Phase 7) HNSW vector secondary index |
 
 ## Versioning
 

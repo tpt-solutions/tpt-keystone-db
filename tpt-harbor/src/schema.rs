@@ -71,6 +71,13 @@ pub fn from_postgis_type(pg_type: &str) -> String {
 /// to Keystone. MySQL stores display widths in parentheses — strip them
 /// before matching.
 pub fn from_mysql_type(mysql_type: &str) -> String {
+    // `tinyint(1)` is MySQL's own convention for a boolean column, distinct
+    // from a plain `tinyint` (a real small integer) — that distinction
+    // lives entirely in the `(1)` width, so it must be checked before the
+    // display-width-stripping below throws it away.
+    if mysql_type.to_ascii_lowercase().trim() == "tinyint(1)" {
+        return "BOOLEAN".to_string();
+    }
     // Strip display width / parameter: `int(11)` → `int`, `varchar(255)` → `varchar`
     let base = mysql_type
         .to_ascii_lowercase()
@@ -88,7 +95,7 @@ pub fn from_mysql_type(mysql_type: &str) -> String {
         "float" => "REAL".to_string(),
         "double" => "DOUBLE PRECISION".to_string(),
         "decimal" | "numeric" => "NUMERIC".to_string(),
-        "tinyint(1)" | "bool" | "boolean" => "BOOLEAN".to_string(),
+        "bool" | "boolean" => "BOOLEAN".to_string(),
         "varchar" | "char" | "text" | "tinytext" | "mediumtext" | "longtext" | "enum" | "set" => "TEXT".to_string(),
         "json" => "JSONB".to_string(),
         "date" => "DATE".to_string(),

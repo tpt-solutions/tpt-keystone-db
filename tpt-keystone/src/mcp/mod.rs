@@ -13,3 +13,8 @@ mod tools;
 mod tests;
 
 pub use server::handle;
+/// Re-exported so other in-process modules (Synapse's actor runtime) can
+/// invoke an MCP tool directly by name without going over HTTP — "MCP
+/// server integration" (Phase 16) means calling the same dispatcher the
+/// wire-level `handle` loop already uses, not a second implementation.
+pub use tools::call as call_tool;

@@ -19,12 +19,24 @@
 //!   a combined "near this point AND within this time range" query is a
 //!   single index scan (`storage/geo_index.rs`).
 //!
-//! Explicitly NOT implemented (documented scope cuts, tracked in
-//! `TODO.md`): GPU-accelerated spatial joins (wgpu compute shaders — would
-//! need a GPU-present environment to develop/verify, not available in this
-//! sandbox) and a unified raster+vector storage model. Both are left
-//! unchecked in `TODO.md` rather than stubbed out and claimed done.
+//! - `gpu`: GPU-accelerated broad-phase spatial join primitives (`wgpu`
+//!   compute shaders) — bbox-vs-bbox overlap (`ST_Intersects` joins) and
+//!   bbox-centroid-vs-point radius (`ST_DWithin` joins), wired into
+//!   `executor::apply_join`'s nested-loop fallback above a row-count
+//!   threshold. Broad-phase only (matches the CPU path's existing
+//!   bbox-only `ST_Intersects` precision, not a new limitation) with a
+//!   documented `f32` precision narrowing vs. the CPU path's `f64`. Always
+//!   fails safe to the existing CPU nested-loop join — GPU unavailability,
+//!   `TPT_DISABLE_GPU_JOIN`, an oversized batch, or a runtime GPU error all
+//!   fall back rather than erroring the query. Verified against an NVIDIA
+//!   adapter in this dev environment; not verified on other vendors/drivers
+//!   or in a headless CI environment.
+//!
+//! Explicitly NOT implemented (documented scope cut, tracked in
+//! `TODO.md`): a unified raster+vector storage model. Left unchecked in
+//! `TODO.md` rather than stubbed out and claimed done.
 
 pub mod geometry;
+pub mod gpu;
 pub mod h3;
 pub mod s2;

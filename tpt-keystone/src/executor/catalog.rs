@@ -182,6 +182,7 @@ fn pg_type() -> VirtualTable {
         ("bool", ColumnType::Bool), ("timestamp", ColumnType::Timestamp), ("date", ColumnType::Date),
         ("json", ColumnType::Json), ("bytea", ColumnType::Bytea),
         ("geometry", ColumnType::Geometry),
+        ("vector", ColumnType::Vector),
     ];
     let rows = types.iter().map(|(name, ty)| vec![int(ty.oid()), text(*name)]).collect();
     (s, rows)
@@ -345,5 +346,6 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Json => "json",
         ColumnType::Bytea => "bytea",
         ColumnType::Geometry => "geometry",
+        ColumnType::Vector => "vector",
     }
 }

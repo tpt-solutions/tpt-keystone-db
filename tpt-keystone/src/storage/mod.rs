@@ -19,6 +19,7 @@ mod phase3_tests;
 pub mod sstable;
 pub mod tx;
 pub mod ts_index;
+pub mod vector_index;
 pub mod wal;
 
 use anyhow::Result;
@@ -92,6 +93,13 @@ pub enum ColumnType {
     /// so the planner/eval layer can tell a geometry column from a plain
     /// text one when deciding whether to build/use a spatial index.
     Geometry,
+    /// Prism vector/embedding type. Stored on the wire/in cells as
+    /// `[1.0,2.0,3.0]` text (`Value::Text`) — see `vector::vector::Vector`
+    /// — following the exact same "no new row-encoding path" precedent as
+    /// `Geometry`'s WKT-as-text representation. Exists as its own variant
+    /// so DDL/catalog introspection and the executor's vector-index
+    /// backfill path can tell a `VECTOR` column apart from plain `TEXT`.
+    Vector,
 }
 
 impl ColumnType {
@@ -113,6 +121,9 @@ impl ColumnType {
             // TEXT's OID so wire clients that don't know GEOMETRY still
             // render it as a plain string instead of erroring.
             Self::Geometry => oid::TEXT,
+            // Same reasoning as Geometry: no real Postgres OID for a
+            // pgvector-style VECTOR type in this from-scratch wire protocol.
+            Self::Vector => oid::TEXT,
         }
     }
 
@@ -130,6 +141,7 @@ impl ColumnType {
             "json" | "jsonb" => Some(Self::Json),
             "bytea" | "blob" => Some(Self::Bytea),
             "geometry" | "geography" | "point" => Some(Self::Geometry),
+            "vector" | "embedding" => Some(Self::Vector),
             _ => None,
         }
     }

@@ -294,7 +294,7 @@ impl MongoConn {
         let req_id = self.request_id;
         self.request_id += 1;
 
-        self.write_buf.put_i32_le(msg_len); // message length
+        self.write_buf.put_i32_le(msg_len as i32); // message length
         self.write_buf.put_i32_le(req_id);  // request id
         self.write_buf.put_i32_le(0);       // response to (0 = request)
         self.write_buf.put_i32_le(2013);    // opCode: OP_MSG = 2013

@@ -140,18 +140,36 @@ pub fn collect_json_strings(v: &Value, out: &mut String) {
     }
 }
 
+/// Term-frequency postings: token → (row key → number of times the token
+/// occurs in that row's indexed text). Replaces the old presence-only
+/// `Vec<Vec<u8>>` bucket so real BM25 scoring (which needs `f(t,D)`, not
+/// just "does D contain t") has something to score against.
 #[derive(Serialize, Deserialize, Default)]
 struct FtsIndexData {
-    postings: HashMap<String, Vec<Vec<u8>>>,
+    postings: HashMap<String, HashMap<Vec<u8>, u32>>,
+    /// Total token count per row, for BM25's document-length normalization
+    /// (`|D|` and `avgdl` below).
+    doc_lengths: HashMap<Vec<u8>, u32>,
 }
 
 /// An inverted full-text index (`CREATE INDEX ... USING GIN` / `USING FTS`)
 /// over a `Json` or `Text` column: token → every row key whose column value
-/// contains that token at least once.
+/// contains that token, with per-row term frequency and document length so
+/// both boolean AND search and ranked BM25 search can be answered from the
+/// same structure.
 pub struct FtsIndex {
     file_path: PathBuf,
     data: FtsIndexData,
 }
+
+/// BM25 free parameters at their standard textbook defaults (Robertson/Zaragoza).
+/// `k1` controls term-frequency saturation, `b` controls document-length
+/// normalization strength; not exposed as tunables — same "one obvious
+/// choice, not a knob nobody will turn" precedent as this codebase's other
+/// fixed algorithm constants (e.g. Chronos's Gorilla codec has no tunables
+/// either).
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
 
 impl FtsIndex {
     pub fn create(file_path: &Path) -> Self {
@@ -170,20 +188,34 @@ impl FtsIndex {
 
     /// Index one row's raw column text (JSON document text or plain text —
     /// callers decide which; JSON documents should be pre-flattened via
-    /// `collect_json_strings`).
+    /// `collect_json_strings`). Re-indexing the same `row_key` (e.g. after an
+    /// `UPDATE`) first clears its old postings/length so term frequencies
+    /// don't double-count — the same "no stale entry" caveat this index's
+    /// module docs already state for path indexing.
     pub fn insert(&mut self, row_key: &[u8], text: &str) -> Result<()> {
-        for token in tokenize(text) {
+        self.remove(row_key);
+        let tokens = tokenize(text);
+        self.data.doc_lengths.insert(row_key.to_vec(), tokens.len() as u32);
+        for token in tokens {
             let bucket = self.data.postings.entry(token).or_default();
-            if !bucket.iter().any(|k| k == row_key) {
-                bucket.push(row_key.to_vec());
-            }
+            *bucket.entry(row_key.to_vec()).or_insert(0) += 1;
         }
         self.save()
     }
 
+    /// Removes any existing postings/length for `row_key` without persisting
+    /// (the caller — `insert` — saves once afterward).
+    fn remove(&mut self, row_key: &[u8]) {
+        if self.data.doc_lengths.remove(row_key).is_some() {
+            for bucket in self.data.postings.values_mut() {
+                bucket.remove(row_key);
+            }
+        }
+    }
+
     /// Row keys whose indexed text contains every token in `query` (AND
-    /// semantics — the common case for a search box; OR/ranked search is a
-    /// documented scope cut).
+    /// semantics — the common case for a search box; ranked search is
+    /// `search_bm25` below).
     pub fn search_and(&self, query: &str) -> Vec<Vec<u8>> {
         let tokens = tokenize(query);
         if tokens.is_empty() {
@@ -191,12 +223,47 @@ impl FtsIndex {
         }
         let mut iter = tokens.iter();
         let first = iter.next().unwrap();
-        let mut result: Vec<Vec<u8>> = self.data.postings.get(first).cloned().unwrap_or_default();
+        let mut result: Vec<Vec<u8>> = self.data.postings.get(first)
+            .map(|m| m.keys().cloned().collect()).unwrap_or_default();
         for token in iter {
-            let bucket = self.data.postings.get(token).cloned().unwrap_or_default();
-            result.retain(|k| bucket.iter().any(|b| b == k));
+            let bucket = self.data.postings.get(token);
+            result.retain(|k| bucket.is_some_and(|b| b.contains_key(k)));
         }
         result
+    }
+
+    /// Ranks every row containing at least one query term by Okapi BM25
+    /// score (Robertson/Zaragoza, standard `k1`/`b` defaults above),
+    /// descending, truncated to `limit`. OR semantics (unlike `search_and`):
+    /// a document doesn't need every query term, just a nonzero score.
+    pub fn search_bm25(&self, query: &str, limit: usize) -> Vec<(Vec<u8>, f64)> {
+        let tokens = tokenize(query);
+        if tokens.is_empty() || self.data.doc_lengths.is_empty() {
+            return Vec::new();
+        }
+        let n = self.data.doc_lengths.len() as f64;
+        let avgdl = self.data.doc_lengths.values().map(|&l| l as f64).sum::<f64>() / n;
+
+        let mut scores: HashMap<Vec<u8>, f64> = HashMap::new();
+        for token in &tokens {
+            let Some(bucket) = self.data.postings.get(token) else { continue };
+            let n_t = bucket.len() as f64;
+            // BM25 IDF (the "+1" form keeps it non-negative even when a term
+            // appears in more than half the corpus).
+            let idf = ((n - n_t + 0.5) / (n_t + 0.5) + 1.0).ln();
+            for (row_key, &tf) in bucket {
+                let doc_len = *self.data.doc_lengths.get(row_key).unwrap_or(&0) as f64;
+                let tf = tf as f64;
+                let denom = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / avgdl);
+                let term_score = idf * (tf * (BM25_K1 + 1.0)) / denom;
+                *scores.entry(row_key.clone()).or_insert(0.0) += term_score;
+            }
+        }
+
+        let mut ranked: Vec<(Vec<u8>, f64)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit);
+        ranked
     }
 
     fn save(&self) -> Result<()> {

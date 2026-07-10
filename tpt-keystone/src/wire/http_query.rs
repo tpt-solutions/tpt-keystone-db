@@ -127,6 +127,7 @@ fn column_type_name(ty: &crate::storage::ColumnType) -> &'static str {
         Json => "json",
         Bytea => "bytea",
         Geometry => "geometry",
+        Vector => "vector",
     }
 }
 

@@ -7,6 +7,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use tpt_harbor::connector::{SourceConnector, TargetConnector};
+use tpt_harbor::dashboard::{self, StatusHandle};
 use tpt_harbor::engine::MigrationEngine;
 use tpt_harbor::sources::{
     elasticsearch::ElasticsearchSource, influxdb::InfluxDbSource, kafka::KafkaSource,
@@ -51,6 +52,35 @@ struct CheckpointArgs {
     checkpoint: PathBuf,
 }
 
+#[derive(Args)]
+struct DashboardArgs {
+    /// If set, serves a live read-only migration-progress dashboard at
+    /// `http://<addr>/` for the duration of this command (e.g.
+    /// `127.0.0.1:5436`). Not persisted anywhere — the dashboard exists
+    /// only while this process is running.
+    #[arg(long)]
+    dashboard_addr: Option<String>,
+}
+
+/// Spawns the dashboard HTTP server if `--dashboard-addr` was given,
+/// printing where to find it. Returns a `StatusHandle` regardless (a no-op
+/// handle nobody's polling if no address was given) so callers don't need
+/// to special-case "no dashboard" at every progress-reporting call site.
+fn maybe_start_dashboard(args: &DashboardArgs) -> StatusHandle {
+    let status = StatusHandle::new();
+    if let Some(addr) = &args.dashboard_addr {
+        let addr = addr.clone();
+        let status = status.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dashboard::serve(&addr, status).await {
+                eprintln!("dashboard server on {addr} failed: {e}");
+            }
+        });
+        println!("Dashboard: http://{}/", args.dashboard_addr.as_ref().unwrap());
+    }
+    status
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Discover phase: list source tables and their translated schema.
@@ -72,6 +102,8 @@ enum Command {
         target: TargetArgs,
         #[command(flatten)]
         checkpoint: CheckpointArgs,
+        #[command(flatten)]
+        dashboard: DashboardArgs,
     },
     /// Replicate phase: stream live changes from the source to the target
     /// until interrupted (Ctrl-C) — resumable via the checkpoint file.
@@ -82,6 +114,8 @@ enum Command {
         target: TargetArgs,
         #[command(flatten)]
         checkpoint: CheckpointArgs,
+        #[command(flatten)]
+        dashboard: DashboardArgs,
     },
     /// Verify phase: compare per-row checksums between source and target.
     Verify {
@@ -91,6 +125,8 @@ enum Command {
         target: TargetArgs,
         #[command(flatten)]
         checkpoint: CheckpointArgs,
+        #[command(flatten)]
+        dashboard: DashboardArgs,
     },
     /// Cutover phase: confirm verification passed and mark the migration done.
     Cutover {
@@ -100,6 +136,8 @@ enum Command {
         target: TargetArgs,
         #[command(flatten)]
         checkpoint: CheckpointArgs,
+        #[command(flatten)]
+        dashboard: DashboardArgs,
     },
 }
 
@@ -175,32 +213,62 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Transfer { source, target, checkpoint } => {
+        Command::Transfer { source, target, checkpoint, dashboard } => {
+            let status = maybe_start_dashboard(&dashboard);
             let mut engine = build_engine(&source, &target, &checkpoint).await?;
+            status.set_phase("discover");
             let tables = engine.discover().await?;
-            engine
+            status.set_phase("snapshot");
+            status.set_tables(&tables.iter().map(|t| t.qualified_name()).collect::<Vec<_>>());
+            let result = engine
                 .snapshot(&tables, |table, rows| {
+                    status.record_progress(table, rows);
                     println!("[{table}] {rows} rows copied");
                 })
-                .await?;
+                .await;
+            if let Err(e) = &result {
+                status.set_phase("failed");
+                status.set_error(e);
+            } else {
+                for t in &tables {
+                    status.mark_table_done(&t.qualified_name());
+                }
+                status.set_phase("done");
+            }
+            result?;
             println!("Transfer complete: {} table(s).", tables.len());
         }
 
-        Command::Replicate { source, target, checkpoint } => {
+        Command::Replicate { source, target, checkpoint, dashboard } => {
+            let status = maybe_start_dashboard(&dashboard);
             let mut engine = build_engine(&source, &target, &checkpoint).await?;
+            status.set_phase("discover");
             let tables = engine.discover().await?;
+            status.set_phase("replicate");
+            status.set_tables(&tables.iter().map(|t| t.qualified_name()).collect::<Vec<_>>());
             println!("Replicating {} table(s); Ctrl-C to stop.", tables.len());
             let stop = tokio::signal::ctrl_c();
             tokio::select! {
-                result = engine.replicate(&tables, || false) => { result?; }
-                _ = stop => { println!("stop requested"); }
+                result = engine.replicate(&tables, || false) => {
+                    if let Err(e) = &result { status.set_phase("failed"); status.set_error(e); }
+                    result?;
+                }
+                _ = stop => {
+                    status.set_phase("stopped");
+                    println!("stop requested");
+                }
             }
         }
 
-        Command::Verify { source, target, checkpoint } => {
+        Command::Verify { source, target, checkpoint, dashboard } => {
+            let status = maybe_start_dashboard(&dashboard);
             let mut engine = build_engine(&source, &target, &checkpoint).await?;
+            status.set_phase("discover");
             let tables = engine.discover().await?;
+            status.set_phase("verify");
+            status.set_tables(&tables.iter().map(|t| t.qualified_name()).collect::<Vec<_>>());
             let results = engine.verify(&tables).await?;
+            status.set_verifications(&results);
             let mut all_passed = true;
             for r in &results {
                 all_passed &= r.passed;
@@ -213,19 +281,28 @@ async fn main() -> anyhow::Result<()> {
                     if r.passed { "PASS" } else { "FAIL" }
                 );
             }
+            status.set_phase(if all_passed { "done" } else { "failed" });
             if !all_passed {
+                status.set_error("verification failed for one or more tables");
                 anyhow::bail!("verification failed for one or more tables");
             }
         }
 
-        Command::Cutover { source, target, checkpoint } => {
+        Command::Cutover { source, target, checkpoint, dashboard } => {
+            let status = maybe_start_dashboard(&dashboard);
             let mut engine = build_engine(&source, &target, &checkpoint).await?;
+            status.set_phase("discover");
             let tables = engine.discover().await?;
+            status.set_phase("cutover");
+            status.set_tables(&tables.iter().map(|t| t.qualified_name()).collect::<Vec<_>>());
             let results = engine.verify(&tables).await?;
+            status.set_verifications(&results);
             let ok = engine.cutover(&results)?;
+            status.set_phase(if ok { "done" } else { "failed" });
             if ok {
                 println!("Cutover approved: all tables verified. Redirect application traffic to the target now.");
             } else {
+                status.set_error("cutover blocked: verification did not pass for all tables");
                 anyhow::bail!("cutover blocked: verification did not pass for all tables");
             }
         }

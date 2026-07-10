@@ -36,10 +36,10 @@ impl BoltConn {
 
         // Bolt handshake: 4 magic bytes + 4 proposed versions
         conn.write_buf.put_slice(b"GBEF");
-        conn.write_buf.put_u32_be(1); // version 1
-        conn.write_buf.put_u32_be(0);
-        conn.write_buf.put_u32_be(0);
-        conn.write_buf.put_u32_be(0);
+        conn.write_buf.put_u32(1); // version 1
+        conn.write_buf.put_u32(0);
+        conn.write_buf.put_u32(0);
+        conn.write_buf.put_u32(0);
         conn.stream.write_all(&conn.write_buf).await?;
         conn.stream.flush().await?;
         conn.write_buf.clear();
@@ -79,7 +79,7 @@ impl BoltConn {
         Ok(())
     }
 
-    async fn run_cypher(&mut self, cypher: &str) -> Result<Vec<Vec<(String, BsonValue)>>> {
+    async fn run_cypher(&mut self, cypher: &str) -> Result<Vec<Vec<BsonValue>>> {
         let mut msg = BytesMut::new();
 
         // RUN signature (0x10)
@@ -109,7 +109,7 @@ impl BoltConn {
         self.read_records().await
     }
 
-    async fn read_records(&mut self) -> Result<Vec<Vec<(String, BsonValue)>>> {
+    async fn read_records(&mut self) -> Result<Vec<Vec<BsonValue>>> {
         let mut all_rows = Vec::new();
 
         loop {
@@ -184,10 +184,10 @@ fn put_bolt_string(buf: &mut BytesMut, s: &str) {
         buf.put_u8(bytes.len() as u8);
     } else if bytes.len() <= 0xFFFF {
         buf.put_u8(0xD1);
-        buf.put_u16_be(bytes.len() as u16);
+        buf.put_u16(bytes.len() as u16);
     } else {
         buf.put_u8(0xD2);
-        buf.put_u32_be(bytes.len() as u32);
+        buf.put_u32(bytes.len() as u32);
     }
     buf.put_slice(bytes);
 }

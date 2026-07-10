@@ -117,6 +117,35 @@ fn fts_index_created_and_searched() {
     assert_eq!(keys, vec!["1".to_string(), "3".to_string()]);
 }
 
+/// BM25 ranks a document repeating the query term higher than one that only
+/// mentions it once, and excludes documents that don't mention it at all —
+/// the thing `search_and`'s presence-only AND semantics can't express.
+#[test]
+fn fts_bm25_ranks_by_relevance() {
+    let (db, _b, _l) = test_db();
+    execute_query("CREATE TABLE articles (id INT4, body TEXT)", db.clone()).unwrap();
+    let rows = [
+        (1, "rust rust rust systems programming"),
+        (2, "rust is a systems programming language"),
+        (3, "python is a scripting language"),
+    ];
+    for (id, body) in rows {
+        execute_query(&format!("INSERT INTO articles VALUES ({id}, '{body}')"), db.clone()).unwrap();
+    }
+    execute_query("CREATE INDEX ON articles USING GIN (body)", db.clone()).unwrap();
+
+    // BM25 ranking is exercised directly at the storage layer (this row-key
+    // ranked API, `Database::fts_search_bm25`) rather than through
+    // `json_text_search`, which stays AND-only/unranked — `hybrid_search`
+    // (`prism_tests.rs`) is the SQL surface that exposes BM25 scores.
+    let hits = db.fts_search_bm25("articles", "body", "rust", 10).unwrap();
+    assert_eq!(hits.len(), 2, "row 3 (no 'rust' mention) must be excluded");
+    // row 1 mentions "rust" three times in a shorter doc — higher BM25 score
+    // than row 2's single mention in a longer doc.
+    assert_eq!(hits[0].0, b"1".to_vec());
+    assert!(hits[0].1 > hits[1].1);
+}
+
 #[test]
 fn json_schema_strict_mode_rejects_invalid_insert() {
     let (db, _b, _l) = test_db();

@@ -16,7 +16,9 @@ use super::mvcc::MvccStore;
 use super::objectstore::ObjectStore;
 use super::ts_index::{Rollup, TimeBucketPolicy, TimeIndex};
 use super::tx::{IsolationLevel, Transaction, TransactionManager};
+use super::vector_index::VectorIndex;
 use super::{ColumnDef, ColumnType, JsonSchemaRule, KeyValue, Sequence, StorageEngine, StorageStats, TableSchema, UserFunction};
+use crate::vector::hnsw::{HnswConfig, Metric};
 
 /// A Chronos time index plus the name of the numeric column it tracks
 /// alongside the indexed timestamp column (the index is keyed by
@@ -56,6 +58,10 @@ pub struct Database {
     /// Canopy inverted full-text indexes, `CREATE INDEX ... USING GIN/FTS`,
     /// keyed by `(table, column)`.
     fts_indexes: Arc<Mutex<HashMap<String, HashMap<String, FtsIndex>>>>,
+    /// Prism vector (HNSW) indexes, `CREATE INDEX ... USING VECTOR/HNSW`,
+    /// keyed by `(table, column)` — same local-only accelerator scope cut as
+    /// the other index maps.
+    vector_indexes: Arc<Mutex<HashMap<String, HashMap<String, VectorIndex>>>>,
     /// Flux topics (`CREATE TOPIC`), keyed by topic name — local-only, not
     /// object-store-replicated (see `storage::flux` module docs). Includes
     /// the implicit `__cdc_<table>` topics auto-created by
@@ -105,6 +111,7 @@ impl Database {
         let graph_indexes = Arc::new(Mutex::new(HashMap::new()));
         let json_indexes = Arc::new(Mutex::new(HashMap::new()));
         let fts_indexes = Arc::new(Mutex::new(HashMap::new()));
+        let vector_indexes = Arc::new(Mutex::new(HashMap::new()));
         let topics = Arc::new(Mutex::new(HashMap::new()));
 
         // Schemas live in the shared object store (not local disk) so every
@@ -149,6 +156,7 @@ impl Database {
                     let is_graph = path.extension().is_some_and(|e| e == "graph");
                     let is_jsonpath = path.extension().is_some_and(|e| e == "jsonpath");
                     let is_fts = path.extension().is_some_and(|e| e == "fts");
+                    let is_vector = path.extension().is_some_and(|e| e == "vec");
                     if let Some(name) = path.file_stem() {
                         if let Some(name_str) = name.to_str() {
                             if let Some((table, col)) = name_str.split_once('_') {
@@ -214,6 +222,19 @@ impl Database {
                                             .or_insert_with(HashMap::new)
                                             .insert(col.to_string(), fts);
                                     }
+                                } else if is_vector {
+                                    // Metric/config are read back from the file's own
+                                    // header (see `VectorIndex::open`) — the fallback
+                                    // values here are only used if the file doesn't
+                                    // exist yet, which can't happen on this
+                                    // read_dir-driven path.
+                                    if let Ok(vec_idx) = VectorIndex::open(&path, Metric::L2, HnswConfig::default()) {
+                                        let mut idx_map = vector_indexes.lock().unwrap();
+                                        idx_map
+                                            .entry(table.to_string())
+                                            .or_insert_with(HashMap::new)
+                                            .insert(col.to_string(), vec_idx);
+                                    }
                                 } else if let Ok(btree) = BTree::open(&path) {
                                     let mut idx_map = indexes.lock().unwrap();
                                     idx_map
@@ -265,6 +286,7 @@ impl Database {
             graph_indexes,
             json_indexes,
             fts_indexes,
+            vector_indexes,
             topics,
             flux_dir,
             flux_bus,
@@ -508,6 +530,32 @@ impl StorageEngine for Database {
                                 Err(_) => text.clone(),
                             };
                             fts.insert(key, &searchable)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Maintain any Prism vector (HNSW) indexes defined on this table.
+        let vector_cols: Vec<(String, usize)> = {
+            let schemas = self.schemas.lock().unwrap();
+            let idx_map = self.vector_indexes.lock().unwrap();
+            match (schemas.get(table), idx_map.get(table)) {
+                (Some(schema), Some(cols)) => cols.keys().filter_map(|col| {
+                    schema.columns.iter().position(|c| c.name == *col).map(|i| (col.clone(), i))
+                }).collect(),
+                _ => Vec::new(),
+            }
+        };
+        if !vector_cols.is_empty() {
+            let mut idx_map = self.vector_indexes.lock().unwrap();
+            if let Some(cols) = idx_map.get_mut(table) {
+                for (col, pos) in vector_cols {
+                    if let Some(text_bytes) = decode_column(value, pos) {
+                        if let (Ok(text), Some(vec_idx)) = (String::from_utf8(text_bytes), cols.get_mut(&col)) {
+                            if let Ok(vector) = crate::vector::vector::Vector::from_text(&text) {
+                                vec_idx.insert(key, vector.0)?;
+                            }
                         }
                     }
                 }
@@ -1046,6 +1094,70 @@ impl Database {
         Some(graph.vertex_ids().filter_map(|id| graph.key_of(id).map(|k| (k.to_vec(), counts[id as usize]))).collect())
     }
 
+    /// Create a Prism vector index (`CREATE INDEX ... USING VECTOR/HNSW`) on
+    /// a `VECTOR` column, backfilling from existing rows. `metric`/`config`
+    /// are stored in the index file so later opens keep the same HNSW graph
+    /// shape (mirrors how Meridian's `radius_hint_m` fixes a spatial index's
+    /// grid level for its lifetime).
+    pub fn create_vector_index(&self, table: &str, column: &str, metric: Metric, config: HnswConfig) -> Result<()> {
+        self.check_writable()?;
+        let index_dir = &self.local_index_dir;
+        std::fs::create_dir_all(index_dir)?;
+        let index_path = index_dir.join(format!("{}_{}.vec", table, column));
+
+        let mut vec_idx = VectorIndex::open(&index_path, metric, config)?;
+
+        let schema = self.schemas.lock().unwrap().get(table).cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        let col_idx = schema.columns.iter().position(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
+
+        for kv in self.scan(table)? {
+            if let Some(text_bytes) = decode_column(&kv.value, col_idx) {
+                if let Ok(text) = String::from_utf8(text_bytes) {
+                    if let Ok(vector) = crate::vector::vector::Vector::from_text(&text) {
+                        vec_idx.insert(&kv.key, vector.0)?;
+                    }
+                }
+            }
+        }
+
+        let mut idx_map = self.vector_indexes.lock().unwrap();
+        idx_map.entry(table.to_string()).or_insert_with(HashMap::new).insert(column.to_string(), vec_idx);
+
+        info!(table, column, "vector index created");
+        Ok(())
+    }
+
+    /// Whether a vector index exists for `table.column`.
+    pub fn indexed_column_vector(&self, table: &str, column: &str) -> bool {
+        self.vector_indexes.lock().unwrap().get(table).is_some_and(|m| m.contains_key(column))
+    }
+
+    /// List all `(table, column)` pairs that have a vector index, for
+    /// `pg_catalog.pg_indexes` introspection.
+    pub fn list_vector_indexes(&self) -> Vec<(String, String)> {
+        self.vector_indexes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(table, cols)| cols.keys().map(move |col| (table.clone(), col.clone())))
+            .collect()
+    }
+
+    /// Approximate k-nearest-neighbor search against `table.column`'s vector
+    /// index, returning `(row, distance)` pairs sorted nearest-first. `None`
+    /// (rather than an empty vec) if no vector index exists, so callers can
+    /// distinguish "no index" from "index, zero matches" — same convention
+    /// as `spatial_query`/`time_range_query`.
+    pub fn vector_knn_query(&self, table: &str, column: &str, query: &[f32], k: usize, ef_search: Option<usize>) -> Option<Vec<(KeyValue, f32)>> {
+        let idx_map = self.vector_indexes.lock().unwrap();
+        let vec_idx = idx_map.get(table)?.get(column)?;
+        let hits = vec_idx.query_knn(query, k, ef_search);
+        drop(idx_map);
+        Some(hits.into_iter().filter_map(|(k, dist)| self.read(table, &k).ok().flatten().map(|v| (KeyValue { key: k, value: v }, dist))).collect())
+    }
+
     /// Create a Canopy path index (`CREATE INDEX ... USING JSONPATH ON
     /// t(col) WITH (path = 'user.address.city')`) on a `Json` column,
     /// backfilling from existing rows.
@@ -1161,6 +1273,24 @@ impl Database {
     pub fn fts_search(&self, table: &str, column: &str, query: &str) -> Option<Vec<Vec<u8>>> {
         let idx_map = self.fts_indexes.lock().unwrap();
         Some(idx_map.get(table)?.get(column)?.search_and(query))
+    }
+
+    /// Row keys ranked by BM25 relevance against `query` (OR semantics,
+    /// descending score, truncated to `limit`). `None` if no full-text index
+    /// exists on `table.column`.
+    pub fn fts_search_bm25(&self, table: &str, column: &str, query: &str, limit: usize) -> Option<Vec<(Vec<u8>, f64)>> {
+        let idx_map = self.fts_indexes.lock().unwrap();
+        Some(idx_map.get(table)?.get(column)?.search_bm25(query, limit))
+    }
+
+    /// Fetches whichever of `keys` are still live rows in `table`, for
+    /// stitching a value-less key list (e.g. `fts_search_bm25`'s output) back
+    /// into full rows. One point read per key via the same `read` path
+    /// `vector_knn_query` already uses — not a table scan.
+    pub fn rows_by_keys(&self, table: &str, keys: &[Vec<u8>]) -> Vec<KeyValue> {
+        keys.iter()
+            .filter_map(|k| self.read(table, k).ok().flatten().map(|v| KeyValue { key: k.clone(), value: v }))
+            .collect()
     }
 
     /// Create a named Flux topic (`CREATE TOPIC`), failing if one with this

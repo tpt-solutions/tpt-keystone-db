@@ -116,37 +116,40 @@ impl TdsConn {
         // Variable-length data starts here
         let mut data = BytesMut::new();
 
-        // Helper to add a string field
-        let mut add_str = |s: &str| -> (u16, u16) {
+        // Adds a string field (TDS uses UCS-2LE for login strings), taking
+        // `data` as an explicit parameter rather than a captured closure —
+        // a closure holding a mutable borrow of `data` for its whole
+        // lifetime would conflict with the direct `data.len()`/`put_slice`
+        // calls below (password field, XOR-encoded rather than UCS-2).
+        fn add_str(data: &mut BytesMut, s: &str) -> (u16, u16) {
             let offset = data.len() as u16;
-            // TDS uses UCS-2LE for login strings
             for ch in s.chars() {
                 data.put_u16_le(ch as u16);
             }
             (offset, s.len() as u16)
-        };
+        }
 
         // Hostname (offset 0)
-        let hostname = add_str("");
+        let hostname = add_str(&mut data, "");
         // Username
-        let username = add_str(user);
+        let username = add_str(&mut data, user);
         // Password (XOR-encoded)
         let pwd_offset = data.len() as u16;
         let pwd_bytes: Vec<u8> = password.bytes().map(|b| b ^ 0xA5).collect();
         let pwd_len = password.len() as u16;
         data.put_slice(&pwd_bytes);
         // App name
-        let appname = add_str("tpt-harbor");
+        let appname = add_str(&mut data, "tpt-harbor");
         // Server name (empty = use connection addr)
-        let servername = add_str("");
+        let servername = add_str(&mut data, "");
         // Extension
         let _extension = (0u16, 0u16);
         // Ctl int name
-        let _ctl = add_str("");
+        let _ctl = add_str(&mut data, "");
         // Language
-        let _lang = add_str("");
+        let _lang = add_str(&mut data, "");
         // Database name
-        let dbname = if database.is_empty() { (0u16, 0u16) } else { add_str(database) };
+        let dbname = if database.is_empty() { (0u16, 0u16) } else { add_str(&mut data, database) };
 
         // Build the fixed header with offsets
         let var_offset_base = 86; // fixed header size before variable data

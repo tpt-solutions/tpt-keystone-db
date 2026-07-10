@@ -486,6 +486,16 @@ impl RowContext {
         }
     }
 
+    /// Evaluates `expr` and parses it as `[1.0,2.0,...]` vector literal text
+    /// — same "no new `Value` variant, reuse `Value::Text`" precedent as
+    /// `eval_geom`/WKT (see `storage::ColumnType::Vector`'s doc comment).
+    fn eval_vector(&self, expr: &Expr) -> anyhow::Result<crate::vector::vector::Vector> {
+        match self.eval(expr)? {
+            Value::Text(s) => crate::vector::vector::Vector::from_text(&s),
+            other => anyhow::bail!("expected vector (\"[1.0,2.0,...]\" text), got {}", other.type_name()),
+        }
+    }
+
     fn eval_function(&self, name: &str, args: &[Expr], distinct: bool) -> anyhow::Result<Value> {
         let _ = distinct;
         match name.to_lowercase().as_str() {
@@ -704,6 +714,46 @@ impl RowContext {
                     sum += last.x * first.y - first.x * last.y;
                 }
                 Ok(Value::Float((sum / 2.0).abs()))
+            }
+            // Prism: vector distance/similarity scalar functions (`3prismspec.txt`).
+            // Vectors are `Value::Text` holding `"[1.0,2.0,...]"`, same
+            // as Meridian's WKT-as-text `Geometry` precedent above — see
+            // `eval_vector`/`storage::ColumnType::Vector`'s doc comments.
+            "l2_distance" | "vector_l2_distance" => {
+                if args.len() != 2 {
+                    anyhow::bail!("{name}() requires 2 arguments");
+                }
+                let a = self.eval_vector(&args[0])?;
+                let b = self.eval_vector(&args[1])?;
+                Ok(Value::Float(crate::vector::vector::l2_distance(a.as_slice(), b.as_slice())? as f64))
+            }
+            "cosine_distance" | "vector_cosine_distance" => {
+                if args.len() != 2 {
+                    anyhow::bail!("{name}() requires 2 arguments");
+                }
+                let a = self.eval_vector(&args[0])?;
+                let b = self.eval_vector(&args[1])?;
+                Ok(Value::Float(crate::vector::vector::cosine_distance(a.as_slice(), b.as_slice())? as f64))
+            }
+            "cosine_similarity" | "vector_cosine_similarity" => {
+                if args.len() != 2 {
+                    anyhow::bail!("{name}() requires 2 arguments");
+                }
+                let a = self.eval_vector(&args[0])?;
+                let b = self.eval_vector(&args[1])?;
+                Ok(Value::Float(crate::vector::vector::cosine_similarity(a.as_slice(), b.as_slice())? as f64))
+            }
+            "dot_product" | "vector_dot_product" | "inner_product" => {
+                if args.len() != 2 {
+                    anyhow::bail!("{name}() requires 2 arguments");
+                }
+                let a = self.eval_vector(&args[0])?;
+                let b = self.eval_vector(&args[1])?;
+                Ok(Value::Float(crate::vector::vector::dot_product(a.as_slice(), b.as_slice())? as f64))
+            }
+            "vector_dims" => {
+                let v = self.eval_vector(args.first().ok_or_else(|| anyhow::anyhow!("vector_dims() requires 1 argument"))?)?;
+                Ok(Value::Int(v.dim() as i64))
             }
             // Chronos: SQL time extensions (`8chronos` phase). Timestamps
             // are plain `Value::Int` unix-millisecond values (no dedicated

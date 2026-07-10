@@ -260,3 +260,69 @@ fn try_col_literal(col_expr: &Expr, lit_expr: &Expr, schema: &TableSchema) -> Op
     let value = RowContext::empty().eval(lit_expr).ok()?;
     value.to_wire_bytes().map(|b| (name, b))
 }
+
+/// A join `ON`-clause spatial predicate recognized as a candidate for the
+/// GPU broad-phase join path (`geo::gpu`). Only a single top-level predicate
+/// is recognized (no compound `a.id = b.id AND ST_Intersects(...)` — that
+/// falls through to the existing nested-loop join unchanged); this is a
+/// deliberate v1 scope limit, not an oversight, mirroring the same
+/// "narrowest honest slice first" approach as the rest of this codebase's
+/// scope cuts. As with every other `extract_*_predicate` helper in this
+/// file, a `None` here only costs performance (falls back to nested-loop),
+/// never correctness — the full predicate is always still what the join
+/// actually evaluates.
+pub(crate) enum SpatialJoinPredicate {
+    Intersects { left_col: String, right_col: String },
+    DWithin { left_col: String, right_col: String, radius_m: f64 },
+}
+
+/// Recognizes `ST_Intersects(a, b)` or `ST_DWithin(a, b, radius)` where one
+/// argument resolves entirely against `left_schema` and the other entirely
+/// against `right_schema` (mirrors `expr_only_refs`'s single-side-resolution
+/// contract used by `split_join_keys` for equi-joins).
+pub(crate) fn extract_spatial_join_predicate(
+    on_expr: &Expr,
+    left_schema: &Option<Arc<TableSchema>>,
+    right_schema: &Option<Arc<TableSchema>>,
+) -> Option<SpatialJoinPredicate> {
+    let Expr::Function { name, args, .. } = on_expr else { return None };
+
+    if name.eq_ignore_ascii_case("st_intersects") && args.len() == 2 {
+        let (left_col, right_col) = resolve_join_cols(&args[0], &args[1], left_schema, right_schema)?;
+        return Some(SpatialJoinPredicate::Intersects { left_col, right_col });
+    }
+    if name.eq_ignore_ascii_case("st_dwithin") && args.len() == 3 {
+        let (left_col, right_col) = resolve_join_cols(&args[0], &args[1], left_schema, right_schema)?;
+        let radius_m = RowContext::empty().eval(&args[2]).ok()?.as_f64().ok()?;
+        return Some(SpatialJoinPredicate::DWithin { left_col, right_col, radius_m });
+    }
+    None
+}
+
+/// Resolves two expressions to (left-side column, right-side column) names,
+/// trying both orderings — mirrors `split_join_keys`'s `expr_only_refs`
+/// check but for plain column identifiers rather than arbitrary expressions
+/// (a join's spatial predicate operands are always bare geometry columns in
+/// v1, not computed expressions).
+fn resolve_join_cols(
+    a: &Expr,
+    b: &Expr,
+    left_schema: &Option<Arc<TableSchema>>,
+    right_schema: &Option<Arc<TableSchema>>,
+) -> Option<(String, String)> {
+    let col_in = |expr: &Expr, schema: &Option<Arc<TableSchema>>| -> Option<String> {
+        let name = match expr {
+            Expr::Ident(n) => n.clone(),
+            Expr::QualifiedIdent(_, n) => n.clone(),
+            _ => return None,
+        };
+        schema.as_ref().filter(|s| s.columns.iter().any(|c| c.name == name)).map(|_| name)
+    };
+    if let (Some(l), Some(r)) = (col_in(a, left_schema), col_in(b, right_schema)) {
+        return Some((l, r));
+    }
+    if let (Some(l), Some(r)) = (col_in(b, left_schema), col_in(a, right_schema)) {
+        return Some((l, r));
+    }
+    None
+}

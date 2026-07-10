@@ -4,16 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-TPT is a ground-up, multi-engine data platform written in Rust. **Keystone** (`tpt-keystone/`) is the
-only engine implemented so far — a cloud-native relational (Postgres-wire-compatible) database engine.
-Everything else described in `TODO.md` (Meridian/geospatial, Prism/vector, Chronos/time-series,
-Plexus/graph, Canopy/document, Flux/streaming, Canvas frontend, SDKs, Harbor migration, Synapse/Mirror
-agent layers) is unbuilt roadmap, not code — don't assume any of it exists.
+TPT is a ground-up, multi-engine data platform written in Rust. **All 17 roadmap phases now have an
+implementation** — this is not just Keystone anymore. Do not assume a feature is unbuilt without
+checking `TODO.md` first.
 
-`TODO.md` is the authoritative phase-by-phase roadmap/checklist; check it before assuming a feature is
-missing or planned. `PHASE2_PLAN.md` (root and duplicated in `tpt-keystone/`) has finer-grained notes on
-the SQL engine phase specifically. The numbered `*spec.txt` files in the repo root (`1keystonespec.txt`,
-`2meridianspec.txt`, etc.) are per-engine design specs for future phases.
+- **`tpt-keystone/`** is the core crate and the only thing everything else depends on: a cloud-native,
+  Postgres-wire-compatible relational engine (Phases 0–4, 12), plus six other engines implemented as
+  SQL-extension modules *inside the same binary* rather than separate storage engines — Meridian/geo
+  (`src/geo/`), Prism/vector (`src/vector/`), Chronos/time-series (`src/storage/ts_index.rs`,
+  `compress.rs`), Plexus/graph (`src/graph/`), Canopy/document (JSON operators + indexes, no separate
+  module), Flux/streaming (`src/storage/flux.rs`, `src/wire/websocket.rs`) — plus two agent-facing
+  layers, Synapse (`src/synapse/`) and Mirror (`src/mirror/`), and an MCP server (`src/mcp/`).
+- **`tpt-canvas/`** (WASM frontend), **`tpt-harbor/`** (migration platform), **`tpt-cli/`**, **`tpt-sdk/`**
+  (Rust SDK), **`tpt-operator/`** (Kubernetes operator), **`sdk-go/`**, **`sdk-python/`**, **`packages/`**
+  (`sdk-web`/`sdk-server`/`sdk-edge` TypeScript SDKs) are separate crates/packages, each building
+  independently (no root Cargo workspace).
+
+Every "implemented" item has real, scoped caveats — no wire-level auth/TLS, no distributed secondary
+indexes (all six extension engines' indexes are local/single-node), no benchmark harness, several Harbor
+source connectors are stubs. **`TODO.md` is the authoritative phase-by-phase status** — it documents
+scope cuts and what's actually been verified (often "unit/integration-tested in-process," not "run
+against a real external server" or "run at scale") vs. just claimed; read the relevant phase there before
+assuming a feature is missing, complete, or production-ready. `PHASE2_PLAN.md` (root and duplicated in
+`tpt-keystone/`) has finer-grained notes on Keystone's SQL engine phase specifically. The numbered
+`*spec.txt` files in the repo root (`1keystonespec.txt`, `2meridianspec.txt`, etc.) are the original
+per-engine design specs.
 
 ## Hard constraints (do not violate)
 
@@ -25,15 +40,29 @@ the SQL engine phase specifically. The numbered `*spec.txt` files in the repo ro
 
 ## Build / run / test
 
-All commands run from `tpt-keystone/` (the only crate; no workspace `Cargo.toml` at repo root):
+There is no workspace `Cargo.toml` at the repo root — every Rust crate (`tpt-keystone/`, `tpt-canvas/`,
+`tpt-harbor/`, `tpt-cli/`, `tpt-sdk/`, `tpt-operator/`) builds independently; `cd` into it first. The
+core engine, which every other crate/SDK talks to over the wire:
 
 ```
+cd tpt-keystone
 cargo build
 cargo run                      # starts a single-node writer on 0.0.0.0:5432, local-fs storage under tpt-data/
 cargo test                     # unit tests + storage::phase3_tests (multi-node cloud-storage integration tests)
 cargo test phase3_tests::<name>  # run one Phase 3 test
 psql -h localhost -p 5432      # connect once running (no auth; startup handshake auto-approves)
 ```
+
+Other listeners `cargo run` starts on the same node: MCP (`TPT_MCP_ADDR`, default `:5433`), the HTTP/JSON
+bridge for browsers/edge SDKs (`TPT_HTTP_ADDR`, default `:5435`, `src/wire/http_query.rs`), the Flux
+WebSocket push bridge (`TPT_FLUX_WS_ADDR`, default `:5434`, `src/wire/websocket.rs`), and Prometheus
+metrics (`TPT_METRICS_ADDR`, default `:9187`, `src/metrics.rs`).
+
+Other crates build/test the same way (`cd <dir> && cargo build`/`cargo test`); `tpt-canvas` additionally
+targets `wasm32-unknown-unknown` (`cargo build --target wasm32-unknown-unknown`) and has no meaningful
+native test path since it's browser-only. TypeScript packages (`packages/*`) use `npm run build`/
+`node --test`; `sdk-python` uses `uv pip install -e ".[pandas,dev]"`; `sdk-go` uses `go build ./...`/
+`go test ./...` (`go test -tags live ./...` needs a running `tpt-keystone` node).
 
 No lint/CI config exists in the repo (no `.github/workflows`, no `rustfmt.toml`/`clippy.toml`) — use
 `cargo fmt` / `cargo clippy` at your own discretion but there is no enforced convention to match.
@@ -48,6 +77,15 @@ or real S3). Configure via env vars (see `src/storage/config.rs`): `TPT_STORAGE_
 `src/storage/lease.rs`); readers poll-refresh the manifest instead of acquiring it.
 
 ## Architecture
+
+This section covers `tpt-keystone/`'s core (wire/sql/executor/storage) in depth, since it's the
+foundation every other engine module and every external crate/SDK builds on. The six extension engines
+(`src/geo/`, `src/vector/`, `src/graph/`, `src/storage/ts_index.rs`+`compress.rs`, the Canopy JSON
+operators in `executor/eval.rs`, `src/storage/flux.rs`+`src/wire/websocket.rs`) and the agent layers
+(`src/synapse/`, `src/mirror/`) each add DDL options (`CREATE INDEX ... USING <KIND>`) and table-valued
+SQL functions on top of this same pipeline rather than a separate query path — see each module's own
+doc comments and the corresponding `TODO.md` phase for detail; they're intentionally not re-documented
+here.
 
 `src/main.rs` wires everything together: build an `ObjectStore` → wrap it in `CachedObjectStore` (NVMe
 cache-aside) → acquire/renew the write lease if this node is a writer → open `Database` → spawn a
