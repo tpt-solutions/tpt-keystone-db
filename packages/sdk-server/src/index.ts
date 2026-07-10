@@ -15,3 +15,6 @@ export type { WsClientConnection } from "./ws/client.js";
 
 export { FluxBroadcastServer } from "./broadcast.js";
 export type { FluxBroadcastOptions } from "./broadcast.js";
+
+export { from, table, TypedQueryBuilder } from "./query-builder.js";
+export type { TableDef, BuiltQuery } from "./query-builder.js";

@@ -4,6 +4,15 @@ use bytes::{BufMut, BytesMut};
 #[derive(Debug)]
 pub enum BackendMessage {
     AuthenticationOk,
+    /// `AuthenticationSASL` (code 10) — lists supported SASL mechanisms
+    /// (just `SCRAM-SHA-256` here). Sent instead of `AuthenticationOk` when
+    /// the connecting user has a row in `_tpt_roles`.
+    AuthenticationSASL(Vec<String>),
+    /// `AuthenticationSASLContinue` (code 11) — the server-first-message.
+    AuthenticationSASLContinue(Vec<u8>),
+    /// `AuthenticationSASLFinal` (code 12) — the server-final-message
+    /// (`v=<ServerSignature>`), sent right before `AuthenticationOk`.
+    AuthenticationSASLFinal(Vec<u8>),
     ParameterStatus { name: String, value: String },
     BackendKeyData { pid: i32, secret: i32 },
     ReadyForQuery(TransactionStatus),
@@ -105,6 +114,28 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
     match msg {
         BackendMessage::AuthenticationOk => {
             write_msg(buf, b'R', |b| b.put_i32(0));
+        }
+        BackendMessage::AuthenticationSASL(mechanisms) => {
+            write_msg(buf, b'R', |b| {
+                b.put_i32(10);
+                for m in mechanisms {
+                    b.put_slice(m.as_bytes());
+                    b.put_u8(0);
+                }
+                b.put_u8(0); // terminator
+            });
+        }
+        BackendMessage::AuthenticationSASLContinue(data) => {
+            write_msg(buf, b'R', |b| {
+                b.put_i32(11);
+                b.put_slice(data);
+            });
+        }
+        BackendMessage::AuthenticationSASLFinal(data) => {
+            write_msg(buf, b'R', |b| {
+                b.put_i32(12);
+                b.put_slice(data);
+            });
         }
         BackendMessage::ParameterStatus { name, value } => {
             write_msg(buf, b'S', |b| {

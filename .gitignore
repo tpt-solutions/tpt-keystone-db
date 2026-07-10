@@ -22,3 +22,4 @@ dist/
 *.tsbuildinfo
 npm-debug.log*
 
+.mimocode/.cron-lock

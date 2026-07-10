@@ -1,8 +1,17 @@
 use bytes::{Buf, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::messages::{encode, BackendMessage, ErrorInfo};
+
+/// A trait object can only have one non-auto-trait "principal" — this marker
+/// trait lets `Conn` hold either a plain `TcpStream` or a
+/// `tokio_rustls::server::TlsStream<TcpStream>` behind one boxed type,
+/// blanket-implemented for anything satisfying both halves.
+pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
+
+pub type BoxedStream = Box<dyn AsyncStream>;
 
 /// A frontend (client → server) message after initial startup.
 #[derive(Debug)]
@@ -26,6 +35,11 @@ pub enum FrontendMessage {
     CopyData(Vec<u8>),
     CopyDone,
     CopyFail(String),
+    /// Tag `p` — used by real Postgres clients for `PasswordMessage`,
+    /// `SASLInitialResponse`, and `SASLResponse` alike; the raw body is
+    /// handed back uninterpreted because only the caller (mid-handshake in
+    /// `session::run`) knows which of the three it currently means.
+    PasswordData(Vec<u8>),
 }
 
 /// Startup message parameters sent by the client before the normal message loop.
@@ -36,13 +50,20 @@ pub struct StartupParams {
 }
 
 pub struct Conn {
-    stream: TcpStream,
+    stream: BoxedStream,
     read_buf: BytesMut,
     write_buf: BytesMut,
 }
 
 impl Conn {
     pub fn new(stream: TcpStream) -> Self {
+        Self::from_boxed(Box::new(stream))
+    }
+
+    /// Same as `new`, but for a stream already upgraded to TLS (or any other
+    /// `AsyncStream`) — the entry point `wire::tls::negotiate` hands its
+    /// result to before the real startup message is read.
+    pub fn from_boxed(stream: BoxedStream) -> Self {
         Self {
             stream,
             read_buf: BytesMut::with_capacity(8192),
@@ -170,6 +191,7 @@ impl Conn {
             b'd' => FrontendMessage::CopyData(data.to_vec()),
             b'c' => FrontendMessage::CopyDone,
             b'f' => FrontendMessage::CopyFail(read_cstr(&mut data)),
+            b'p' => FrontendMessage::PasswordData(data.to_vec()),
             other => {
                 tracing::warn!("unknown frontend message type: {}", other as char);
                 FrontendMessage::Sync

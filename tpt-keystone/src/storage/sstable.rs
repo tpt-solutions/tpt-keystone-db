@@ -207,32 +207,30 @@ impl SSTable {
         Ok(Some(buf[pos..end].to_vec()))
     }
 
-    /// Scan all entries in the SSTable.
-    pub fn scan(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// Scan all entries in the SSTable, in key order, including tombstones
+    /// (`None`). Walks the index rather than the raw data section — the data
+    /// section never contains tombstone bytes at all (`build_bytes` only
+    /// records them in the index with `value_len == 0`), so a caller merging
+    /// several SSTables must see tombstones here to correctly shadow an
+    /// older table's live value for the same key (`LsmEngine::scan`/`compact_all`).
+    pub fn scan(&self) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>> {
         let buf = self.data.as_slice();
-        let footer_start = buf.len() - 24;
-        let index_offset = read_u64(buf, footer_start + 8)? as usize;
-
-        let mut results = Vec::new();
-        let mut pos = 0;
-        while pos + 8 <= index_offset {
-            let key_len = read_u32(buf, pos)? as usize;
-            pos += 4;
-            if pos + key_len + 4 > index_offset {
-                break;
+        let mut results = Vec::with_capacity(self.index.len());
+        for entry in &self.index {
+            if entry.value_len == 0 {
+                results.push((entry.key.clone(), None));
+                continue;
             }
-            let key = buf[pos..pos + key_len].to_vec();
-            pos += key_len;
-
+            let mut pos = entry.offset as usize;
+            let key_len = read_u32(buf, pos)? as usize;
+            pos += 4 + key_len;
             let value_len = read_u32(buf, pos)? as usize;
             pos += 4;
-            if pos + value_len > index_offset {
-                break;
+            let end = pos + value_len;
+            if end > buf.len() {
+                bail!("truncated sstable data record");
             }
-            let value = buf[pos..pos + value_len].to_vec();
-            pos += value_len;
-
-            results.push((key, value));
+            results.push((entry.key.clone(), Some(buf[pos..end].to_vec())));
         }
         Ok(results)
     }
@@ -265,6 +263,13 @@ mod tests {
         let reopened = SSTable::open_from_store(&store, "sst/1", 1).unwrap();
         assert_eq!(reopened.read(b"a").unwrap(), Some(b"1".to_vec()));
         let scanned = reopened.scan().unwrap();
-        assert_eq!(scanned, vec![(b"a".to_vec(), b"1".to_vec()), (b"b".to_vec(), b"2".to_vec())]);
+        assert_eq!(
+            scanned,
+            vec![
+                (b"a".to_vec(), Some(b"1".to_vec())),
+                (b"b".to_vec(), Some(b"2".to_vec())),
+                (b"c".to_vec(), None),
+            ]
+        );
     }
 }

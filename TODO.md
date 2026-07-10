@@ -25,7 +25,12 @@
 - [x] Write-Ahead Log (WAL) with fsync guarantees
 - [x] MemTable (BTreeMap-based, in-memory write buffer)
 - [x] SSTable format + bloom filters
-- [x] LSM-tree compaction (levelled strategy)
+- [ ] LSM-tree compaction (levelled strategy) — not implemented. `storage/lsm.rs`
+  currently only appends new SSTables on flush (`trigger_flush`); nothing merges or
+  rewrites existing SSTables, drops overwritten/tombstoned keys, or reclaims space, so
+  `read()`/`scan()` linearly search an unboundedly growing SSTable list. Bloom filters
+  (`storage/sstable.rs`) are real and unaffected by this gap. Previously mis-marked
+  done; corrected during a review pass on 2026-07-10.
 - [x] MVCC (Multi-Version Concurrency Control)
 - [x] Transaction manager (BEGIN / COMMIT / ROLLBACK)
 - [x] B-Tree indexes for primary keys + secondary indexes
@@ -101,12 +106,32 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
   `GROUP BY ... ORDER BY COUNT(*) DESC`, skipped for `bytea`/`json` columns and for tables over
   10k rows to keep introspection cheap) — plus a `relationship_graph` of `{nodes, edges}` built
   from every table's FK list, as machine-readable JSON
-- [ ] **AI-optimised SDK** — idiomatic clients for Rust, TypeScript, Python
-  - Typed query builder (no raw SQL string construction)
-  - Schema-aware types generated from live database introspection
-  - Batch operations, streaming results, built-in connection pool
-  - Deliberately deferred: a multi-language SDK with codegen is a distinct, multi-session effort
-    from the MCP-server work above and hasn't been scoped/started yet
+- [x] **AI-optimised SDK** — idiomatic clients for Rust, TypeScript, Python. Scoped to what's
+  actually additive on top of the Phase 14 SDKs already built (idiomatic clients, batch operations,
+  streaming results, and connection pooling already exist per-language there — `streamQuery`, `Pool`,
+  `blocking::Client`, etc.) rather than a fourth parallel SDK family:
+  - Typed query builder (no raw SQL string construction) — `tpt-sdk/src/query_builder.rs`'s
+    `Table` trait + `QueryBuilder<T>` (Rust); `packages/sdk-web/src/query-builder.ts` and
+    `packages/sdk-server/src/query-builder.ts`'s `TableDef<Row>` + `TypedQueryBuilder<Row>`
+    (TypeScript — each package gets its own copy, no workspace link between them, same "duplicate the
+    hand-written protocol code per package" precedent every wire client here already follows);
+    `sdk-python/tpt_sdk/query_builder.py`'s `TableDef`/`QueryBuilder` (Python). All three: chainable
+    `.select()`/`.filter_eq()`(`.whereEq()` in TS)/`.order_by()`/`.limit()`/`.offset()` building a
+    parameterized `(sql, params)` pair — pure sugar over each SDK's existing `query_params`/
+    `queryParams`/`query_params` method, never a replacement for raw SQL.
+  - Schema-aware types generated from live database introspection — `tpt-sdk/src/bin/typegen.rs`
+    (`cargo run --bin tpt-sdk-typegen -- host:port`), `packages/sdk-web/src/bin/typegen.ts` (extended
+    this pass to also emit a `TableDef` const per generated `interface`, not just the interface
+    itself), `sdk-python/tpt_sdk/typegen.py` (`python -m tpt_sdk.typegen host:port`) — each reads
+    `information_schema.columns` (or `GET /schema` for the browser-facing TS path) from a live node
+    and emits one typed struct/interface/dataclass + one query-builder table definition per table.
+  - Not ported to `@tpt/sdk-edge` (would be a near-identical copy of sdk-web's version, since both
+    talk the same HTTP bridge) — a documented follow-up, not attempted this pass.
+  - Verified via each language's own test suite: `cargo test` (3 new `tpt-sdk` unit tests, plus the
+    existing `tpt-keystone` suite unaffected), `npm test` (4 new tests in `@tpt/sdk-web`, 3 in
+    `@tpt/sdk-server`, both via a clean `tsc` build), `pytest` (4 new tests in `sdk-python`) — all
+    against builder logic (SQL string/param construction) with a fake client, not a live server
+    round trip (no live instance running in this environment for this pass).
 
 **Milestone:** Claude (or any MCP client) can discover schema and query TPT without a Postgres driver
 
@@ -150,14 +175,26 @@ than as a separate crate/process — same "one binary" precedent as every other 
   internally by the HNSW graph's distance metric (`Metric::L2`/`Metric::Cosine`). Same "hardware-accelerated"
   caveat as the HNSW item above — plain scalar loops, no explicit SIMD
   test coverage: `executor/prism_tests.rs::l2_distance_known_case`/`cosine_distance_identical_vectors_is_zero`/`dot_product_known_case`
-- [~] Hybrid search: vector + BM25 full-text + SQL filters in single pass — partial: `vector_search('table',
+- [x] Hybrid search: vector + BM25 full-text + SQL filters in single pass — `vector_search('table',
   'column', '[..]', k)` (`executor/mod.rs`, a table-valued function following Plexus's `graph_neighbors`
   precedent since k-NN's "ORDER BY distance LIMIT k" shape doesn't fit the planner's WHERE-clause
   pushdown pattern the way Meridian/Chronos's index rewrites do) returns full matched rows plus a
   `distance` column, so it composes with ordinary `JOIN`/`WHERE` (verified in
-  `executor/prism_tests.rs::vector_search_hybrid_sql_filter`) — but that's two passes (HNSW search,
-  then a second SQL filter pass), not one, and there's no BM25 ranking anywhere in this codebase
-  (Canopy's `FtsIndex` is AND-only term matching, no scoring) to combine with in the first place
+  `executor/prism_tests.rs::vector_search_hybrid_sql_filter`). Real BM25 ranking now exists: Canopy's
+  `FtsIndex` (`storage/canopy_index.rs`) was rebuilt from presence-only postings (`token -> Vec<row_key>`)
+  to term-frequency postings (`token -> row_key -> tf`) plus per-row document length, backing a new
+  `search_bm25` (Robertson/Zaragoza Okapi BM25, standard `k1=1.2`/`b=0.75`, OR semantics — a doc needs
+  only one query term, unlike `search_and`'s AND boolean match) exposed as `Database::fts_search_bm25`.
+  A new `hybrid_search('table', 'vec_col', '[..]', 'fts_col', 'query', k)` table function
+  (`executor/mod.rs`) fuses the vector k-NN ranking and the BM25 ranking via Reciprocal Rank Fusion
+  (`score = Σ 1/(60 + rank)` over whichever ranked list a row appears in, no tunable weights between
+  the two signals) into one result with `vec_distance`/`bm25_score`/`fused_score` columns. Honest scope
+  note, unchanged from before: this is still two internal lookups (HNSW search, FTS BM25 scoring) fused
+  into one ranked SQL result, not literally a single index scan. Verified end-to-end in
+  `executor/prism_tests.rs::hybrid_search_fuses_vector_and_bm25_rankings` (a row winning on both signals
+  ranks first; rows winning on only one signal still surface via RRF; a row matching neither is
+  excluded) and `::hybrid_search_requires_both_indexes`; BM25 scoring itself in
+  `executor/canopy_tests.rs::fts_bm25_ranks_by_relevance`. All 212 `tpt-keystone` tests pass.
 - [ ] Native product / scalar / binary quantisation at storage layer — not implemented; vectors are
   stored as plain `f32` components, no compression
 - [ ] Consistent hashing for distributed vector shards — not implemented; `VectorIndex` is local-only/
@@ -268,8 +305,33 @@ environment (same honesty precedent as every other phase's unverified scale mile
   exports to an OTLP/gRPC collector when `OTEL_EXPORTER_OTLP_ENDPOINT` is set;
   spans on the wire session loop, query execution, `Database::open`/`refresh`,
   and lease acquisition
-- [ ] Formal benchmark suite vs Postgres, InfluxDB, Neo4j, MongoDB, Kafka
-- [ ] Documentation site (architecture, SQL reference, SDK docs, tutorials)
+- [~] Formal benchmark suite vs Postgres, InfluxDB, Neo4j, MongoDB, Kafka — scoped down: a real
+  `criterion`-based harness (`tpt-keystone/benches/keystone_bench.rs`, `cargo bench`) measuring
+  Keystone's own throughput/latency, not a head-to-head comparison against the other four systems
+  (none are installed in this environment — same honesty policy as every other unverified-at-scale
+  milestone in this file). Required widening `tpt-keystone/src/lib.rs` from a `geo`-only re-export
+  (previously there just so `examples/gpu_smoke_test` could depend on it) to also re-export
+  `executor`/`storage`/`sql`/`vector`/`wire`/`metrics`/`synapse`/`mirror` as a second, independent
+  compilation unit — the same precedent `lib.rs`'s own module docs already established for `geo`,
+  just widened to what a real end-to-end bench needs; `main.rs` still declares its own copies of every
+  module for the actual `tpt-keystone` binary, unchanged. Five benchmarks against an in-process
+  `Database` (`LocalFsObjectStore`-backed, so these measure engine logic cost, not real S3/NVMe I/O):
+  `insert_throughput` (500-row batched INSERT), `point_select`/`full_scan` (5000-row table),
+  `vector_knn` (Prism HNSW k-NN, 2000 vectors), `bm25_search` (Canopy BM25, 2000 docs, exercising this
+  session's new ranking). **Measured in this environment** (informal run, `--measurement-time 1`, not
+  the harness's real multi-second sample config — indicative, not the number `cargo bench` itself
+  would report): insert ~410 elem/s (fsync-per-statement dominates, not a batched-write path), point
+  select ~3.0ms, full-table-count ~3.7ms, HNSW k-NN ~36µs, BM25 top-10 ~550µs. These are this one
+  dev machine's numbers, not a portable performance claim.
+- [x] Documentation site (architecture, SQL reference, SDK docs, tutorials) — scoped to a static
+  Markdown tree in-repo (`docs/`, see `docs/README.md`'s index), no site-generator build step:
+  `docs/architecture.md` (the `wire`/`sql`/`executor`/`storage` layering, the cloud-native Phase 3
+  model, why this is one binary rather than seven engines), `docs/sql-reference.md` (DDL/DML/query
+  clauses plus every engine-specific function and table function), `docs/sdks.md` (what each of the
+  Phase 14 SDKs — Rust/TS-web/TS-server/TS-edge/Python/Go/CLI — gives you and where its code lives),
+  and two tutorials (`docs/tutorials/quickstart.md`, `docs/tutorials/hybrid-search.md` walking through
+  this session's `vector_search`/`hybrid_search` work). Cross-links `docs/formats/` (already existing)
+  rather than duplicating its on-disk-format content.
 - [x] Security audit (wire protocol auth, WASM sandbox, S3 credential handling)
   — findings in `docs/security_audit_phase12.md`; headline finding (no wire
   auth/TLS) and the wasmtime trap-handling verification gap are still open,
@@ -280,6 +342,35 @@ environment (same honesty precedent as every other phase's unverified scale mile
   — `docs/formats/`, including `prism_vector_index.md` for Phase 7's HNSW index format
 - [ ] Apache 2.0 open-source release — `Cargo.toml`/`LICENSE` already say
   Apache-2.0; the "release" step itself (actually publishing) is still open
+
+---
+
+## Phase 12a — Follow-ups from external review (2026-07-10)
+
+A third-party architecture review raised 6 concerns about distributed coordination,
+S3 throughput, and query planning. Verified against the actual code; two were already
+addressed by the existing single-writer/CAS-lease design (see `storage/lease.rs`,
+Phase 3) and are not tracked here. The remaining real gaps:
+
+- [ ] LSM-tree compaction — see Phase 1 item above (cross-referenced, not duplicated work)
+- [ ] Query planner statistics (`ANALYZE`, row-count/distinct-value/histogram tracking,
+  cost-based join-order selection) — `executor/planner.rs`'s own doc comment already
+  admits "not a full cost-based optimizer (no cardinality estimation or plan
+  enumeration)"; join strategy today is predicate-shape heuristic (hash join when an
+  equi-join key exists, nested-loop otherwise) plus a runtime size-aware hash-build-side
+  choice, not persisted statistics
+- [ ] S3 object-key prefix sharding for `sst/`/`wal/` — currently flat prefixes
+  (`storage/lsm.rs`'s `sstable_key`/`wal_segment_key`), a risk if per-prefix S3
+  request-rate limits are hit under heavy multi-reader fan-out. The AWS SDK's default
+  retry/backoff already covers transient 503 SlowDown responses, but there's no
+  app-level token bucket or jitter tuning on top of that
+- [ ] Memory-based backpressure / circuit breaker for S3 latency spikes — connection
+  admission control already exists and queues (`TPT_MAX_CONNECTIONS` semaphore,
+  `main.rs`) but there's no memory-pressure load-shedding or S3-latency circuit breaker;
+  a slow/unreachable object store currently just surfaces as a query error
+- [ ] Reader staleness signal — a reader node whose manifest refresh keeps failing
+  currently serves last-known state silently (fail-open, `main.rs`'s refresh loop) with
+  no staleness indicator exposed to clients
 
 ---
 
@@ -719,6 +810,62 @@ calls. 14 tests total across `mirror::trace`/`replay`/`metrics`/`audit`/`provena
 plus `executor/mirror_tests.rs`, all passing against an in-process `Database`. Not verified: any
 multi-node/distributed replay (single-node, same scope cut as every other phase's local secondary
 indexes), and no dashboard UI was built or visually verified.
+
+---
+
+## Phase 18 — Hardening & Follow-ups
+
+Gaps identified while reviewing the backend for frontend (`tpt-appfront`) integration — either genuinely
+unbuilt or existing-but-heuristic work worth deepening. Not yet started.
+
+- [ ] Deterministic simulation testing (DST) harness for crash recovery — TigerBeetle/FoundationDB-style:
+  drive I/O through the existing `ObjectStore`/WAL traits behind a single-threaded seeded simulator that
+  injects crashes/delays/reordering in-process, then assert recovery lands on the exact last committed
+  state (no lost/corrupted rows). Building on the two-in-process-`Database`s-sharing-one-`LocalFsObjectStore`
+  shape `phase3_tests.rs` already establishes. Deliberately not a literal SIGKILL/subprocess-kill script —
+  DST is faster to build and run (thousands of seeded scenarios in seconds vs. real process spawns) and
+  reproducible by seed; a real OS-signal harness also doesn't translate across platforms (`SIGKILL` isn't
+  meaningful on Windows dev machines the way it is on Linux CI)
+- [ ] Property-based testing (`proptest`) for the MVCC/transaction layer — generate randomized
+  transaction interleavings and assert isolation/durability invariants hold
+- [x] Wire-level authentication — real SCRAM-SHA-256 (RFC 5802), matching real Postgres exactly so
+  unmodified drivers (`psql`, libpq-based clients, JDBC, node-postgres) authenticate with no
+  special-casing. Credentials live in a new `_tpt_roles` system catalog table (`wire/roles.rs`,
+  `StoredKey`/`ServerKey` only — never the plaintext password), following the same
+  `CREATE TABLE IF NOT EXISTS`-at-open-time precedent Synapse/Mirror's own system tables use.
+  **Opt-in, not mandatory:** `wire/session.rs::run` only requires the SCRAM exchange when `_tpt_roles`
+  is non-empty; an empty catalog (the default) keeps today's unconditional `AuthenticationOk`, so the
+  documented zero-config quickstart (`psql -h localhost -p 5432`, no flags) is unchanged. The catalog is
+  seeded via `TPT_AUTH_BOOTSTRAP_USER`/`TPT_AUTH_BOOTSTRAP_PASSWORD` (mirrors the existing `TPT_MCP_TOKEN`
+  bootstrap-secret precedent) — solves "how do you create the first role with no SQL access yet."
+  **Scope cut:** no `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE` DDL yet; a role can only be created via the
+  bootstrap env vars for this pass. Verified against a real `psql` client (not just unit tests) — see
+  `wire::scram::tests` for the protocol-level tests (including a regression test for real `libpq`
+  sending a `y,,` gs2-header over TLS, which the first implementation didn't handle and failed
+  `psql sslmode=require` against a real bootstrap credential until fixed).
+- [x] TLS on the Postgres wire listener — `wire/tls.rs`, `rustls`/`tokio-rustls`, the real Postgres
+  `SSLRequest` pre-startup negotiation (peek 8 bytes, reply `S`/`N`). Required `wire/codec.rs::Conn`'s
+  `stream` field to become a boxed `AsyncRead + AsyncWrite` trait object (`BoxedStream`) instead of a
+  hardcoded `TcpStream`, since upgrading a live connection means swapping the underlying stream, not
+  wrapping the existing one. **Opt-in:** only negotiated if both `TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH`
+  are set (PEM files); otherwise `SSLRequest` is still declined with `N` exactly as before this existed.
+  Verified against a real `psql sslmode=require` connection with an `openssl`-generated self-signed dev
+  cert, both alone and combined with the SCRAM auth above over the same connection.
+- [ ] Extend `pg_catalog`/`information_schema` coverage — add `pg_constraint`, `pg_attribute`,
+  `pg_index`, etc. as needed, scoped to whichever ORM/driver compatibility target is chosen next,
+  building on the existing `pg_tables`/`pg_type`/`information_schema.tables`/`.columns` views in
+  `executor/catalog.rs`
+- [ ] Multi-table statistics for the query planner — real row-count/selectivity stats feeding join order
+  across 3+ table queries, beyond the current heuristic (index-aware point lookups + size-aware
+  hash-join build side)
+- [ ] Harbor production-scale validation — exercise `discover`/`validate`/`transfer`/`replicate`/
+  `verify`/`cutover` against a real multi-GB source database with concurrent writes during `replicate`,
+  and a real zero-downtime `cutover`, not just the current in-process/loopback verification
+
+**Milestone:** Chaos harness runs unattended overnight against a loaded node with zero data loss (not yet
+built); a real Postgres client (psql, an ORM) authenticates over TLS with a password — **done**, verified
+against a real `psql sslmode=require` connection with a bootstrap-seeded SCRAM credential and a self-signed
+dev cert.
 
 ---
 

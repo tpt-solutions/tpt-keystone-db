@@ -40,13 +40,20 @@ async function main(): Promise<void> {
   }
   const schema = (await res.json()) as SchemaInfo;
 
-  const output: string[] = [];
+  const output: string[] = [`import { table as tableDef, type TableDef } from "@tpt/sdk-web";\n`];
   for (const table of schema.tables ?? []) {
-    output.push(`export interface ${pascalCase(table.name)} {`);
+    const typeName = pascalCase(table.name);
+    output.push(`export interface ${typeName} {`);
     for (const column of table.columns ?? []) {
       output.push(`  ${column.name}: ${tsTypeFor(column.type)} | null;`);
     }
     output.push("}\n");
+
+    // Typed query-builder metadata (Phase 5) — pairs with the interface
+    // above so `from(UsersTable).whereEq(...)` gets full autocomplete
+    // against real columns, generated straight from this table's schema.
+    const cols = (table.columns ?? []).map((c) => `"${c.name}"`).join(", ");
+    output.push(`export const ${typeName}Table: TableDef<${typeName}> = tableDef("${table.name}", [${cols}]);\n`);
   }
   process.stdout.write(output.join("\n"));
 }

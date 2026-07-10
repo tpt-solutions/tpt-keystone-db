@@ -25,6 +25,7 @@ connection per call).
 """
 
 from .client import ConnectionNotOpen, KeystoneClient, KeystoneError, QueryResult, Row, ServerError
+from .query_builder import QueryBuilder, TableDef
 
 __all__ = [
     "KeystoneClient",
@@ -33,6 +34,8 @@ __all__ = [
     "KeystoneError",
     "ServerError",
     "ConnectionNotOpen",
+    "QueryBuilder",
+    "TableDef",
 ]
 
 __version__ = "0.1.0"

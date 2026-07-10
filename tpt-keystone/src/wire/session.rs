@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
-use super::codec::{Conn, FrontendMessage};
+use super::codec::{BoxedStream, Conn, FrontendMessage};
 use super::messages::{oid, BackendMessage, ErrorInfo, FieldDescription, TransactionStatus};
+use super::roles::RoleStore;
+use super::scram;
 use crate::executor::eval::Value;
 use crate::executor::{describe_select, execute_parsed, max_param_index, QueryResult};
 use crate::sql::ast::{CopyStmt, FetchCount, Stmt};
@@ -46,12 +47,15 @@ struct ExtendedState {
 }
 
 /// Drive a single client connection from startup through the query loop.
-pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Database>) {
+/// `stream` has already been through `wire::tls::negotiate` by the time it
+/// gets here — plain `TcpStream` and TLS-upgraded connections are
+/// indistinguishable from this point on.
+pub async fn handle(stream: BoxedStream, peer: std::net::SocketAddr, db: Arc<Database>, roles: Arc<RoleStore>) {
     info!(%peer, "client connected");
-    let mut conn = Conn::new(stream);
+    let mut conn = Conn::from_boxed(stream);
 
     crate::metrics::Metrics::global().connection_opened();
-    if let Err(e) = run(&mut conn, peer, db).await {
+    if let Err(e) = run(&mut conn, peer, db, roles).await {
         debug!(%peer, "session ended: {e}");
     }
     crate::metrics::Metrics::global().connection_closed();
@@ -59,12 +63,28 @@ pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Datab
 }
 
 #[tracing::instrument(skip_all, fields(%peer))]
-async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> anyhow::Result<()> {
+async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>, roles: Arc<RoleStore>) -> anyhow::Result<()> {
     // --- Startup handshake ---
     let startup = conn.read_startup().await?;
     debug!(%peer, version = startup.protocol_version, "startup received");
 
-    conn.send(&BackendMessage::AuthenticationOk);
+    // Wire-level auth is opt-in: an empty `_tpt_roles` catalog (the default
+    // on a fresh node with no `TPT_AUTH_BOOTSTRAP_USER`/`_PASSWORD` set)
+    // preserves today's unconditional `AuthenticationOk`, so the documented
+    // zero-config quickstart (`psql -h localhost -p 5432`, no flags) keeps
+    // working unchanged. Once at least one role exists, every connecting
+    // user must complete a real SCRAM-SHA-256 exchange.
+    if roles.is_empty()? {
+        conn.send(&BackendMessage::AuthenticationOk);
+    } else {
+        let user = startup.params.iter().find(|(k, _)| k == "user").map(|(_, v)| v.clone()).unwrap_or_default();
+        if let Err(e) = authenticate(conn, &roles, &user).await {
+            debug!(%peer, %user, error = %e, "authentication failed");
+            conn.send_error(ErrorInfo::fatal("28P01", format!("password authentication failed for user \"{user}\"")));
+            conn.flush().await?;
+            return Ok(());
+        }
+    }
     for (name, value) in [
         ("server_version", "16.0 (TPT Keystone 0.1.0)"),
         ("server_encoding", "UTF8"),
@@ -82,6 +102,62 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> 
     conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
     conn.flush().await?;
 
+    run_query_loop(conn, peer, db).await
+}
+
+/// Runs the SCRAM-SHA-256 exchange (`AuthenticationSASL` →
+/// `SASLInitialResponse` → `AuthenticationSASLContinue` → `SASLResponse` →
+/// `AuthenticationSASLFinal`) for `user`, ending with `AuthenticationOk` on
+/// success. Any failure (unknown user, wrong password, malformed message) is
+/// surfaced identically to the caller, which reports one generic
+/// "password authentication failed" error either way — same as real
+/// Postgres, a client can't tell "no such user" from "wrong password".
+async fn authenticate(conn: &mut Conn, roles: &RoleStore, user: &str) -> anyhow::Result<()> {
+    let cred = roles.find(user)?.ok_or_else(|| anyhow::anyhow!("no such role \"{user}\""))?;
+
+    conn.send(&BackendMessage::AuthenticationSASL(vec![scram::MECHANISM.to_string()]));
+    conn.flush().await?;
+
+    let FrontendMessage::PasswordData(initial) = conn.read_message().await? else {
+        anyhow::bail!("expected SASLInitialResponse");
+    };
+    let (mechanism, client_first) = parse_sasl_initial_response(&initial)?;
+    if mechanism != scram::MECHANISM {
+        anyhow::bail!("unsupported SASL mechanism \"{mechanism}\"");
+    }
+
+    let first = scram::server_first(&client_first, &cred)?;
+    conn.send(&BackendMessage::AuthenticationSASLContinue(first.message_bytes()));
+    conn.flush().await?;
+
+    let FrontendMessage::PasswordData(client_final) = conn.read_message().await? else {
+        anyhow::bail!("expected SASLResponse");
+    };
+    let server_final = scram::verify_client_final(&client_final, &first, &cred)?;
+
+    conn.send(&BackendMessage::AuthenticationSASLFinal(server_final));
+    conn.send(&BackendMessage::AuthenticationOk);
+    Ok(())
+}
+
+/// `SASLInitialResponse`'s body: a C-string mechanism name, then an `i32`
+/// length-prefixed blob of SASL data (the `client-first-message`). Unlike
+/// the later `SASLResponse`, which is just raw SASL data with no framing.
+fn parse_sasl_initial_response(data: &[u8]) -> anyhow::Result<(String, Vec<u8>)> {
+    let nul = data.iter().position(|&b| b == 0).ok_or_else(|| anyhow::anyhow!("malformed SASLInitialResponse"))?;
+    let mechanism = String::from_utf8(data[..nul].to_vec())?;
+    let rest = &data[nul + 1..];
+    if rest.len() < 4 {
+        anyhow::bail!("malformed SASLInitialResponse: missing length");
+    }
+    let len = i32::from_be_bytes(rest[0..4].try_into().unwrap());
+    let sasl_data = if len < 0 { Vec::new() } else {
+        rest.get(4..4 + len as usize).ok_or_else(|| anyhow::anyhow!("SASLInitialResponse length out of bounds"))?.to_vec()
+    };
+    Ok((mechanism, sasl_data))
+}
+
+async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> anyhow::Result<()> {
     let mut ext = ExtendedState::default();
     let mut notify_rx = db.subscribe_notifications();
 
@@ -227,6 +303,11 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> 
                 // Only expected while `handle_copy_in` is reading directly
                 // off `conn`, which bypasses this dispatch loop entirely.
                 warn!(%peer, "unexpected COPY message outside an active COPY");
+            }
+            FrontendMessage::PasswordData(_) => {
+                // Only expected mid-`authenticate()`, which reads directly
+                // off `conn` before this loop starts.
+                warn!(%peer, "unexpected password/SASL message outside authentication");
             }
         }
     }

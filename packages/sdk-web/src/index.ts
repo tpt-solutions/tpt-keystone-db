@@ -13,6 +13,9 @@ export type { QueryState, QueryHandle, MutationState, MutationHandle, UseKeyston
 export { relational, geospatial, timeseries, graph, document, vector, events } from "./models.js";
 export type { BuiltQuery, SelectOptions, GraphDirection } from "./models.js";
 
+export { from, table, TypedQueryBuilder } from "./query-builder.js";
+export type { TableDef, Queryable } from "./query-builder.js";
+
 export { definePlugin, installPlugins, PluginRegistry, PluginEventBus } from "./plugin.js";
 export type {
   CanvasPlugin,

@@ -71,6 +71,16 @@ pub struct StorageConfig {
     /// (port 5433). Unset means no auth — matches the Postgres listener's
     /// existing no-auth dev-mode default.
     pub mcp_token: Option<String>,
+    /// Seeds `_tpt_roles` with a first SCRAM credential if the catalog is
+    /// still empty at startup — solves "how do you create the first role
+    /// with no SQL access yet." Unset (either var missing) means wire auth
+    /// stays opt-out, same zero-config default as `mcp_token`.
+    pub auth_bootstrap_user: Option<String>,
+    pub auth_bootstrap_password: Option<String>,
+    /// PEM cert/key paths for the Postgres wire listener's optional TLS.
+    /// Unset means plaintext-only, byte-for-byte today's behavior.
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -118,6 +128,10 @@ impl StorageConfig {
             },
             max_connections: env::var("TPT_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
             mcp_token: env::var("TPT_MCP_TOKEN").ok(),
+            auth_bootstrap_user: env::var("TPT_AUTH_BOOTSTRAP_USER").ok(),
+            auth_bootstrap_password: env::var("TPT_AUTH_BOOTSTRAP_PASSWORD").ok(),
+            tls_cert_path: env::var("TPT_TLS_CERT_PATH").ok(),
+            tls_key_path: env::var("TPT_TLS_KEY_PATH").ok(),
         }
     }
 

@@ -15,6 +15,8 @@ pub mod manifest;
 pub mod mvcc;
 pub mod objectstore;
 #[cfg(test)]
+mod chaos_tests;
+#[cfg(test)]
 mod phase3_tests;
 pub mod sstable;
 pub mod tx;

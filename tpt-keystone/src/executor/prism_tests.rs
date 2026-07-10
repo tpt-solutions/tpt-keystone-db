@@ -146,11 +146,14 @@ fn hybrid_search_requires_both_indexes() {
     let (db, _b, _l) = test_db();
     execute_query("CREATE TABLE nodex (id INT4, label TEXT, body TEXT, embedding VECTOR)", db.clone()).unwrap();
     execute_query("INSERT INTO nodex VALUES (1, 'a', 'rust', '[1.0,0.0,0.0]')", db.clone()).unwrap();
-    let err = execute_query(
+    let result = execute_query(
         "SELECT * FROM hybrid_search('nodex', 'embedding', '[1.0,0.0,0.0]', 'body', 'rust', 3)",
         db.clone(),
-    ).unwrap_err();
-    assert!(err.to_string().contains("no vector index"));
+    );
+    match result {
+        Err(e) => assert!(e.to_string().contains("no vector index")),
+        Ok(_) => panic!("expected an error for a missing vector index"),
+    }
 }
 
 #[test]

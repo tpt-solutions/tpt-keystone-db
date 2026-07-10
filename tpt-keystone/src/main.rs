@@ -45,6 +45,26 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(Database::open(&config.local_dir, store, lease_mgr.handle(), config.role, config.udf)?);
     info!(dir = %config.local_dir.display(), "Database opened");
 
+    // Wire-level auth: opt-in via `TPT_AUTH_BOOTSTRAP_USER`/`_PASSWORD`. An
+    // empty `_tpt_roles` catalog (the default) means `wire::session::run`
+    // keeps sending `AuthenticationOk` unconditionally, same as before this
+    // existed.
+    let roles = Arc::new(wire::roles::RoleStore::new(db.clone())?);
+    if let (Some(user), Some(password)) = (&config.auth_bootstrap_user, &config.auth_bootstrap_password) {
+        roles.bootstrap_if_empty(user, password)?;
+    }
+
+    // Optional TLS for the Postgres wire listener — only built if both PEM
+    // paths are configured; `None` means `wire::tls::negotiate` always
+    // declines `SSLRequest`, unchanged from today's plaintext-only behavior.
+    let tls_acceptor = match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert), Some(key)) => {
+            info!(cert, key, "TLS enabled for the Postgres wire listener");
+            Some(wire::tls::load_acceptor(cert, key)?)
+        }
+        _ => None,
+    };
+
     if config.role == NodeRole::Reader {
         let db = db.clone();
         let interval = config.manifest_refresh_interval;
@@ -153,9 +173,14 @@ async fn main() -> anyhow::Result<()> {
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true)?;
         let db = db.clone();
+        let roles = roles.clone();
+        let tls_acceptor = tls_acceptor.clone();
         let permit = connection_slots.clone().acquire_owned().await?;
         tokio::spawn(async move {
-            wire::session::handle(stream, peer, db).await;
+            match wire::tls::negotiate(stream, tls_acceptor.as_ref()).await {
+                Ok(stream) => wire::session::handle(stream, peer, db, roles).await,
+                Err(e) => error!(%peer, error = %e, "TLS negotiation failed"),
+            }
             drop(permit);
         });
     }
