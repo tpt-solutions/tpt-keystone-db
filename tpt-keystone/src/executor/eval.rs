@@ -5,7 +5,7 @@ use crate::geo::geometry::{Coord, Geometry};
 use crate::geo::raster::Raster;
 use crate::sql::ast::{BinOp, Expr, InList, Literal, UnOp};
 use crate::storage::database::Database;
-use crate::storage::TableSchema;
+use crate::storage::{StorageEngine, TableSchema};
 
 /// A typed runtime value.
 #[derive(Debug, Clone)]
@@ -619,7 +619,11 @@ impl RowContext {
 
     fn eval_function(&self, name: &str, args: &[Expr], distinct: bool) -> anyhow::Result<Value> {
         let _ = distinct;
-        match name.to_lowercase().as_str() {
+        // Strip a `pg_catalog.` schema qualifier so `pg_catalog.pg_get_userbyid(...)`
+        // resolves to the same built-in as a bare `pg_get_userbyid(...)`.
+        let raw = name.to_lowercase();
+        let norm = raw.strip_prefix("pg_catalog.").unwrap_or(&raw);
+        match norm {
             "version" => Ok(Value::Text("TPT Keystone 0.1.0 on Rust".into())),
             "pg_sleep" => Ok(Value::Null),
             "now" | "current_timestamp" => Ok(Value::Text("2026-06-30 00:00:00+00".into())),
@@ -629,6 +633,57 @@ impl RowContext {
             "current_schema" | "current_schemas" => Ok(Value::Text("public".into())),
             "pg_backend_pid" => Ok(Value::Int(1)),
             "pg_postmaster_start_time" => Ok(Value::Text("2026-06-30 00:00:00+00".into())),
+            // psql `\dt` / `\d` call `pg_catalog.pg_get_userbyid(relowner)` to
+            // label a relation's owner. The engine doesn't track per-table
+            // owners, so every relation is owned by the bootstrap role — `tpt`
+            // (consistent with `pg_tables.tableowner`).
+            "pg_get_userbyid" => Ok(Value::Text("tpt".into())),
+            // `pg_table_is_visible(oid)` — true if the relation is in a schema
+            // on the search path. Our search path is just `public`, so resolve
+            // the OID back to a known public relation (table or index).
+            "pg_table_is_visible" => {
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("pg_table_is_visible() requires a database context"))?;
+                let oid = match self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("pg_table_is_visible() requires 1 argument"))?,
+                )? {
+                    Value::Int(n) => n,
+                    other => anyhow::bail!(
+                        "pg_table_is_visible() requires an integer oid, got {}",
+                        other.type_name()
+                    ),
+                };
+                let visible = {
+                    let tables = db.list_tables().unwrap_or_default();
+                    let indexes = db.list_indexes();
+                    tables.iter().any(|t| crate::executor::catalog::synthetic_oid(t) as i64 == oid)
+                        || indexes.iter().any(|(t, c)| {
+                            let idx = format!("{t}_{c}_idx");
+                            crate::executor::catalog::synthetic_oid(&idx) as i64 == oid
+                        })
+                };
+                Ok(Value::Bool(visible))
+            }
+            // `format_type(oid, typmod)` — psql's `\d` column-type display and
+            // many other introspection queries. `typmod` (arg 2) is ignored.
+            "format_type" => {
+                let oid = match self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("format_type() requires 1 or 2 arguments"))?,
+                )? {
+                    Value::Int(n) => n,
+                    other => anyhow::bail!(
+                        "format_type() requires an integer type oid, got {}",
+                        other.type_name()
+                    ),
+                };
+                Ok(Value::Text(
+                    crate::executor::catalog::pg_type_name_by_oid(oid as i32).to_string(),
+                ))
+            }
             "nextval" => {
                 let db = self
                     .db

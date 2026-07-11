@@ -50,3 +50,65 @@ impl<'a> RowView<'a> {
         self.cells.iter().map(|c| c.as_ref().map(|b| b.to_vec())).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer() -> Vec<Option<Box<[u8]>>> {
+        vec![
+            Some(b"1".to_vec().into_boxed_slice()),
+            None,
+            Some(b"hello".to_vec().into_boxed_slice()),
+        ]
+    }
+
+    #[test]
+    fn len_and_is_empty_track_cell_count() {
+        let v = RowView::new(&buffer());
+        assert_eq!(v.len(), 3);
+        assert!(!v.is_empty());
+
+        let empty: Vec<Option<Box<[u8]>>> = vec![];
+        assert!(RowView::new(&empty).is_empty());
+    }
+
+    #[test]
+    fn get_returns_raw_bytes_and_null() {
+        let v = RowView::new(&buffer());
+        assert_eq!(v.get(0), Some(&b"1"[..]));
+        assert_eq!(v.get(1), None);
+        assert_eq!(v.get(2), Some(&b"hello"[..]));
+        // Out-of-bounds reads are None, mirroring SQL semantics.
+        assert_eq!(v.get(3), None);
+    }
+
+    #[test]
+    fn get_str_decodes_utf8_and_skips_invalid() {
+        let v = RowView::new(&buffer());
+        assert_eq!(v.get_str(0), Some("1"));
+        assert_eq!(v.get_str(1), None);
+        assert_eq!(v.get_str(2), Some("hello"));
+
+        let bad: Vec<Option<Box<[u8]>>> = vec![Some(vec![0xff, 0xfe].into_boxed_slice())];
+        assert_eq!(RowView::new(&bad).get_str(0), None);
+    }
+
+    #[test]
+    fn iter_yields_each_cell_as_option() {
+        let v = RowView::new(&buffer());
+        let collected: Vec<Option<&[u8]>> = v.iter().collect();
+        assert_eq!(collected, vec![Some(&b"1"[..]), None, Some(&b"hello"[..])]);
+    }
+
+    #[test]
+    fn to_owned_escapes_the_borrow_without_copying_values() {
+        let buf = buffer();
+        let owned = RowView::new(&buf).to_owned_row();
+        assert_eq!(owned, vec![
+            Some(b"1".to_vec()),
+            None,
+            Some(b"hello".to_vec()),
+        ]);
+    }
+}

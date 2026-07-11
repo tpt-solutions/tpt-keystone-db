@@ -26,6 +26,23 @@ pub struct Row {
 }
 
 impl Row {
+    /// Build a `Row` from owned column names and cell buffers. Handy for
+    /// tests and for SDK consumers that decode rows out-of-band (e.g. the
+    /// FFI layer) without going through [`KeystoneClient::query`].
+    pub fn new(
+        columns: impl Into<Vec<String>>,
+        cells: impl Into<Vec<Option<Vec<u8>>>>,
+    ) -> Self {
+        Row {
+            columns: std::sync::Arc::new(columns.into()),
+            cells: cells
+                .into()
+                .into_iter()
+                .map(|c| c.map(|v| v.into_boxed_slice()))
+                .collect(),
+        }
+    }
+
     pub fn as_view(&self) -> RowView<'_> {
         RowView::new(&self.cells)
     }
@@ -124,6 +141,14 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
     pub command_tag: Option<String>,
+}
+
+impl QueryResult {
+    /// Build a [`QueryResult`]. Mostly useful for tests and for callers
+    /// that assemble results without a live [`KeystoneClient`].
+    pub fn new(columns: Vec<String>, rows: Vec<Row>, command_tag: Option<String>) -> Self {
+        QueryResult { columns, rows, command_tag }
+    }
 }
 
 pub struct KeystoneClient {
@@ -233,5 +258,66 @@ impl KeystoneClient {
         self.conn.write_terminate();
         self.conn.flush().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_from_text_decodes_common_scalars() {
+        assert_eq!(Value::from_text("t"), Value::Bool(true));
+        assert_eq!(Value::from_text("false"), Value::Bool(false));
+        assert_eq!(Value::from_text("42"), Value::Int(42));
+        assert_eq!(Value::from_text("-7"), Value::Int(-7));
+        assert_eq!(Value::from_text("3.14"), Value::Float(3.14));
+        assert_eq!(Value::from_text("hello"), Value::Text("hello".into()));
+    }
+
+    #[test]
+    fn value_to_param_round_trips_into_wire_text() {
+        assert_eq!(Value::Null.to_param(), None);
+        assert_eq!(Value::Bool(true).to_param(), Some(b"t".to_vec()));
+        assert_eq!(Value::Bool(false).to_param(), Some(b"f".to_vec()));
+        assert_eq!(Value::Int(9).to_param(), Some(b"9".to_vec()));
+        assert_eq!(Value::Float(1.5).to_param(), Some(b"1.5".to_vec()));
+        assert_eq!(Value::Text("x".into()).to_param(), Some(b"x".to_vec()));
+    }
+
+    #[test]
+    fn from_impls_build_typed_values() {
+        assert_eq!(Value::from("s"), Value::Text("s".into()));
+        assert_eq!(Value::from(1i64), Value::Int(1));
+        assert_eq!(Value::from(2.0f64), Value::Float(2.0));
+        assert_eq!(Value::from(true), Value::Bool(true));
+    }
+
+    #[test]
+    fn row_accessors_index_and_lookup_by_name() {
+        let row = Row::new(
+            ["id", "name", "score"],
+            [Some(b"1".to_vec()), Some(b"Ada".to_vec()), None],
+        );
+        assert_eq!(row.get_str(0), Some("1"));
+        assert_eq!(row.get_str(1), Some("Ada"));
+        assert_eq!(row.get_str(2), None);
+        assert_eq!(row.get_by_name("name"), Some(&b"Ada"[..]));
+        assert_eq!(row.get_by_name("missing"), None);
+        assert_eq!(row.get_value(0), Value::Int(1));
+        assert_eq!(row.get_value(2), Value::Null);
+    }
+
+    #[test]
+    fn row_as_view_exposes_the_same_cells() {
+        let row = Row::new(["id"], [Some(b"7".to_vec())]);
+        let view = row.as_view();
+        assert_eq!(view.get_str(0), Some("7"));
+        assert_eq!(view.to_owned_row(), vec![Some(b"7".to_vec())]);
+    }
+
+    #[test]
+    fn keystone_error_formats_human_readable() {
+        assert_eq!(KeystoneError::Server("boom".into()).to_string(), "server error: boom");
     }
 }

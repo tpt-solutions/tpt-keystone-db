@@ -1,3 +1,4 @@
+mod canopy_aggregate;
 #[cfg(test)]
 mod canopy_tests;
 mod catalog;
@@ -13,6 +14,7 @@ mod flux_tests;
 mod geo_tests;
 #[cfg(test)]
 mod gpu_join_tests;
+mod gql;
 mod graph_fn;
 mod join;
 #[cfg(test)]
@@ -120,6 +122,7 @@ fn execute_parsed_inner(
         Stmt::CreateSequence(cs) => ddl::execute_create_sequence(cs, db),
         Stmt::CreateTopic(ct) => ddl::execute_create_topic(ct, db),
         Stmt::Analyze(table) => stats::execute_analyze(table, db),
+        Stmt::Match(m) => gql::execute_match(m, db),
         Stmt::Set(s) => {
             tracing::debug!("SET {} = {:?} (ignored)", s.name, s.value);
             Ok(QueryResult {

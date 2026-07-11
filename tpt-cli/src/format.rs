@@ -6,6 +6,14 @@ use std::str::FromStr;
 
 use tpt_sdk::keystone::{QueryResult, Row, Value};
 
+fn sample_result() -> QueryResult {
+    let rows = vec![
+        Row::new(["id", "name", "score"], [Some(b"1".to_vec()), Some(b"Ada".to_vec()), Some(b"9.5".to_vec())]),
+        Row::new(["id", "name", "score"], [Some(b"2".to_vec()), Some(b"Bob, Jr".to_vec()), None]),
+    ];
+    QueryResult::new(vec!["id".into(), "name".into(), "score".into()], rows, Some("SELECT 2".into()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Table,
@@ -135,4 +143,62 @@ fn render_csv(result: &QueryResult) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tpt_sdk::keystone::QueryResult;
+
+    #[test]
+    fn output_format_parses_case_insensitively() {
+        assert_eq!("table".parse::<OutputFormat>().unwrap(), OutputFormat::Table);
+        assert_eq!("JSON".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
+        assert_eq!("Csv".parse::<OutputFormat>().unwrap(), OutputFormat::Csv);
+    }
+
+    #[test]
+    fn output_format_rejects_unknown() {
+        assert!("yaml".parse::<OutputFormat>().is_err());
+        let err = "nope".parse::<OutputFormat>().unwrap_err();
+        assert!(err.contains("table|json|csv"));
+    }
+
+    #[test]
+    fn table_format_renders_header_separator_and_row_count() {
+        let out = render_to_string(&sample_result(), OutputFormat::Table);
+        assert!(out.contains("id | name | score"));
+        assert!(out.contains("Ada"));
+        // "Bob, Jr" contains a comma but is a single column in the table
+        // (no CSV-style quoting in the table renderer).
+        assert!(out.contains("Bob, Jr"));
+        assert!(out.contains("(2 rows)"));
+    }
+
+    #[test]
+    fn json_format_emits_one_object_per_row() {
+        let out = render_to_string(&sample_result(), OutputFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], serde_json::json!("Ada"));
+        assert_eq!(arr[1]["score"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn csv_format_escapes_commas_and_quotes() {
+        let out = render_to_string(&sample_result(), OutputFormat::Csv);
+        let lines: Vec<&str> = out.trim_end().split('\n').collect();
+        assert_eq!(lines[0], "id,name,score");
+        // The comma in "Bob, Jr" must be quoted.
+        assert!(lines[2].contains("\"Bob, Jr\""));
+        // The NULL score renders as empty.
+        assert!(lines[2].ends_with(","));
+    }
+
+    #[test]
+    fn command_tag_only_result_renders_tag_in_table_format() {
+        let result = QueryResult::new(vec![], vec![], Some("INSERT 0 3".into()));
+        assert_eq!(render_to_string(&result, OutputFormat::Table), "INSERT 0 3\n");
+    }
 }

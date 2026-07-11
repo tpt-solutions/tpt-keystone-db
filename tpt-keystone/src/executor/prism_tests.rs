@@ -12,6 +12,7 @@ use crate::storage::config::NodeRole;
 use crate::storage::database::Database;
 use crate::storage::lease::LeaseManager;
 use crate::storage::objectstore::{LocalFsObjectStore, ObjectStore};
+use crate::vector::gpu::GPU_ENV_TEST_LOCK as ENV_LOCK;
 
 fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
@@ -204,8 +205,19 @@ fn hybrid_search_fuses_vector_and_bm25_rankings() {
 
 /// Confirms `hybrid_search` errors clearly (rather than silently returning
 /// nothing) when one of the two required indexes is missing.
+///
+/// Forces `TPT_DISABLE_GPU_VECTOR=1` around the query so this is
+/// deterministic regardless of whether the machine running `cargo test` has
+/// a real GPU: `Database::vector_knn_query` has a GPU brute-force fallback
+/// (`vector::gpu`) that would otherwise silently answer this query on a
+/// GPU-equipped host instead of erroring, since it also runs when no
+/// HNSW/IVF-PQ index exists. Same pattern
+/// `prism_gpu_tests::vector_search_without_index_errors_when_gpu_disabled`
+/// already established, sharing its `GPU_ENV_TEST_LOCK` guard since both
+/// mutate the same process-wide env var.
 #[test]
 fn hybrid_search_requires_both_indexes() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (db, _b, _l) = test_db();
     execute_query(
         "CREATE TABLE nodex (id INT4, label TEXT, body TEXT, embedding VECTOR)",
@@ -217,10 +229,12 @@ fn hybrid_search_requires_both_indexes() {
         db.clone(),
     )
     .unwrap();
+    std::env::set_var("TPT_DISABLE_GPU_VECTOR", "1");
     let result = execute_query(
         "SELECT * FROM hybrid_search('nodex', 'embedding', '[1.0,0.0,0.0]', 'body', 'rust', 3)",
         db.clone(),
     );
+    std::env::remove_var("TPT_DISABLE_GPU_VECTOR");
     match result {
         Err(e) => assert!(e.to_string().contains("no vector index")),
         Ok(_) => panic!("expected an error for a missing vector index"),

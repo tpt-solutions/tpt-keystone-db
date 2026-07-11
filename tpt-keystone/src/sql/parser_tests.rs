@@ -480,3 +480,66 @@ fn malformed_sql_returns_err() {
     assert!(parse("SELECT \"unterminated").is_err());
     assert!(parse("").is_err());
 }
+
+#[test]
+fn parses_match_single_hop_out_directed_typed_edge() {
+    let stmt = parse_ok("MATCH (a)-[:FOLLOWS]->(b) ON follows(from_id) WHERE a = 'alice' RETURN a, b");
+    match stmt {
+        Stmt::Match(m) => {
+            assert_eq!(m.nodes, vec!["a".to_string(), "b".to_string()]);
+            assert_eq!(m.hops.len(), 1);
+            assert_eq!(m.hops[0].rel_type, Some("FOLLOWS".to_string()));
+            assert_eq!(m.hops[0].direction, MatchDirection::Out);
+            assert_eq!(m.table, "follows");
+            assert_eq!(m.column, "from_id");
+            assert_eq!(m.start_filter, Some("alice".to_string()));
+            assert_eq!(m.returns, vec!["a".to_string(), "b".to_string()]);
+            assert_eq!(m.limit, None);
+        }
+        other => panic!("expected Stmt::Match, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_match_two_hop_chain_untyped_with_limit() {
+    let stmt = parse_ok("MATCH (a)-[]->(b)-[]->(c) ON t(col) RETURN a, b, c LIMIT 5");
+    match stmt {
+        Stmt::Match(m) => {
+            assert_eq!(m.nodes, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            assert_eq!(m.hops.len(), 2);
+            assert!(m.hops.iter().all(|h| h.rel_type.is_none()));
+            assert!(m.hops.iter().all(|h| h.direction == MatchDirection::Out));
+            assert_eq!(m.start_filter, None);
+            assert_eq!(m.limit, Some(5));
+        }
+        other => panic!("expected Stmt::Match, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_match_incoming_and_undirected_edges() {
+    let stmt = parse_ok("MATCH (a)<-[:REL]-(b) ON t(col) RETURN a, b");
+    match stmt {
+        Stmt::Match(m) => {
+            assert_eq!(m.hops[0].direction, MatchDirection::In);
+            assert_eq!(m.hops[0].rel_type, Some("REL".to_string()));
+        }
+        other => panic!("expected Stmt::Match, got {other:?}"),
+    }
+
+    let stmt = parse_ok("MATCH (a)-[]-(b) ON t(col) RETURN a, b");
+    match stmt {
+        Stmt::Match(m) => assert_eq!(m.hops[0].direction, MatchDirection::Both),
+        other => panic!("expected Stmt::Match, got {other:?}"),
+    }
+}
+
+#[test]
+fn match_return_of_unknown_variable_errors() {
+    assert!(parse("MATCH (a)-[]->(b) ON t(col) RETURN a, c").is_err());
+}
+
+#[test]
+fn match_where_on_non_first_variable_errors() {
+    assert!(parse("MATCH (a)-[]->(b) ON t(col) WHERE b = 'x' RETURN a, b").is_err());
+}

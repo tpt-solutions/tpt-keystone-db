@@ -155,6 +155,10 @@ impl Parser {
                     Ok(Stmt::Analyze(Some(self.parse_object_name()?)))
                 }
             }
+            Token::Match => {
+                self.advance();
+                self.parse_match()
+            }
             Token::Eof => anyhow::bail!("empty statement"),
             other => anyhow::bail!("unexpected token: {:?}", other),
         }?;
@@ -1127,6 +1131,127 @@ impl Parser {
         }
     }
 
+    /// `[:REL]` or `[]` (untyped edge) — the relationship-type bracket in a
+    /// `MATCH` pattern hop, after the leading `-`/`<-` has already been
+    /// consumed by the caller.
+    fn parse_match_rel_bracket(&mut self) -> anyhow::Result<Option<String>> {
+        self.expect(&Token::LBracket)?;
+        let rel_type = if self.eat(&Token::Colon) {
+            Some(self.parse_ident_string()?)
+        } else {
+            None
+        };
+        self.expect(&Token::RBracket)?;
+        Ok(rel_type)
+    }
+
+    /// `MATCH (a)-[:REL]->(b)-[:REL2]-(c) ON table(from_column) [WHERE var
+    /// = 'lit'] RETURN a, b [LIMIT n]` — see `ast::MatchStmt`'s doc comment
+    /// for the honest scope of this GQL subset. `MATCH` itself has already
+    /// been consumed by `parse_stmt`.
+    fn parse_match(&mut self) -> anyhow::Result<Stmt> {
+        self.expect(&Token::LParen)?;
+        let mut nodes = vec![self.parse_ident_string()?];
+        self.expect(&Token::RParen)?;
+
+        let mut hops = Vec::new();
+        loop {
+            match self.peek() {
+                Token::Minus => {
+                    self.advance();
+                    let rel_type = self.parse_match_rel_bracket()?;
+                    // A closing `-` immediately followed by `>` (no space)
+                    // already lexes as one `Arrow` token (same rule the `->`
+                    // JSON operator uses), not `Minus` then `Gt` — so an
+                    // out-directed hop (`-[...]->`) ends in `Arrow`, while an
+                    // undirected hop (`-[...]-`) ends in a bare `Minus`.
+                    let direction = if self.eat(&Token::Arrow) {
+                        MatchDirection::Out
+                    } else {
+                        self.expect(&Token::Minus)?;
+                        MatchDirection::Both
+                    };
+                    self.expect(&Token::LParen)?;
+                    nodes.push(self.parse_ident_string()?);
+                    self.expect(&Token::RParen)?;
+                    hops.push(MatchHop { rel_type, direction });
+                }
+                Token::Lt => {
+                    self.advance();
+                    self.expect(&Token::Minus)?;
+                    let rel_type = self.parse_match_rel_bracket()?;
+                    self.expect(&Token::Minus)?;
+                    self.expect(&Token::LParen)?;
+                    nodes.push(self.parse_ident_string()?);
+                    self.expect(&Token::RParen)?;
+                    hops.push(MatchHop {
+                        rel_type,
+                        direction: MatchDirection::In,
+                    });
+                }
+                _ => break,
+            }
+        }
+
+        self.expect(&Token::On)?;
+        let table = self.parse_ident_string()?;
+        self.expect(&Token::LParen)?;
+        let column = self.parse_ident_string()?;
+        self.expect(&Token::RParen)?;
+
+        let start_filter = if self.eat(&Token::Where) {
+            let var = self.parse_ident_string()?;
+            self.expect(&Token::Eq)?;
+            let lit = match self.advance().clone() {
+                Token::StringLiteral(s) => s,
+                Token::IntLiteral(n) => n.to_string(),
+                other => anyhow::bail!(
+                    "MATCH WHERE only supports `<var> = '<literal>'`, got {:?}",
+                    other
+                ),
+            };
+            anyhow::ensure!(
+                var == nodes[0],
+                "MATCH WHERE currently only supports filtering the pattern's first variable (\"{}\"), got \"{var}\"",
+                nodes[0]
+            );
+            Some(lit)
+        } else {
+            None
+        };
+
+        self.expect(&Token::Return)?;
+        let mut returns = vec![self.parse_ident_string()?];
+        while self.eat(&Token::Comma) {
+            returns.push(self.parse_ident_string()?);
+        }
+        for r in &returns {
+            anyhow::ensure!(
+                nodes.contains(r),
+                "MATCH RETURN references unknown pattern variable \"{r}\""
+            );
+        }
+
+        let limit = if self.eat(&Token::Limit) {
+            match self.advance().clone() {
+                Token::IntLiteral(n) => Some(n as u64),
+                other => anyhow::bail!("expected integer after LIMIT, got {:?}", other),
+            }
+        } else {
+            None
+        };
+
+        Ok(Stmt::Match(MatchStmt {
+            nodes,
+            hops,
+            table,
+            column,
+            start_filter,
+            returns,
+            limit,
+        }))
+    }
+
     /// Parse a DDL/DML object name (table, sequence, ...), discarding a
     /// leading schema qualifier (`public.foo` → `foo`) — this engine has
     /// one implicit schema, but real `pg_dump` output schema-qualifies
@@ -1241,6 +1366,45 @@ impl Parser {
                     expr: Box::new(lhs),
                     list,
                     negated,
+                };
+                continue;
+            }
+
+            // `COLLATE <name>` — psql appends this to string comparisons in its
+            // meta-command queries. A single collation exists here, so the
+            // clause is parsed and discarded (no effect on evaluation).
+            if self.peek() == &Token::Collate {
+                self.advance();
+                // Optional schema qualifier (`pg_catalog.default`).
+                if matches!(self.peek(), Token::Ident(_)) && self.peek2() == &Token::Dot {
+                    self.advance();
+                    self.advance();
+                }
+                if let Token::Ident(_) = self.peek() {
+                    self.advance();
+                }
+                continue;
+            }
+
+            // `OPERATOR(schema.opname)` — schema-qualified infix operator
+            // syntax (`OPERATOR(pg_catalog.~)`). Treated as a normal infix op.
+            if self.peek() == &Token::Operator {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                if matches!(self.peek(), Token::Ident(_)) && self.peek2() == &Token::Dot {
+                    self.advance();
+                    self.advance();
+                }
+                let op_tok = self.peek().clone();
+                let (l_bp, r_bp, binop) = infix_bp(&op_tok)
+                    .ok_or_else(|| anyhow::anyhow!("unknown operator in OPERATOR(...)"))?;
+                self.advance();
+                self.expect(&Token::RParen)?;
+                let rhs = self.parse_expr(r_bp)?;
+                lhs = Expr::BinaryOp {
+                    op: binop,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
                 };
                 continue;
             }
@@ -1401,6 +1565,30 @@ impl Parser {
                 }
                 if self.eat(&Token::Dot) {
                     let col = self.parse_ident_string()?;
+                    // A schema-qualified name directly followed by `(` is a
+                    // function call (`pg_catalog.pg_get_userbyid(...)`), not a
+                    // column reference. Keep the qualifier in the function name
+                    // so the evaluator can match it.
+                    if self.eat(&Token::LParen) {
+                        let distinct = self.eat(&Token::Distinct);
+                        let args = if self.peek() == &Token::Star {
+                            self.advance();
+                            vec![]
+                        } else if self.peek() == &Token::RParen {
+                            vec![]
+                        } else {
+                            self.parse_expr_list()?
+                        };
+                        self.expect(&Token::RParen)?;
+                        if self.peek() == &Token::Over {
+                            return self.parse_over_clause(format!("{name}.{col}"), args);
+                        }
+                        return Ok(Expr::Function {
+                            name: format!("{name}.{col}"),
+                            args,
+                            distinct,
+                        });
+                    }
                     return Ok(Expr::QualifiedIdent(name, col));
                 }
                 Ok(Expr::Ident(name))
@@ -1560,6 +1748,7 @@ fn infix_bp(tok: &Token) -> Option<(u8, u8, BinOp)> {
         Token::TildeStar => (5, 6, BinOp::RegexMatchCI),
         Token::NotTildeStar => (5, 6, BinOp::RegexNotMatchCI),
         Token::Is | Token::Between | Token::Like | Token::In | Token::Not => (5, 6, BinOp::Eq),
+        Token::Collate | Token::Operator => (5, 6, BinOp::Eq),
         _ => return None,
     };
     Some((l, r, op))

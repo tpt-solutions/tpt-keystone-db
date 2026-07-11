@@ -1,0 +1,39 @@
+# One-command quickstart for the TPT Keystone core engine.
+#
+#   docker compose up --build
+#
+# Starts a single-node writer on the Postgres wire protocol and exposes every
+# listener the engine brings up:
+#   5432  Postgres wire protocol v3   (psql -h localhost -p 5432)
+#   5433  MCP server (JSON-RPC 2.0)   (TPT_MCP_ADDR)
+#   5434  Flux WebSocket streaming    (TPT_FLUX_WS_ADDR)
+#   5435  Canvas HTTP/JSON query bridge (TPT_HTTP_ADDR)
+#   9187  Prometheus metrics          (TPT_METRICS_ADDR)
+#
+# The engine defaults its Postgres-wire listener to 55432; we relocate it to
+# 5432 via TPT_PG_ADDR so the standard Postgres tooling port works out of the
+# box. State lives under ./tpt-data (mounted so it survives container restarts).
+services:
+  keystone:
+    build:
+      context: ./tpt-keystone
+      dockerfile: Dockerfile
+    image: tpt-keystone:local
+    container_name: tpt-keystone
+    ports:
+      - "5432:5432"
+      - "5433:5433"
+      - "5434:5434"
+      - "5435:5435"
+      - "9187:9187"
+    environment:
+      TPT_PG_ADDR: "0.0.0.0:5432"
+      TPT_MCP_ADDR: "0.0.0.0:5433"
+      TPT_FLUX_WS_ADDR: "0.0.0.0:5434"
+      TPT_HTTP_ADDR: "0.0.0.0:5435"
+      TPT_METRICS_ADDR: "0.0.0.0:9187"
+      TPT_STORAGE_BACKEND: "local"
+      TPT_LOCAL_STORE_DIR: "/data/store"
+    volumes:
+      - ./tpt-data:/data/store
+    restart: unless-stopped

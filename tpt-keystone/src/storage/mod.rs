@@ -6,6 +6,7 @@ mod chaos_tests;
 pub mod compress;
 pub mod config;
 pub mod database;
+pub mod diskann_index;
 pub mod flux;
 pub mod guard;
 pub mod geo_index;
@@ -23,6 +24,7 @@ mod mvcc_tests;
 pub mod objectstore;
 #[cfg(test)]
 mod phase3_tests;
+pub mod sharded_vector_index;
 pub mod sstable;
 #[cfg(test)]
 pub(crate) mod test_support;

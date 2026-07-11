@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Core engine: the existing 455-test suite (unit + Phase 3 multi-node).
+  # ---------------------------------------------------------------------------
+  keystone:
+    name: keystone (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-keystone
+      - name: Run tests
+        working-directory: tpt-keystone
+        run: cargo test --release
+
+  # ---------------------------------------------------------------------------
+  # Library crates: build + test each independently (no shared workspace).
+  # ---------------------------------------------------------------------------
+  rust-libs:
+    name: ${{ matrix.crate }} (cargo build + test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [tpt-cli, tpt-sdk, tpt-harbor, tpt-operator]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+      - name: Build
+        working-directory: ${{ matrix.crate }}
+        run: cargo build
+      - name: Test
+        working-directory: ${{ matrix.crate }}
+        run: cargo test
+
+  # ---------------------------------------------------------------------------
+  # Canvas: WASM build only (no meaningful native test path).
+  # ---------------------------------------------------------------------------
+  canvas:
+    name: tpt-canvas (wasm32 build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-canvas
+      - name: Build wasm32
+        working-directory: tpt-canvas
+        run: cargo build --target wasm32-unknown-unknown
+
+  # ---------------------------------------------------------------------------
+  # TypeScript SDKs: build (tsc) + node --test.
+  # ---------------------------------------------------------------------------
+  javascript:
+    name: ${{ matrix.pkg }} (npm test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [sdk-web, sdk-server, sdk-edge]
+    defaults:
+      run:
+        working-directory: packages/${{ matrix.pkg }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/${{ matrix.pkg }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Build the core engine once; the live Go/Python jobs download it as an
+  # artifact so they don't each recompile the whole engine.
+  # ---------------------------------------------------------------------------
+  build-keystone:
+    name: build keystone binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-keystone
+      - name: Build (debug)
+        working-directory: tpt-keystone
+        run: cargo build
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystone-bin
+          path: tpt-keystone/target/debug/tpt-keystone
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Python SDK: offline pytest, then live_smoke.py against a real server
+  # (started in-job from the artifact above on the standard 5432 port).
+  # ---------------------------------------------------------------------------
+  python:
+    name: sdk-python (pytest + live)
+    runs-on: ubuntu-latest
+    needs: [build-keystone]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download keystone binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keystone-bin
+          path: .
+      - name: Start keystone
+        run: |
+          chmod +x tpt-keystone
+          TPT_PG_ADDR=0.0.0.0:5432 ./tpt-keystone > keystone.log 2>&1 &
+          echo $! > keystone.pid
+      - name: Wait for keystone
+        run: |
+          for i in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then
+              echo "keystone up"; break
+            fi
+            sleep 1
+          done
+          (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null || { echo "did not start"; cat keystone.log; exit 1; }
+      - name: Install SDK + test deps
+        working-directory: sdk-python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pandas
+      - name: Offline pytest
+        working-directory: sdk-python
+        run: python -m pytest -v
+      - name: Live smoke test
+        working-directory: sdk-python
+        run: python tests/live_smoke.py
+      - name: Stop keystone
+        if: always()
+        run: kill "$(cat keystone.pid)" || true
+
+  # ---------------------------------------------------------------------------
+  # Go SDK: offline `go test ./...`, then `-tags live` against the real
+  # server started in-job from the artifact above.
+  # ---------------------------------------------------------------------------
+  go:
+    name: sdk-go (go test + live)
+    runs-on: ubuntu-latest
+    needs: [build-keystone]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+      - name: Download keystone binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keystone-bin
+          path: .
+      - name: Start keystone
+        run: |
+          chmod +x tpt-keystone
+          TPT_PG_ADDR=0.0.0.0:5432 ./tpt-keystone > keystone.log 2>&1 &
+          echo $! > keystone.pid
+      - name: Wait for keystone
+        run: |
+          for i in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then
+              echo "keystone up"; break
+            fi
+            sleep 1
+          done
+          (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null || { echo "did not start"; cat keystone.log; exit 1; }
+      - name: Offline tests
+        working-directory: sdk-go
+        run: go test ./...
+      - name: Live tests (-tags live)
+        working-directory: sdk-go
+        run: go test -tags live ./...
+      - name: Stop keystone
+        if: always()
+        run: kill "$(cat keystone.pid)" || true

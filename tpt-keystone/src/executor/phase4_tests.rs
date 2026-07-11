@@ -174,3 +174,104 @@ fn pg_catalog_tables_are_shadowed_from_user_tables() {
     assert!(names.contains(&"public".to_string()));
     assert!(names.contains(&"pg_catalog".to_string()));
 }
+
+/// The exact SQL psql 15 sends for `\dt` (list tables). If this returns the
+/// user tables with the right shape, a real `psql` client's `\dt` works
+/// against this engine (psql just renders the returned rows).
+const PSQL_DT_QUERY: &str = r#"
+SELECT n.nspname as "Schema", c.relname as "Name",
+  CASE c.relkind
+    WHEN 'r' THEN 'table'
+    WHEN 'v' THEN 'view'
+    WHEN 'm' THEN 'materialized view'
+    WHEN 'i' THEN 'index'
+    WHEN 'S' THEN 'sequence'
+    WHEN 's' THEN 'special'
+    WHEN 't' THEN 'TOAST table'
+    WHEN 'f' THEN 'foreign table'
+    WHEN 'p' THEN 'partitioned table'
+    WHEN 'I' THEN 'partitioned index'
+  END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+      AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2
+"#;
+
+#[test]
+fn psql_dt_meta_command_lists_user_tables() {
+    let (db, _b, _l) = test_db();
+    for t in ["users", "widgets", "things"] {
+        db.create_table(
+            t,
+            &[ColumnDef {
+                name: "id".into(),
+                col_type: ColumnType::Int4,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            }],
+        )
+        .unwrap();
+    }
+
+    let result = execute_query(PSQL_DT_QUERY, db.clone()).unwrap();
+    // One row per user table (indexes are relkind 'i', excluded by the WHERE).
+    assert_eq!(result.rows.len(), 3, "got rows: {:?}", result.rows);
+
+    // Find the column positions for Name / Type / Owner by header name.
+    let headers: Vec<String> = result.fields.iter().map(|f| f.name.clone()).collect();
+    let name_i = headers.iter().position(|h| h == "Name").unwrap();
+    let type_i = headers.iter().position(|h| h == "Type").unwrap();
+    let owner_i = headers.iter().position(|h| h == "Owner").unwrap();
+
+    let mut names: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| cell_text(&r[name_i]))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["things", "users", "widgets"]);
+
+    for r in &result.rows {
+        assert_eq!(cell_text(&r[type_i]), "table");
+        assert_eq!(cell_text(&r[owner_i]), "tpt");
+    }
+}
+
+/// A `\d`-style introspection query exercising the building blocks psql uses:
+/// `pg_am` join on `pg_class.relam`, the `OPERATOR(pg_catalog.~)` infix syntax,
+/// and a `COLLATE` clause (parsed and ignored).
+#[test]
+fn d_style_query_joins_pg_am_with_operator_and_collate() {
+    let (db, _b, _l) = test_db();
+    db.create_table(
+        "accounts",
+        &[ColumnDef {
+            name: "id".into(),
+            col_type: ColumnType::Int4,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
+    )
+    .unwrap();
+
+    let sql = r#"
+SELECT c.relname, a.amname
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_am a ON a.oid OPERATOR(pg_catalog.=) c.relam
+WHERE c.relkind OPERATOR(pg_catalog.=) 'r' COLLATE pg_catalog.default
+  AND c.relname OPERATOR(pg_catalog.~) '^a'
+"#;
+    let result = execute_query(sql, db.clone()).unwrap();
+    assert_eq!(result.rows.len(), 1, "got rows: {:?}", result.rows);
+    assert_eq!(cell_text(&result.rows[0][0]), "accounts");
+    // `accounts` is a heap table -> relam = 2 -> pg_am 'heap'.
+    assert_eq!(cell_text(&result.rows[0][1]), "heap");
+}

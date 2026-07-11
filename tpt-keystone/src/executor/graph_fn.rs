@@ -374,6 +374,74 @@ pub(super) fn resolve_graph_function(
             });
             Ok((Some(Arc::new(out_schema)), rows))
         }
+        // Canopy's MongoDB-compatible aggregation pipeline (Phase 10):
+        // `aggregate('table', '<json array of pipeline stages>')`. Turns
+        // each row of `table` into a JSON document (using the row's own
+        // column names/values — a `Json`-typed column's text is parsed as
+        // nested JSON, every other column becomes a JSON scalar), runs it
+        // through `canopy_aggregate::run_pipeline`, and re-flattens the
+        // resulting documents into rows: the output schema is the union of
+        // every key seen across the result documents (first-seen order),
+        // each cell either the field's scalar text or, for an
+        // object/array-valued field (e.g. `$group`'s `_id` when it's a
+        // compound key, or `$push`'s array), its compact JSON text — same
+        // "no dedicated binary cell type, reuse text" precedent as every
+        // other engine-extension value in this codebase.
+        "aggregate" => {
+            let table = arg_text(0)?;
+            let pipeline_text = arg_text(1)?;
+            let stages_val: serde_json::Value = serde_json::from_str(&pipeline_text)
+                .map_err(|e| anyhow::anyhow!("aggregate: invalid pipeline JSON: {e}"))?;
+            let stages = stages_val
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("aggregate: pipeline must be a JSON array of stages"))?
+                .clone();
+
+            let schema = db
+                .get_table(&table)?
+                .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+            let schema_arc = Arc::new(schema);
+            let raw_rows = db.scan(&table)?;
+            let rows = parse_rows(&raw_rows, &Some((*schema_arc).clone()));
+
+            let docs: Vec<serde_json::Map<String, serde_json::Value>> = rows
+                .iter()
+                .map(|row| {
+                    let ctx = super::eval::RowContext::new(row.clone(), Some(schema_arc.clone()));
+                    let mut map = serde_json::Map::new();
+                    for col in &schema_arc.columns {
+                        let v = ctx.eval(&Expr::Ident(col.name.clone())).unwrap_or(Value::Null);
+                        map.insert(col.name.clone(), value_to_json(&v, &col.col_type));
+                    }
+                    map
+                })
+                .collect();
+
+            let result_docs = crate::executor::canopy_aggregate::run_pipeline(docs, &stages)?;
+
+            let mut columns: Vec<String> = Vec::new();
+            for doc in &result_docs {
+                for key in doc.keys() {
+                    if !columns.contains(key) {
+                        columns.push(key.clone());
+                    }
+                }
+            }
+            let out_schema = func_schema(
+                "aggregate",
+                &columns.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            );
+            let out_rows = result_docs
+                .iter()
+                .map(|doc| {
+                    columns
+                        .iter()
+                        .map(|c| doc.get(c).and_then(json_to_cell))
+                        .collect()
+                })
+                .collect();
+            Ok((Some(out_schema), out_rows))
+        }
         // --- Synapse (Phase 16) -------------------------------------------
         // Only the two ranked-recall paths get a SQL surface — agent
         // lifecycle (spawn/pause/checkpoint), task delegation, and shared
@@ -685,5 +753,44 @@ pub(super) fn resolve_graph_function(
             ))
         }
         other => anyhow::bail!("unknown table function \"{other}\""),
+    }
+}
+
+/// Converts one evaluated row cell to a JSON value for
+/// `canopy_aggregate::run_pipeline`'s document model: a `Json`-typed
+/// column's text is parsed as nested JSON (falling back to a JSON string if
+/// it's not valid JSON, e.g. a legacy/malformed cell), every other type maps
+/// to the corresponding JSON scalar.
+fn value_to_json(v: &Value, col_type: &ColumnType) -> serde_json::Value {
+    if *col_type == ColumnType::Json {
+        if let Value::Text(s) = v {
+            return serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()));
+        }
+    }
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(n) => serde_json::Value::Number((*n).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Text(s) => serde_json::Value::String(s.clone()),
+    }
+}
+
+/// The inverse direction for `aggregate`'s output rows: a JSON scalar
+/// becomes its plain text form, an object/array becomes its compact JSON
+/// text (no dedicated binary cell type for this table function's output,
+/// same "reuse text" precedent as every other engine-extension value in
+/// this codebase), and `null` becomes a SQL NULL cell.
+fn json_to_cell(v: &serde_json::Value) -> Option<Vec<u8>> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(if *b { b"t".to_vec() } else { b"f".to_vec() }),
+        serde_json::Value::Number(n) => Some(n.to_string().into_bytes()),
+        serde_json::Value::String(s) => Some(s.as_bytes().to_vec()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(v).ok().map(|s| s.into_bytes())
+        }
     }
 }

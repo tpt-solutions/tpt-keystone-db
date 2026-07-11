@@ -74,6 +74,46 @@ fn parse_csv(content: &str) -> Vec<Vec<String>> {
     rows
 }
 
+#[cfg(test)]
+mod tests {
+    use super::parse_csv;
+
+    #[test]
+    fn parses_simple_rows_with_header() {
+        let rows = parse_csv("id,name\n1,Ada\n2,Bob\n");
+        assert_eq!(rows, vec![
+            vec!["id".to_string(), "name".to_string()],
+            vec!["1".to_string(), "Ada".to_string()],
+            vec!["2".to_string(), "Bob".to_string()],
+        ]);
+    }
+
+    #[test]
+    fn parses_quoted_fields_with_embedded_commas_and_quotes() {
+        let rows = parse_csv("id,note\n1,\"hello, world\"\n2,\"say \"\"hi\"\"\"\n");
+        assert_eq!(rows, vec![
+            vec!["id".to_string(), "note".to_string()],
+            vec!["1".to_string(), "hello, world".to_string()],
+            vec!["2".to_string(), "say \"hi\"".to_string()],
+        ]);
+    }
+
+    #[test]
+    fn parses_embedded_newlines_inside_quotes() {
+        let rows = parse_csv("id,note\n1,\"line one\nline two\"\n");
+        assert_eq!(rows, vec![
+            vec!["id".to_string(), "note".to_string()],
+            vec!["1".to_string(), "line one\nline two".to_string()],
+        ]);
+    }
+
+    #[test]
+    fn trailing_empty_line_is_dropped() {
+        let rows = parse_csv("a\n1\n\n");
+        assert_eq!(rows, vec![vec!["a".to_string()], vec!["1".to_string()]]);
+    }
+}
+
 pub fn import(mut client: Client, table: &str, file: &Path, format: OutputFormat) -> anyhow::Result<()> {
     let content = fs::read_to_string(file)?;
 

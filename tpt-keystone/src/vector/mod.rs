@@ -38,15 +38,19 @@
 //! roadmap, delivered via `wgpu` (Vulkan/Metal/DX12) rather than a vendor
 //! CUDA/ROCm backend — see `gpu`'s module docs for the honest portability note.
 //!
-//! Explicitly still NOT implemented (documented scope cuts, tracked in
-//! `TODO.md`): DiskANN (on-disk billion-scale graphs), scalar/binary
-//! quantization (only product quantization exists), and consistent hashing for
-//! distributed shards. All are left unchecked in `TODO.md` rather than stubbed
-//! out and claimed done.
+//! Explicitly still NOT implemented (documented scope cut, tracked in
+//! `TODO.md`): scalar/binary quantization (only product quantization
+//! exists). Left unchecked in `TODO.md` rather than stubbed out and claimed
+//! done. DiskANN (`vamana` module + `storage::diskann_index`) and consistent
+//! hashing for distributed shards (`shard` module) are now implemented —
+//! see each module's doc for the honest scope of what that does and doesn't
+//! mean in a still-single-node-query-path engine.
 
 pub mod gpu;
 pub mod hnsw;
 pub mod ivf_pq;
 pub mod kmeans;
 pub mod pq;
+pub mod shard;
+pub mod vamana;
 pub mod vector;

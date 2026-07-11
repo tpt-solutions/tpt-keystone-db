@@ -1433,6 +1433,23 @@ impl Database {
             .collect()
     }
 
+    /// Every vertex key `table.from_column`'s graph index knows about.
+    /// `None` if no such index exists. Used by `MATCH` (`executor::gql`)
+    /// when a pattern's starting node has no `WHERE`-clause filter, so
+    /// every vertex is a candidate start — real but potentially expensive
+    /// on a large graph, the documented tradeoff of not having a real
+    /// WHERE-clause planner for `MATCH` yet (see `ast::MatchStmt`'s doc).
+    pub fn graph_all_vertices(&self, table: &str, from_column: &str) -> Option<Vec<Vec<u8>>> {
+        let idx_map = self.graph_indexes.lock().unwrap();
+        let graph = idx_map.get(table)?.get(from_column)?.graph();
+        Some(
+            graph
+                .vertex_ids()
+                .filter_map(|id| graph.key_of(id).map(|k| k.to_vec()))
+                .collect(),
+        )
+    }
+
     /// Neighbours of `vertex_key` in the given direction on `table.from_column`'s
     /// graph index, each as `(neighbour_key, rel_type)`. `None` if no such
     /// index exists or the vertex was never indexed (no edges touch it).

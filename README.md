@@ -96,6 +96,30 @@ Compute nodes are configured entirely through environment variables (storage bac
 sizing, lease TTL, etc.) — see `tpt-keystone/src/storage/config.rs` for the full list, or
 [`CLAUDE.md`](CLAUDE.md) for a summary and an example of running two nodes against shared storage.
 
+## Quickstart with Docker Compose
+
+A one-command local deployment is provided at the repo root (`docker-compose.yml`),
+which builds `tpt-keystone` via its `Dockerfile` and exposes every listener:
+
+```bash
+docker compose up --build
+```
+
+This starts a single-node writer and maps the following host ports:
+
+| Port | Service |
+|------|---------|
+| 5432 | Postgres wire protocol v3 (`psql -h localhost -p 5432`) |
+| 5433 | MCP server (JSON-RPC 2.0 for AI agents) |
+| 5434 | Flux WebSocket streaming bridge |
+| 5435 | Canvas HTTP/JSON query bridge |
+| 9187 | Prometheus metrics |
+
+> Note: the engine defaults its Postgres-wire listener to `55432`; the
+> compose file relocates it to `5432` via the `TPT_PG_ADDR` env var so
+> standard Postgres tooling works unchanged. Engine state persists under
+> `./tpt-data` on the host.
+
 ## Repository layout
 
 - `tpt-keystone/` — the core engine crate: relational storage/SQL/wire protocol, plus every other

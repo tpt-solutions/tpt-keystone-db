@@ -104,6 +104,21 @@ pub enum Token {
     Topic,
     /// `ANALYZE [table]` (Phase 12a/18 planner statistics).
     Analyze,
+    /// `COLLATE` — clause attached to string expressions by psql's
+    /// meta-command queries (`COLLATE pg_catalog.default`). This engine has
+    /// a single collation, so it is parsed and ignored (a no-op).
+    Collate,
+    /// `OPERATOR` — schema-qualified infix-operator syntax used by psql's
+    /// introspection queries (`OPERATOR(pg_catalog.~)`).
+    Operator,
+    /// `MATCH` — Plexus's GQL-subset pattern-matching statement
+    /// (`MATCH (a)-[:REL]->(b) ON table(col) ...`, `sql::parser::parse_match`).
+    Match,
+    /// `RETURN` — the projection clause of a `MATCH` statement (GQL's
+    /// analogue of `SELECT`'s column list, kept as its own keyword rather
+    /// than reusing `SELECT` since a `MATCH` pattern's bound variables, not
+    /// arbitrary expressions, are what gets listed here).
+    Return,
 
     // Identifiers
     Ident(String),
@@ -531,6 +546,10 @@ fn keyword_or_ident(s: &str) -> Token {
         "START" => Token::Start,
         "TOPIC" => Token::Topic,
         "ANALYZE" => Token::Analyze,
+        "COLLATE" => Token::Collate,
+        "OPERATOR" => Token::Operator,
+        "MATCH" => Token::Match,
+        "RETURN" => Token::Return,
         _ => Token::Ident(s.to_string()),
     }
 }

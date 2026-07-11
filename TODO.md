@@ -229,10 +229,23 @@ than as a separate crate/process — same "one binary" precedent as every other 
   the whole crate's test compilation, two IVF-PQ tests whose assertions were mathematically impossible
   for a lossy approximate index to satisfy (asserting a farther point would outrank closer real training
   points) rather than real index bugs, and (see the OGC item above) the Web-Mercator-radius fix.
-- [ ] DiskANN index for billion-scale on-disk graphs — not implemented; both `VectorIndex`
-  (`storage/vector_index.rs`, HNSW) and `IvfPqStorageIndex` (`storage/ivf_pq_index.rs`, IVF-PQ) replay
-  their whole on-disk log into an in-memory structure on open, same local/in-memory model as
-  `storage::geo_index`/`storage::graph_index`, not an on-disk graph structure
+- [x] DiskANN index for billion-scale on-disk graphs — `vector/vamana.rs` (a real, from-scratch
+  Vamana graph builder: greedy-search-guided construction plus the paper's `RobustPrune` alpha-pruning
+  rule, not a relabeled HNSW) plus `storage/diskann_index.rs` (`DiskAnnIndex`), which is what actually
+  earns the "on-disk" claim `VectorIndex`/`IvfPqStorageIndex` (above) don't: `open()` reads only a small
+  header plus the row-key list, never the vectors or adjacency lists — `query_knn`'s greedy search reads
+  exactly the node records (`seek`+`read_exact`, one per visited node) it visits, directly off a flat
+  fixed-record-size file, once per query. Honest scope cuts vs. the real DiskANN system: no in-memory
+  PQ vector cache for fast approximate re-ranking (re-reads full-precision vectors from disk on every
+  visit instead), no SSD-page-aligned batched reads, batch build only (`vector::vamana::build` needs
+  the full point set in memory to construct the graph — the disk-residency property is about querying,
+  not building — same "train from a batch" precedent as `vector::ivf_pq`). Not wired into `CREATE INDEX`
+  DDL yet — usable today via the Rust API (`DiskAnnIndex::build`/`open`/`query_knn`), same as any other
+  index kind before its DDL surface lands. Verified: `vector::vamana::tests` (bounded out-degree,
+  >90% recall vs. brute force on a clustered synthetic dataset, single-point edge case) and
+  `storage::diskann_index::tests` (build-then-reopen preserves header/count, exact-match k-NN, and —
+  the key property test — a handle opened *after* the source vectors were dropped from memory still
+  answers queries correctly, proving `open()` doesn't secretly need them).
 - [x] Automatic index selection by query planner (latency vs recall trade-off) — `Database::vector_knn_query`
   (`storage/database.rs`): when a `(table, column)` has *both* an HNSW and an IVF-PQ index, queries route to
   HNSW below a fixed row-count threshold (100k) and IVF-PQ at/above it. This is an honest, documented
@@ -269,9 +282,23 @@ than as a separate crate/process — same "one binary" precedent as every other 
   `IvfPqIndex` above (the in-memory representation stores PQ codes, not raw floats). Scalar and binary
   quantisation remain **not implemented** — only product quantisation exists; the base `VECTOR` column
   itself (used by the HNSW path) still stores plain `f32` components with no compression, unchanged.
-- [ ] Consistent hashing for distributed vector shards — not implemented; both `VectorIndex` and
-  `IvfPqStorageIndex` are local-only/single-node, same documented scope cut as every other Phase 6/8/9/10/11
-  index (`storage/vector_index.rs`/`storage/ivf_pq_index.rs` module docs)
+- [x] Consistent hashing for distributed vector shards — `vector/shard.rs`'s `ConsistentHashRing`
+  (real Karger-style hash ring + virtual nodes, FNV-1a plus a MurmurHash3-style `fmix64` finalizer for
+  even key distribution — plain FNV-1a alone visibly skewed shard sizes on the ring's own virtual-node
+  labels, a real bug the distribution test caught and this finalizer fixes) plus
+  `storage/sharded_vector_index.rs`'s `ShardedVectorIndex`, which partitions a `VECTOR` column's HNSW
+  index across N per-shard `VectorIndex` logs: `insert` routes by consistent hash of the row key,
+  `query_knn` scatter-gathers every shard's local top-k and merges by distance. Honest scope cut: this
+  is the routing/partitioning primitive, not a distributed *deployment* — every shard is still opened
+  and queried in-process on one node (this engine has no cross-node RPC anywhere; the cloud-native model
+  shares state through the object store, not node-to-node calls), so "distributed" here means "the
+  index size/insert/query cost is split N ways," not "shards live on different machines." Verified:
+  `vector::shard::tests` (near-uniform distribution across 10k keys, same key always routes the same way,
+  adding/removing a shard remaps only the fraction of keys that must move — not a `hash(key) % n`-style
+  full remap — and removing a shard only reassigns *its own* keys) and
+  `storage::sharded_vector_index::tests` (routing is deterministic and exercises every shard, and
+  scatter-gather k-NN finds the same true nearest neighbor a single non-sharded `VectorIndex` baseline
+  does).
 - [x] Optional CUDA / ROCm GPU offload for batch similarity — delivered via `wgpu` (Vulkan/Metal/DX12)
   rather than a vendor CUDA/ROCm backend, for the same portability/verification reasons Meridian's
   `geo::gpu` used `wgpu` (a real GPU-present environment is needed to develop/verify native
@@ -350,7 +377,27 @@ environment (same honesty precedent as every other phase's unverified scale mile
 - [x] Property graph model — vertices are identified by a `CREATE INDEX ... USING GRAPH` from-column's raw values; edges carry an optional `rel_type` string property. Scope cut: only edges carry a typed property (`rel_type`); arbitrary key/value properties on vertices/edges are not modeled (no property-bag storage), only what's already in the backing SQL row
 - [x] Multi-relational edges (typed relationships) — the optional `rel_type` column (`WITH (type = '<column>')`) means one edge table can carry several relationship types natively, filterable post-hoc via plain SQL `WHERE rel_type = ...` on a graph function's output
 - [x] Bidirectional traversal with direction filters — every edge is recorded in both `out_adj` and `in_adj`; `graph::Direction::{Out,In,Both}` is a parameter on every traversal/lookup function, verified in `executor/plexus_tests.rs::graph_neighbors_direction_filter`
-- [ ] GQL (Graph Query Language) compatibility layer — not implemented. Explicit scope cut, not a stub-and-claim-done: a real GQL grammar (`MATCH (a)-[:REL]->(b)` pattern matching, integrated into the planner) is a separate, large grammar-and-planner effort, honestly comparable in scope to the SQL parser itself. What's implemented instead is a narrower, real "hybrid SQL + graph" surface (see the hybrid-queries item below)
+- [~] GQL (Graph Query Language) compatibility layer — a real, working `MATCH` statement now exists
+  (`sql::ast::MatchStmt`, `sql::parser::parse_match`, `executor::gql::execute_match`):
+  `MATCH (a)-[:REL]->(b)-[:REL2]->(c) ON table(from_column) [WHERE var = 'lit'] RETURN a, b [LIMIT n]`,
+  a new top-level statement (not a table function) that chains `Database::graph_neighbors` calls one
+  hop per pattern edge against an existing `CREATE INDEX ... USING GRAPH` index — the same underlying
+  traversal primitive `graph_neighbors`/`graph_bfs` already use, so `MATCH` is a second SQL-level surface
+  over the identical graph index, not a new storage/traversal engine. Supports typed
+  (`-[:REL]->`)/untyped (`-[]->`) edges, all three directions (`-[...]->`/`<-[...]-`/`-[...]-`), and
+  multi-hop chains. Still an honest, explicitly scoped subset, not the full GQL grammar the original
+  item named — a full grammar (arbitrary `WHERE` expressions over bound variables, `OPTIONAL MATCH`,
+  multiple disjoint patterns, pattern comprehensions, `CREATE`/`MERGE`) remains a separate,
+  large grammar-and-planner effort comparable to the SQL parser itself, hence `[~]` not `[x]`. What
+  *is* real here: a single linear-chain pattern, one starting-vertex equality filter (`WHERE var =
+  'literal'`, or every known vertex as a start candidate if omitted), and a `RETURN` list of the
+  pattern's own bound node variables. Verified in `executor::gql::tests` (single/multi-hop, all three
+  directions, typed-edge filtering, unfiltered full-vertex-scan start, `LIMIT`, and a clear error for a
+  missing graph index) and `sql::parser_tests` (grammar shape, and that `RETURN`ing an unbound variable
+  or `WHERE`-filtering a non-first variable are rejected at parse time, not silently accepted). What was
+  already implemented instead of a MATCH grammar — the narrower "hybrid SQL + graph" table-function
+  surface — remains and is unchanged (see the hybrid-queries item below); `MATCH` is additive to it, not
+  a replacement.
 - [x] Native graph algorithms: shortest path (BFS), PageRank (power iteration with dangling-node redistribution), community detection (synchronous label propagation), connected components (BFS flood fill over undirected-unioned edges), triangle counting (neighbour-set intersection) — `graph/algorithms.rs`, unit-tested in isolation and end-to-end via SQL in `executor/plexus_tests.rs`. Honest caveat: "native parallel" in the roadmap item name is only half true — these are correct from-scratch single-threaded implementations, not parallelized across threads (no rayon/work-stealing), consistent with not claiming a parallel implementation that was never exercised under contention
 - [x] Triangle indexing for fast neighbour lookups — scoped down to what `AdjacencyGraph`'s adjacency vectors already provide: O(1) neighbour-set membership tests (`graph::algorithms::triangle_count`'s per-vertex `HashSet` intersection), not a separately persisted triangle index structure
 - [x] Hybrid SQL + graph queries (filter vertices by SQL, traverse by graph) — `graph_neighbors`/`graph_bfs`/`graph_shortest_path`/`graph_connected_components`/`graph_pagerank`/`graph_triangle_count` are table-valued functions usable in a `FROM` clause (e.g. `SELECT n.neighbor FROM graph_neighbors('follows', 'from_id', 'alice') n JOIN users u ON u.name = n.neighbor WHERE u.active = true`), so a traversal's output composes with ordinary `WHERE`/`JOIN`/`ORDER BY` — verified in `executor/plexus_tests.rs::hybrid_sql_filters_graph_function_results`. This is SQL-extension sugar, not a GQL pattern grammar (see the scope cut above)
@@ -380,7 +427,26 @@ environment (same honesty precedent as every other phase's unverified scale mile
   `jsonb_binary_rows_readable_after_disabling` (toggling the flag off mid-lifetime still reads back rows
   written while it was on, since decoding doesn't depend on the current toggle state, only the stored
   marker).
-- [ ] Aggregation pipeline (MongoDB-compatible stages: `$match`, `$group`, `$project`, etc.) — not implemented; SQL's own `WHERE`/`GROUP BY`/projection already cover the same ground for a `Json` column's extracted scalars (via `->>`/`#>>` in any SQL clause), and a from-scratch Mongo-stage-syntax parser was judged disproportionate scope for what it would add on top of that
+- [x] Aggregation pipeline (MongoDB-compatible stages: `$match`, `$group`, `$project`, etc.) —
+  `executor/canopy_aggregate.rs`'s `run_pipeline`, driven by a real JSON pipeline (`serde_json`,
+  already a dependency via `storage::jsonb`) rather than a from-scratch Mongo-stage-syntax parser:
+  `$match` (equality plus `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`), `$group` (`_id` as a
+  `$field` reference or a compound sub-document of several field references; accumulators `$sum`
+  (including the idiomatic `{"$sum": 1}` count-via-sum), `$avg`, `$min`, `$max`, `$count`, `$push`,
+  `$first`), `$project` (inclusion/exclusion/rename via `$field` refs, `_id` passthrough matching
+  Mongo's default), `$sort` (multi-key), `$limit`, `$skip`. Exposed to SQL as
+  `aggregate('table', '<json pipeline array>')` (`executor/graph_fn.rs`), the same FROM-clause
+  table-valued-function pattern `graph_neighbors`/`vector_search`/`hybrid_search` already established —
+  a table's rows become JSON documents (a `Json`-typed column's text is parsed as nested JSON, every
+  other column becomes a JSON scalar), run through the pipeline, and re-flattened into ordinary rows
+  (the schema is the union of every key seen across the result documents), so the output composes with
+  `WHERE`/`JOIN`/`ORDER BY` exactly like any other table function — proven by an end-to-end test that
+  pipes `aggregate(...)`'s output through a real SQL `ORDER BY`. An unrecognized stage name (`$unwind`,
+  `$lookup`, `$facet`, computed `$project` expression operators like `$add`/`$multiply` — none
+  implemented) errors clearly rather than silently no-op'ing. Verified: `executor::canopy_aggregate::tests`
+  (each stage individually, a full `$match`→`$group`→`$sort` pipeline, and the unknown-stage error) plus
+  `executor::canopy_tests` end-to-end SQL coverage (`aggregate_table_function_runs_match_group_sort_pipeline`,
+  `aggregate_table_function_errors_on_unknown_stage`).
 
 **Milestone:** MongoDB wire protocol compatibility — official Mongo driver connects to Canopy. **Not attempted** — this phase deliberately stayed inside the existing Postgres-wire/SQL surface (JSON operators/functions/indexes reachable from ordinary SQL) rather than adding a second wire protocol; verified end-to-end (JSON operators, `USING JSONPATH`/`GIN` index creation + lookup functions, JSON Schema validation on insert) in `executor/canopy_tests.rs` against an in-process `Database`.
 
@@ -550,7 +616,18 @@ Phase 3) and are not tracked here. The remaining real gaps:
   timeline + replay cursor + per-agent latency bar chart, see Phase 17's Dashboard item for detail
 - [x] Automatic TypeScript type generation from live Keystone schemas — `tpt-canvas/src/bin/tsgen.rs`, a standalone CLI (`cargo run --bin tsgen -- <addr>`) against the new `/schema` endpoint, not a bundler plugin
 - [x] Built-in reactive state stores that auto-sync with Keystone queries (no external state lib) — `KeystoneClient::use_keystone_query` returns a `Signal<QueryResult>` wired straight into `reactive.rs`
-- [ ] Plugin API for custom Canvas components with WebGPU shader hooks — scope cut, follows from the Canvas2D-not-WebGPU decision above (no shader pipeline to hook into); the actual need is met one layer up by `@tpt/sdk-web`'s plugin API (`packages/sdk-web/src/plugin.ts` + `plugin-gpu.ts`, see Phase 14 below), which registers custom components against the browser's native WebGPU API directly rather than a Rust shader pipeline
+- [x] Plugin API for custom Canvas components with WebGPU shader hooks — was mismarked `[ ]` in a
+  prior pass despite the note below already describing it as done; corrected here after verifying it
+  directly (`npm test` in `packages/sdk-web`: 33/33 passing, including the plugin-registry suite).
+  `tpt-canvas` itself still renders via Canvas2D, not WebGPU (deliberate decision, see above — no Rust
+  shader pipeline to hook into), so this lives one layer up in `@tpt/sdk-web`:
+  `packages/sdk-web/src/plugin.ts`'s `PluginRegistry` (component registration, install/uninstall
+  lifecycle with per-plugin instance teardown, a shared cross-plugin event bus) plus `plugin-gpu.ts`'s
+  `CanvasGpuContext`, a real WebGPU compute-and-fragment-shader wrapper (`runCompute` dispatches a WGSL
+  compute shader over storage buffers with optional readback; `renderFragment` runs a vertex+fragment
+  shader pair against the plugin's own WebGPU canvas) — genuine hardware-accelerated shader hooks
+  against the browser's native WebGPU API, just registered from the JS/TS plugin layer instead of from
+  `tpt-canvas`'s Rust core.
 - [x] Integration with popular bundlers (Vite, Webpack, esbuild) — `wasm-bindgen --target web` output is a plain ES module + `.wasm` file, which all three already consume with zero plugin code
 
 Required a small addition on the `tpt-keystone` side: `src/wire/http_query.rs`, a hand-rolled HTTP/JSON endpoint (`TPT_HTTP_ADDR`, default port 5435, `POST /query` + `GET /schema`) — browsers can't speak the Postgres wire protocol directly, so this is the bridge that makes `useKeystoneQuery` genuinely execute SQL instead of Canvas shipping with mock data.
@@ -835,6 +912,18 @@ broken protocol code. None of this was caused by this pass's dashboard work; all
 session. `cargo build`/`cargo test` on `tpt-harbor` are green now (19/19 tests passing) — see the
 per-connector notes above for exactly what was missing vs. broken vs. already fine.
 
+**Follow-up (2026-07-12): replace the five `unimplemented_source!` stubs with real connectors** — the
+prior pass's `unimplemented_source!` stubs got `tpt-harbor` compiling, but five sources still have zero
+protocol code:
+- [ ] **Harbor/TimeSeries** — InfluxDB → Chronos, real client (`sources/influxdb.rs`)
+- [ ] **Harbor/Stream** — Kafka → Flux, real client (`sources/kafka.rs`)
+- [ ] **Harbor/Vector** — Pinecone/Weaviate/Qdrant → Prism, real client(s) (`sources/vector.rs` — one
+  file covering all three per the existing stub's shape, not three separate connectors)
+- [ ] **Harbor/Oracle** — Oracle → Keystone, real client (`sources/oracle.rs`) — flagged risk: Oracle's
+  standard Rust client wraps Oracle's proprietary OCI C library, which needs the Oracle Instant Client
+  installed on the build/runtime machine; may end up more limited than the others in this environment
+- [ ] **Harbor/Search** — Elasticsearch → Canopy, real client (`sources/elasticsearch.rs`)
+
 ---
 
 ## Phase 16 — Synapse: Agent Orchestration & Memory
@@ -1041,21 +1130,31 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   are set (PEM files); otherwise `SSLRequest` is still declined with `N` exactly as before this existed.
   Verified against a real `psql sslmode=require` connection with an `openssl`-generated self-signed dev
   cert, both alone and combined with the SCRAM auth above over the same connection.
-- [~] Extend `pg_catalog`/`information_schema` coverage — `pg_constraint`/`pg_attribute`/`pg_index`
-   already existed in `executor/catalog.rs`. Verified against a real `psql 15` client: direct `SELECT`s
-   against every virtual catalog table work; `\dt` and `\d <table>` do **not** — psql's introspection
-   queries use `!~`/`~` (POSIX regex operators), `OPERATOR(pg_catalog.~)` schema-qualified syntax, and a
-   trailing `COLLATE pg_catalog.default` clause, plus `pg_table_is_visible(oid)` / `pg_get_userbyid(oid)`
-   functions and a `pg_class.relam`/`pg_am` join `\dt` needs.
-
-   **Partial progress this pass:** the four POSIX regex infix operators `~` / `!~` / `~*` (case-insensitive)
-   / `!~*` are now implemented end-to-end (`sql::lexer`, `sql::ast::BinOp`, `sql::parser::infix_bp`,
-   `executor::eval::regex_is_match` with a per-thread compiled-pattern cache) and verified in
-   `executor::regex_op_tests` + `sql::parser_tests` — these are exactly the operators psql's `\dt`/`\d`
-   queries use for name filtering. The remaining gap is the broader OID-based meta-command support
-   (`pg_table_is_visible`, `pg_get_userbyid`, `COLLATE` clauses, `OPERATOR(...)` syntax, `pg_am`/`relam`
-   joins), which requires OID plumbing this hand-written engine doesn't have — larger than "add a few
-   catalog tables", a genuine follow-up not attempted this pass.
+- [x] Extend `pg_catalog`/`information_schema` coverage — `pg_constraint`/`pg_attribute`/`pg_index`
+   already existed in `executor/catalog.rs`. Direct `SELECT`s against every virtual catalog table work.
+   `\dt`'s actual query text now runs and returns the right shape: the four POSIX regex infix operators
+   `~`/`!~`/`~*`/`!~*` (`sql::lexer`, `sql::ast::BinOp`, `sql::parser::infix_bp`,
+   `executor::eval::regex_is_match` with a per-thread compiled-pattern cache); the `COLLATE <name>` clause
+   (parsed and discarded — a single collation exists here, `sql::parser`'s `Token::Collate` handling);
+   the `OPERATOR(schema.opname)` schema-qualified infix syntax (`sql::parser`'s `Token::Operator`
+   handling, rewritten to a normal `BinaryOp`); `pg_get_userbyid(oid)` (returns the bootstrap role name,
+   consistent with `pg_tables.tableowner`) and `pg_table_is_visible(oid)` (resolves the oid back against
+   `synthetic_oid` over every table/index, since the engine's search path is just `public`) as new
+   built-in functions (`executor/eval.rs`); a `pg_am` virtual table plus `pg_class.relowner`/`relam`
+   columns so `\dt`'s `pg_class JOIN pg_am ON relam = pg_am.oid` join resolves (`executor/catalog.rs`);
+   and `format_type(oid, typmod)` (`executor::catalog::pg_type_name_by_oid`, the reverse of
+   `ColumnType::oid()`) for `\d`'s column-type display. Fixed a real parser bug found while building
+   this: `Token::Collate`/`Token::Operator` weren't registered in `infix_bp`, so the Pratt-parser loop
+   broke out *before* ever reaching their dedicated handling blocks — every `OPERATOR(...)`/`COLLATE`
+   clause was silently ignored rather than parsed, turning e.g. a `JOIN ... ON a.oid OPERATOR(pg_catalog.=)
+   c.relam` into an unconditional cross join. Verified end-to-end in `executor::phase4_tests`: the exact
+   SQL psql 15 sends for `\dt` now returns the right rows/columns/owner
+   (`psql_dt_meta_command_lists_user_tables`), and a `\d`-style query exercising the `pg_am` join +
+   `OPERATOR(pg_catalog.~)` + `COLLATE` together returns the correct single row
+   (`d_style_query_joins_pg_am_with_operator_and_collate`). Honest remaining gap: only the specific
+   functions/joins psql's own `\dt`/`\d` queries exercise are covered — this is not a general OID
+   subsystem (no `pg_get_expr`, no `pg_depend`, no full `\d+`/`\di`/`\dv` query shapes tested against a
+   live `psql` client yet, only the query text captured from a real psql 15 session).
 - [x] Multi-table statistics for the query planner — see Phase 12a's "Query planner statistics" item
    above (cross-referenced, not duplicated work)
 - [ ] Harbor production-scale validation — exercise `discover`/`validate`/`transfer`/`replicate`/
@@ -1073,30 +1172,126 @@ dev cert.
 
 ---
 
+## Phase 19 — Adoption, CI, and Test-Coverage Hardening
+
+Added 2026-07-12 after a test-coverage/adoption assessment: `tpt-keystone` core is strongly tested
+(455 tests), but the surrounding project — CLI, SDKs, operator, Harbor's non-relational connectors —
+is thinner, and nothing runs automatically on push/PR anywhere in the repo. Tracked here so progress is
+checkable the same way every other phase is.
+
+- [ ] CI (GitHub Actions) — no `.github/workflows` exists at all today (confirmed: zero automation
+  currently runs any of this repo's test suites). Add workflows covering: `cargo test` for
+  `tpt-keystone` (the existing 455-test suite); `cargo build`/`cargo test` for `tpt-cli`, `tpt-sdk`,
+  `tpt-harbor`, `tpt-operator`; `cargo build --target wasm32-unknown-unknown` for `tpt-canvas` (no
+  meaningful native test path); `npm test` for `packages/sdk-web`/`sdk-server`/`sdk-edge`; `pytest` for
+  `sdk-python` (offline tests); `go test ./...` for `sdk-go`. Investigate running a `tpt-keystone`
+  service in-job so `-tags live` Go tests and `sdk-python`'s `live_smoke.py` can run for real in CI,
+  not just the offline subset.
+- [ ] `docker-compose.yml` at repo root — Dockerfiles already exist (`tpt-keystone/Dockerfile`,
+  `tpt-operator/Dockerfile`) but are unreferenced by anything; no one-command quickstart exists. Add a
+  compose file running `tpt-keystone`, exposing 5432 (Postgres wire)/5433 (MCP)/5434 (Flux WS)/5435
+  (HTTP)/9187 (metrics), and reference it from the root `README.md` quickstart.
+- [ ] Test-gap: `tpt-cli` — zero `#[test]` functions found anywhere in the crate today. Add unit tests
+  for whatever output-formatting/argument-parsing logic doesn't require a live connection.
+- [ ] Test-gap: `tpt-sdk` (Rust) — only 3 tests, all in `query_builder.rs`; `client.rs`
+  (`KeystoneClient`), `zerocopy.rs` (`RowView`), and `ffi.rs` are untested. Add offline tests for
+  `RowView` parsing against hand-built byte buffers and any other logic that doesn't need a live server.
+- [ ] Test-gap: `tpt-operator` — only 3 tests (`types.rs`/`autoscale.rs`); the reconciler/controller
+  logic itself is untested. Add tests if reconcile logic is separable from live `kube::Client` calls
+  (a pure current-state/desired-state diff), otherwise document honestly why it isn't yet.
+- [ ] Test-gap: `sdk-go` — 3 tests exist, all gated behind `-tags live` against a running server; there
+  is no offline-testable path at all (`go test ./...` runs nothing). Add offline unit tests for
+  connection-string parsing, request/response encoding, and error mapping.
+- [ ] Multi-engine example/cookbook — the project's pitch is "seven engines, one binary," but there is
+  no single runnable example touching more than one or two of them (only 2 example files exist repo-wide,
+  both smoke tests). Add a runnable `.sql` script or `docs/tutorials/cookbook.md` exercising Keystone,
+  Meridian (geo), Prism (vector), Chronos (time-series), Plexus (`MATCH`/graph), Canopy (JSON/aggregate),
+  and Flux (streaming) together.
+
+
+**Milestone:** a newcomer can `git clone` this repo, run one command (`docker compose up`), connect with
+`psql`, and run the cookbook script — and every push to the repo gets automated pass/fail feedback across
+every crate/SDK, not just whatever the last contributor happened to run locally.
+
+---
+
 ## Open / Remaining Tasks
 
 Consolidated view of every unchecked (`[ ]`) / partial (`[~]`) item across the roadmap.
-17 items total: most are explicit, documented scope cuts (not stub-and-claim-done), a few are
-genuinely unbuilt follow-ups sitting behind already-shipped phases.
 
-### Engine gaps (documented scope cuts — not attempted)
-- **Phase 7 — Prism:** DiskANN index for billion-scale on-disk graphs (`TODO.md:232`); Consistent hashing for distributed vector shards (`TODO.md:272`)
-- **Phase 9 — Plexus:** GQL (Graph Query Language) compatibility layer (`TODO.md:353`)
-- **Phase 10 — Canopy:** MongoDB-compatible aggregation pipeline (`$match`/`$group`/`$project`, …) (`TODO.md:383`)
-- **Phase 11 — Flux:** gRPC streaming endpoint (`TODO.md:398`)
-- **Phase 13 — Canvas:** Plugin API for custom Canvas components with WebGPU shader hooks (`TODO.md:544`)
+> **Note (2026-07-12, earlier pass):** three items previously listed as `[ ]` were already
+> implemented in code but stale in this checklist — S3 key-prefix sharding
+> (`storage/lsm.rs`), the object-store circuit breaker / memory backpressure
+> (`storage/guard.rs`), and MVCC property-based testing (`storage/mvcc_tests.rs`).
+> They are now marked `[x]` above and verified. That pass also closed out the
+> `pg_catalog`/psql meta-command coverage item: the four POSIX regex infix
+> operators, `COLLATE`, `OPERATOR(...)`, `pg_am`/`relam`, `pg_get_userbyid`,
+> `pg_table_is_visible`, and `format_type` are now implemented, and a real
+> parser bug (`Token::Collate`/`Token::Operator` missing from `infix_bp`,
+> silently no-op'ing both clauses) was found and fixed along the way.
 
-### Follow-ups / hardenings (genuinely unbuilt or partial)
-- **Phase 12 — Production Hardening:** Formal benchmark suite vs Postgres/InfluxDB/Neo4j/MongoDB/Kafka (`[~]`, scoped to a `criterion` harness measuring Keystone alone) (`TODO.md:424`); Apache 2.0 open-source *release* step (already Apache-2.0 licensed) (`TODO.md:459`)
-- **Phase 12a — External review follow-ups:** S3 object-key prefix sharding for `sst/`/`wal/` (`TODO.md:499`); Memory-based backpressure / circuit breaker for S3 latency spikes (`TODO.md:504`)
-- **Phase 18 — Hardening & Follow-ups:** Property-based testing (`proptest`) for the MVCC/transaction layer (`TODO.md:1006`); Extend `pg_catalog`/`information_schema` (real `psql \dt`/`\d` meta-command support — `!~`/`~` regex ops, `pg_table_is_visible`, `pg_get_userbyid`) (`[~]`, `TODO.md:1031`); Harbor production-scale validation (`TODO.md:1046`)
+> **Note (2026-07-12, this pass):** every item this checklist marked as a genuinely-buildable-here
+> scope cut (as opposed to needing external infrastructure/hardware this environment doesn't have)
+> is now implemented: Prism's DiskANN index (`vector::vamana` + `storage::diskann_index`) and
+> consistent hashing for vector shards (`vector::shard` + `storage::sharded_vector_index`); Canopy's
+> MongoDB-compatible aggregation pipeline (`executor::canopy_aggregate`, exposed as
+> `aggregate(table, pipeline_json)`); Plexus's GQL layer, now a real (explicitly scoped-down) `MATCH`
+> statement (`sql::ast::MatchStmt`/`executor::gql`) rather than nothing. Canvas's WebGPU plugin API
+> turned out to already exist (`packages/sdk-web/src/plugin.ts`/`plugin-gpu.ts`, 33/33 tests passing)
+> and was simply mismarked `[ ]` — corrected, no new code needed. Each item above documents its own
+> honest remaining scope cuts (none of these claim full parity with the systems they're modeled on);
+> see each for detail rather than assuming "implemented" means "complete."
+
+> **Note (2026-07-12, adoption/coverage pass):** a test-coverage and adoption assessment found
+> `tpt-keystone` core strongly tested (455 tests) but the surrounding project thin — no CI anywhere in
+> the repo, weak/zero test coverage in `tpt-cli`/`tpt-sdk`/`tpt-operator`/`sdk-go`, no one-command
+> quickstart, and five Harbor source connectors still genuine `unimplemented_source!` stubs. Tracked as
+> **Phase 19** above (CI, docker-compose, test gaps, cookbook, repo cleanup) plus a new Harbor follow-up
+> list under Phase 15 (replacing the InfluxDB/Kafka/Vector/Oracle/Elasticsearch stubs with real
+> connectors, "no stubs" per explicit direction — Oracle flagged as a real environment-dependency risk
+> given its OCI native-library requirement). In progress; see Phase 19 and the Phase 15 follow-up note
+> for current status rather than assuming this note reflects completion.
+
+### Engine gaps (documented scope cuts — not attempted; need external infra/hardware this
+environment doesn't have, not just more engineering time)
+- **Phase 11 — Flux:** gRPC streaming endpoint (`TODO.md:398`) — a real gRPC/HTTP2/protobuf stack is
+  a separate, large from-scratch effort on the order of the hand-written Postgres wire protocol itself;
+  unlike this pass's other items, partial progress here wouldn't be a complete, testable unit
+
+### Follow-ups / hardenings (genuinely unbuilt or partial; need real external systems)
+- **Phase 12 — Production Hardening:** Formal benchmark suite vs Postgres/InfluxDB/Neo4j/MongoDB/Kafka
+  (`[~]`, scoped to a `criterion` harness measuring Keystone alone — `tpt-keystone/benches/keystone_bench.rs`,
+  already implemented and measured on this dev machine; the head-to-head comparison against the other
+  four systems needs them actually installed, which this environment doesn't have) (`TODO.md:424`);
+  Apache 2.0 open-source *release* step (already Apache-2.0 licensed — the publishing act itself is a
+  decision for the maintainer to make, not something to do autonomously) (`TODO.md:459`)
+- **Phase 18 — Hardening & Follow-ups:** Harbor production-scale validation against a real multi-GB
+  source DB with concurrent writes + true zero-downtime cutover (`TODO.md:1046`) — not attempted (needs
+  a real external database)
 
 ### SDKs (Mobile) — entirely unbuilt
-- **Phase 14 — SDK/Mobile:** `@tpt/sdk-react-native` (`TODO.md:577`); Flutter SDK (`TODO.md:578`); Swift SDK (iOS) (`TODO.md:579`); Kotlin SDK (Android) (`TODO.md:580`)
+- **Phase 14 — SDK/Mobile:** `@tpt/sdk-react-native` (`TODO.md:577`); Flutter SDK (`TODO.md:578`);
+  Swift SDK (iOS) (`TODO.md:579`); Kotlin SDK (Android) (`TODO.md:580`). Checked this dev machine's
+  toolchains: Node/npm is present (React Native is scaffoldable), Flutter is installed at `D:\flutter`
+  (though full Android/iOS build-target configuration wasn't verified), but there is no Swift/Xcode on
+  Windows at all — the iOS SDK specifically cannot be built in this environment regardless of engineering
+  time spent.
 
-**Summary:** 5 engine scope cuts, 6 hardening/follow-up items (2 partial), 4 unbuilt mobile SDKs.
-Phases 0–17 are functionally complete (all marked `[x]`); remaining work is concentrated in
-Phase 18 follow-ups and the mobile SDK family.
+### Adoption & test-coverage hardening (in progress — tracked as Phase 19)
+- CI (GitHub Actions), `docker-compose.yml` quickstart, test-gap filling in `tpt-cli`/`tpt-sdk`/
+  `tpt-operator`/`sdk-go`, a multi-engine cookbook, and repo root cleanup — see Phase 19 above for the
+  full checklist.
+- **Phase 15 — Harbor:** replacing the five `unimplemented_source!` stub connectors (InfluxDB, Kafka,
+  Pinecone/Weaviate/Qdrant, Oracle, Elasticsearch) with real clients — see the Phase 15 follow-up note
+  above.
+
+**Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
+real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision
+itself), 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
+effort), plus the newly-tracked Phase 19 adoption/coverage work and Harbor's 5 stub-connector
+replacements (both in progress, not yet counted as closed). Every item that was a pure "more code, no
+external dependency" scope cut *from the earlier two passes* has been closed out; this pass adds new,
+not-yet-closed work rather than closing more.
 
 ---
 

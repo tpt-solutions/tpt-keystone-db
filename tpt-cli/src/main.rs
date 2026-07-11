@@ -140,3 +140,56 @@ fn main() -> anyhow::Result<()> {
 fn connect(addr: &str) -> anyhow::Result<Client> {
     Client::connect(addr).map_err(|e| anyhow::anyhow!("failed to connect to {addr}: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_localhost_5432() {
+        let cli = Cli::try_parse_from(["tpt"]).unwrap();
+        assert_eq!(format!("{}:{}", cli.host, cli.port), "127.0.0.1:5432");
+        assert!(matches!(cli.command, Some(Command::Repl) | None));
+    }
+
+    #[test]
+    fn global_host_and_port_flags_apply() {
+        let cli = Cli::try_parse_from(["tpt", "--host", "db.example", "--port", "6543", "query", "SELECT 1"]).unwrap();
+        assert_eq!(cli.host, "db.example");
+        assert_eq!(cli.port, 6543);
+        match cli.command {
+            Some(Command::Query { sql, .. }) => assert_eq!(sql, "SELECT 1"),
+            other => panic!("expected query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_file_conflicts_with_sql() {
+        let err = Cli::try_parse_from(["tpt", "query", "SELECT 1", "-f", "x.sql"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn export_defaults_to_csv_and_stdout() {
+        let cli = Cli::try_parse_from(["tpt", "export", "widgets"]).unwrap();
+        match cli.command {
+            Some(Command::Export { table, format, output }) => {
+                assert_eq!(table, "widgets");
+                assert_eq!(format, OutputFormat::Csv);
+                assert!(output.is_none());
+            }
+            other => panic!("expected export, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_status_default_dir() {
+        let cli = Cli::try_parse_from(["tpt", "migrate", "status"]).unwrap();
+        match cli.command {
+            Some(Command::Migrate { action: MigrateAction::Status { dir } }) => {
+                assert_eq!(dir, PathBuf::from("migrations"));
+            }
+            other => panic!("expected migrate status, got {other:?}"),
+        }
+    }
+}

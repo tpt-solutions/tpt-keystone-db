@@ -122,8 +122,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let addr = "0.0.0.0:55432";
-    let listener = TcpListener::bind(addr).await?;
+    // The Postgres-wire bind address. Honors `TPT_PG_ADDR` so CI and
+    // container deployments can relocate it off the default `55432` (the
+    // other four listeners already support the same env-var override so a
+    // fixed port doesn't collide with an unrelated service on the host).
+    let addr = std::env::var("TPT_PG_ADDR").unwrap_or_else(|_| "0.0.0.0:55432".to_string());
+    let listener = TcpListener::bind(&addr).await?;
     info!("TPT Keystone listening on {addr}");
 
     // Admission control: every connection already shares this one `db`, so

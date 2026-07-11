@@ -317,3 +317,170 @@ pub fn build_backup_cronjob(cluster: &KeystoneCluster) -> Option<CronJob> {
 pub fn pod_runs_image(pod: &Pod, image: &str) -> bool {
     pod.spec.as_ref().and_then(|s| s.containers.first()).and_then(|c| c.image.as_deref()) == Some(image)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{KeystoneCluster, KeystoneClusterSpec, StorageBackend, StorageSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn cluster(backend: StorageBackend, backup: Option<crate::types::BackupSpec>) -> KeystoneCluster {
+        let storage = match backend {
+            StorageBackend::Local => StorageSpec {
+                backend,
+                claim_name: Some("shared-pvc".into()),
+                ..Default::default()
+            },
+            StorageBackend::S3 => StorageSpec {
+                backend,
+                bucket: Some("my-bucket".into()),
+                region: Some("us-east-1".into()),
+                ..Default::default()
+            },
+        };
+        KeystoneCluster {
+            metadata: ObjectMeta {
+                name: Some("demo".into()),
+                namespace: Some("tpt-system".into()),
+                ..Default::default()
+            },
+            spec: KeystoneClusterSpec {
+                image: "ghcr.io/example/tpt-keystone:0.3.0".into(),
+                reader_replicas: 3,
+                storage,
+                backup,
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    #[test]
+    fn resource_names_follow_role_convention() {
+        let c = cluster(StorageBackend::S3, None);
+        assert_eq!(writer_name(&c), "demo-writer");
+        assert_eq!(reader_name(&c), "demo-reader");
+    }
+
+    #[test]
+    fn writer_is_single_replica_statefulset_on_delete() {
+        let c = cluster(StorageBackend::S3, None);
+        let ss = build_writer_statefulset(&c);
+        assert_eq!(ss.spec.as_ref().unwrap().replicas, Some(1));
+        assert_eq!(
+            ss.spec.as_ref().unwrap().update_strategy.as_ref().unwrap().type_.as_deref(),
+            Some("OnDelete")
+        );
+        assert_eq!(ss.metadata.name.as_deref(), Some("demo-writer"));
+    }
+
+    #[test]
+    fn reader_deployment_honors_desired_replicas() {
+        let c = cluster(StorageBackend::S3, None);
+        let dep = build_reader_deployment(&c, c.spec.reader_replicas);
+        assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(3));
+    }
+
+    #[test]
+    fn services_expose_all_listener_ports() {
+        let c = cluster(StorageBackend::S3, None);
+        for svc in [build_writer_service(&c), build_reader_service(&c)] {
+            let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
+            let port_numbers: Vec<i32> = ports.iter().map(|p| p.port).collect();
+            assert_eq!(port_numbers, vec![PG_PORT, MCP_PORT, FLUX_WS_PORT, METRICS_PORT]);
+        }
+    }
+
+    #[test]
+    fn s3_storage_injects_bucket_env_and_no_pvc() {
+        let c = cluster(StorageBackend::S3, None);
+        let spec = build_writer_statefulset(&c).spec.unwrap();
+        let env: Vec<String> = spec
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(env.contains(&"TPT_STORAGE_BACKEND".to_string()));
+        assert!(env.contains(&"TPT_S3_BUCKET".to_string()));
+        assert!(env.contains(&"TPT_S3_REGION".to_string()));
+        // S3 backend must not mount a local PVC claim.
+        assert!(spec.template.spec.as_ref().unwrap().volumes.is_none());
+    }
+
+    #[test]
+    fn local_storage_mounts_claim_and_skips_s3_env() {
+        let c = cluster(StorageBackend::Local, None);
+        let spec = build_writer_statefulset(&c).spec.unwrap();
+        let volumes = spec.template.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(volumes.iter().any(|v| v.persistent_volume_claim.is_some()));
+        let env: Vec<String> = spec
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(!env.contains(&"TPT_S3_BUCKET".to_string()));
+    }
+
+    #[test]
+    fn backup_cronjob_is_built_when_specified() {
+        let c = cluster(
+            StorageBackend::S3,
+            Some(crate::types::BackupSpec {
+                schedule: "0 3 * * *".into(),
+                image: None,
+                command: vec!["/bin/backup".into(), "--all".into()],
+            }),
+        );
+        let cj = build_backup_cronjob(&c).expect("backup cronjob should be built");
+        assert_eq!(cj.spec.unwrap().schedule, "0 3 * * *");
+        assert_eq!(cj.metadata.name.as_deref(), Some("demo-backup"));
+        let container = &cj.spec.unwrap().job_template.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(container.command.as_ref().unwrap(), &vec!["/bin/backup".into(), "--all".into()]);
+    }
+
+    #[test]
+    fn backup_cronjob_absent_without_spec() {
+        let c = cluster(StorageBackend::S3, None);
+        assert!(build_backup_cronjob(&c).is_none());
+    }
+
+    #[test]
+    fn pod_runs_image_compares_only_first_container() {
+        let pod = Pod {
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    image: Some("img:1".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pod_runs_image(&pod, "img:1"));
+        assert!(!pod_runs_image(&pod, "img:2"));
+    }
+
+    #[test]
+    fn common_labels_are_namespaced_by_role() {
+        let c = cluster(StorageBackend::S3, None);
+        let writer = common_labels(&c, "writer");
+        let reader = common_labels(&c, "reader");
+        assert_eq!(writer.get("tpt.dev/role").map(String::as_str), Some("writer"));
+        assert_eq!(reader.get("tpt.dev/role").map(String::as_str), Some("reader"));
+        assert_eq!(writer.get("app.kubernetes.io/instance").map(String::as_str), Some("demo"));
+    }
+}

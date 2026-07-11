@@ -324,3 +324,65 @@ fn jsonb_binary_rows_readable_after_disabling() {
     let got = execute_query("SELECT body ->> 'k' FROM d WHERE id = 1", db.clone()).unwrap();
     assert_eq!(cell_text(&got.rows[0][0]), "v");
 }
+
+/// End-to-end SQL coverage for `aggregate('table', '<pipeline json>')`, the
+/// MongoDB-compatible aggregation pipeline table function
+/// (`executor::canopy_aggregate`): a real `CREATE TABLE`/`INSERT` sets up
+/// rows, then a `$match`/`$group`/`$sort` pipeline runs through the same
+/// FROM-clause table-function dispatch `graph_neighbors`/`vector_search`
+/// use, and the result composes with an ordinary SQL `ORDER BY` afterward
+/// (proving the table function really does return ordinary rows, not a
+/// special result type).
+#[test]
+fn aggregate_table_function_runs_match_group_sort_pipeline() {
+    let (db, _b, _l) = test_db();
+    execute_query(
+        "CREATE TABLE sales (id INT4, dept TEXT, amount INT4)",
+        db.clone(),
+    )
+    .unwrap();
+    for (id, dept, amount) in [
+        (1, "eng", 100),
+        (2, "eng", 200),
+        (3, "sales", 50),
+        (4, "sales", 150),
+        (5, "eng", 20),
+    ] {
+        execute_query(
+            &format!("INSERT INTO sales VALUES ({id}, '{dept}', {amount})"),
+            db.clone(),
+        )
+        .unwrap();
+    }
+
+    let pipeline = r#"[
+        {"$match": {"amount": {"$gte": 50}}},
+        {"$group": {"_id": "$dept", "total": {"$sum": "$amount"}, "n": {"$count": {}}}}
+    ]"#;
+    let sql = format!("SELECT * FROM aggregate('sales', '{pipeline}') ORDER BY total DESC");
+    let result = execute_query(&sql, db.clone()).unwrap();
+
+    assert_eq!(result.rows.len(), 2);
+    // eng: 100 + 200 = 300 (the 20 is excluded by $match); sales: 50 + 150 = 200.
+    let id_i = result.fields.iter().position(|f| f.name == "_id").unwrap();
+    let total_i = result.fields.iter().position(|f| f.name == "total").unwrap();
+    let n_i = result.fields.iter().position(|f| f.name == "n").unwrap();
+    assert_eq!(cell_text(&result.rows[0][id_i]), "eng");
+    assert_eq!(cell_text(&result.rows[0][total_i]), "300.0");
+    assert_eq!(cell_text(&result.rows[0][n_i]), "2.0");
+    assert_eq!(cell_text(&result.rows[1][id_i]), "sales");
+    assert_eq!(cell_text(&result.rows[1][total_i]), "200.0");
+}
+
+#[test]
+fn aggregate_table_function_errors_on_unknown_stage() {
+    let (db, _b, _l) = test_db();
+    execute_query("CREATE TABLE t (id INT4)", db.clone()).unwrap();
+    execute_query("INSERT INTO t VALUES (1)", db.clone()).unwrap();
+    let err = execute_query(
+        r#"SELECT * FROM aggregate('t', '[{"$unwind": "$x"}]')"#,
+        db.clone(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("$unwind"));
+}

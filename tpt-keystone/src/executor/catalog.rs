@@ -21,8 +21,9 @@ type VirtualTable = (Arc<TableSchema>, Vec<Row>);
 /// A stable-but-synthetic OID for a named catalog object (table, index, ...).
 /// Not real Postgres OID semantics — just enough to keep joins between the
 /// virtual `pg_class`/`pg_attribute`/`pg_index` tables internally consistent
-/// within and across queries.
-fn synthetic_oid(name: &str) -> i32 {
+/// within and across queries. `pub(crate)` so `eval` can resolve an OID back
+/// to a relation when implementing `pg_table_is_visible`.
+pub(crate) fn synthetic_oid(name: &str) -> i32 {
     let mut hash: u32 = 2166136261; // FNV-1a
     for b in name.as_bytes() {
         hash ^= *b as u32;
@@ -60,6 +61,15 @@ fn int(n: i32) -> Option<Vec<u8>> {
     Some(n.to_string().into_bytes())
 }
 
+/// Owner OID assigned to every relation we materialize. Postgres's bootstrap
+/// superuser is OID 10; we mirror that so `pg_get_userbyid` has a stable,
+/// recognizable value to resolve (the engine doesn't track per-table owners).
+const OWNER_OID: i32 = 10;
+/// Access-method OIDs, matching Postgres's `pg_am` so `pg_class.relam` joins
+/// cleanly in introspection queries (`\d` displays the AM name via this join).
+const HEAP_AM_OID: i32 = 2; // "heap" — ordinary tables
+const BTREE_AM_OID: i32 = 403; // "btree" — ordinary secondary indexes
+
 fn boolean(b: bool) -> Option<Vec<u8>> {
     Some(if b { b"t".to_vec() } else { b"f".to_vec() })
 }
@@ -92,6 +102,7 @@ pub fn resolve_virtual_table(
         "pg_indexes" => Some(pg_indexes(db)),
         "pg_index" => Some(pg_index(db)),
         "pg_constraint" => Some(pg_constraint(db)),
+        "pg_am" => Some(Ok(pg_am())),
         "pg_sequence" => Some(Ok(pg_sequence(db))),
         "tables" if is_information_schema(name) => Some(information_schema_tables(db)),
         "columns" if is_information_schema(name) => Some(information_schema_columns(db)),
@@ -167,13 +178,24 @@ fn pg_class(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
             col("relname", ColumnType::Text),
             col("relnamespace", ColumnType::Int4),
             col("relkind", ColumnType::Text),
+            col("relowner", ColumnType::Int4),
+            col("relam", ColumnType::Int4),
         ],
     );
     let public_ns = synthetic_oid("public");
     let mut rows: Vec<Row> = db
         .list_tables()?
         .into_iter()
-        .map(|t| vec![int(synthetic_oid(&t)), text(t), int(public_ns), text("r")])
+        .map(|t| {
+            vec![
+                int(synthetic_oid(&t)),
+                text(t),
+                int(public_ns),
+                text("r"),
+                int(OWNER_OID),
+                int(HEAP_AM_OID),
+            ]
+        })
         .collect();
     for (table, column) in db.list_indexes() {
         let idx_name = format!("{table}_{column}_idx");
@@ -182,9 +204,33 @@ fn pg_class(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
             text(idx_name),
             int(public_ns),
             text("i"),
+            int(OWNER_OID),
+            int(BTREE_AM_OID),
         ]);
     }
     Ok((s, rows))
+}
+
+/// `pg_am` — access methods. Only the rows Postgres exposes that introspection
+/// queries join against (`\d` shows the index AM via `pg_class.relam = pg_am.oid`).
+fn pg_am() -> VirtualTable {
+    let s = schema(
+        "pg_am",
+        vec![
+            col("oid", ColumnType::Int4),
+            col("amname", ColumnType::Text),
+        ],
+    );
+    let rows = vec![
+        vec![int(HEAP_AM_OID), text("heap")],
+        vec![int(BTREE_AM_OID), text("btree")],
+        vec![int(405), text("hash")],
+        vec![int(783), text("gist")],
+        vec![int(2742), text("gin")],
+        vec![int(2743), text("spgist")],
+        vec![int(3580), text("brin")],
+    ];
+    (s, rows)
 }
 
 fn pg_attribute(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
@@ -454,5 +500,28 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Geography => "geography",
         ColumnType::Vector => "vector",
         ColumnType::Raster => "raster",
+    }
+}
+
+/// Reverse of `ColumnType::oid()` — map a Postgres type OID back to its human
+/// name. Used by `format_type(oid, typmod)` (psql's `\d` column-type display,
+/// and many other introspection queries). Unknown OIDs fall back to `text`,
+/// matching how `ColumnType::oid()` maps the engine's non-Postgres types
+/// (geometry/vector/raster) to TEXT's OID.
+pub(crate) fn pg_type_name_by_oid(oid: i32) -> &'static str {
+    use crate::wire::messages::oid::{BOOL, FLOAT8, INT8, TEXT};
+    match oid {
+        INT8 => "bigint",
+        23 => "integer",
+        21 => "smallint",
+        FLOAT8 => "double precision",
+        700 => "real",
+        TEXT => "text",
+        BOOL => "boolean",
+        1114 => "timestamp without time zone",
+        1082 => "date",
+        114 => "json",
+        17 => "bytea",
+        _ => "text",
     }
 }

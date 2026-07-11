@@ -163,3 +163,25 @@ pub unsafe extern "C" fn tpt_sdk_free_client(client: *mut ClientHandle) {
         drop(Box::from_raw(client));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_result_accessors_are_safe_and_zero() {
+        assert_eq!(unsafe { tpt_sdk_result_row_count(std::ptr::null()) }, 0);
+        assert_eq!(unsafe { tpt_sdk_result_column_count(std::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn free_on_null_is_a_noop() {
+        unsafe { tpt_sdk_free_result(std::ptr::null_mut()) };
+        unsafe { tpt_sdk_free_client(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn last_error_is_null_before_any_call() {
+        assert!(unsafe { tpt_sdk_last_error() }.is_null());
+    }
+}

@@ -28,6 +28,52 @@ pub enum Stmt {
     CreateTopic(CreateTopicStmt),
     /// `ANALYZE [table]` — `None` means every table in `public`.
     Analyze(Option<String>),
+    Match(MatchStmt),
+}
+
+/// Plexus's GQL-subset pattern-matching statement:
+/// `MATCH (a)-[:REL]->(b)-[:REL2]-(c) ON table(from_column) [WHERE var = 'lit'] RETURN a, b [LIMIT n]`
+///
+/// Scope cut (see `graph::mod`'s module doc / `TODO.md`): a real GQL grammar
+/// (arbitrary WHERE expressions over bound variables, OPTIONAL MATCH,
+/// multiple disjoint patterns, pattern comprehensions, `CREATE`/`MERGE`)
+/// is a separate, large grammar-and-planner effort comparable in scope to
+/// the SQL parser itself. What's implemented is a real, working single
+/// linear-chain pattern against one existing `CREATE INDEX ... USING GRAPH`
+/// index: a sequence of node variables connected by typed, directed edges,
+/// an optional single equality filter that pins the first node's value (the
+/// search starting point), and a `RETURN` list of the pattern's own node
+/// variables (not arbitrary expressions over them).
+#[derive(Debug, Clone)]
+pub struct MatchStmt {
+    /// Node variable names in pattern order, e.g. `["a", "b", "c"]` for
+    /// `(a)-[:R1]->(b)-[:R2]->(c)`. Always `hops.len() + 1` long.
+    pub nodes: Vec<String>,
+    pub hops: Vec<MatchHop>,
+    /// `ON table(from_column)` — which graph index this pattern traverses.
+    pub table: String,
+    pub column: String,
+    /// `WHERE <first node var> = '<literal>'` — pins the search's starting
+    /// vertex. `None` means every vertex the index knows about is a
+    /// starting candidate (can be expensive on a large graph; a documented
+    /// tradeoff of not having a real WHERE-clause planner here).
+    pub start_filter: Option<String>,
+    pub returns: Vec<String>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchDirection {
+    Out,
+    In,
+    /// `-[:REL]-` with no arrowhead: either direction.
+    Both,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchHop {
+    pub rel_type: Option<String>,
+    pub direction: MatchDirection,
 }
 
 /// `CREATE TOPIC [IF NOT EXISTS] name [WITH (partitions = n, retention =
