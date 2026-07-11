@@ -67,12 +67,21 @@ impl RoleStore {
         let server_key_b64 = cell_str(&value, 4)?;
 
         let salt = STANDARD.decode(salt_b64)?;
-        let stored_key: [u8; 32] = STANDARD.decode(stored_key_b64)?.try_into()
+        let stored_key: [u8; 32] = STANDARD
+            .decode(stored_key_b64)?
+            .try_into()
             .map_err(|_| anyhow::anyhow!("corrupt stored_key for role \"{rolname}\""))?;
-        let server_key: [u8; 32] = STANDARD.decode(server_key_b64)?.try_into()
+        let server_key: [u8; 32] = STANDARD
+            .decode(server_key_b64)?
+            .try_into()
             .map_err(|_| anyhow::anyhow!("corrupt server_key for role \"{rolname}\""))?;
 
-        Ok(Some(ScramCredential { salt, iterations, stored_key, server_key }))
+        Ok(Some(ScramCredential {
+            salt,
+            iterations,
+            stored_key,
+            server_key,
+        }))
     }
 
     /// Creates or replaces a role's credential. Iteration count matches
@@ -88,7 +97,8 @@ impl RoleStore {
             text_cell(STANDARD.encode(cred.server_key)),
             int_cell(now_ms()),
         ];
-        self.db.write(TABLE, rolname.as_bytes(), &encode_cells(&cells))
+        self.db
+            .write(TABLE, rolname.as_bytes(), &encode_cells(&cells))
     }
 
     /// Seeds the very first role from env-configured bootstrap credentials,

@@ -13,7 +13,10 @@
 //! (execution steps) and a linear-memory cap, so a runaway or malicious
 //! module can't hang a connection or exhaust host memory.
 
-use wasmtime::{Config, Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Val, ValType};
+use wasmtime::{
+    Config, Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Val,
+    ValType,
+};
 
 use crate::executor::eval::Value;
 use crate::storage::config::UdfConfig;
@@ -24,7 +27,10 @@ use crate::storage::{ColumnType, UserFunction};
 fn valtype_eq(a: &ValType, b: &ValType) -> bool {
     matches!(
         (a, b),
-        (ValType::I32, ValType::I32) | (ValType::I64, ValType::I64) | (ValType::F32, ValType::F32) | (ValType::F64, ValType::F64)
+        (ValType::I32, ValType::I32)
+            | (ValType::I64, ValType::I64)
+            | (ValType::F32, ValType::F32)
+            | (ValType::F64, ValType::F64)
     )
 }
 
@@ -33,7 +39,9 @@ fn wasm_type(ty: &ColumnType) -> anyhow::Result<ValType> {
         ColumnType::Int8 => Ok(ValType::I64),
         ColumnType::Float8 => Ok(ValType::F64),
         ColumnType::Bool => Ok(ValType::I32),
-        other => anyhow::bail!("WASM UDFs only support int8/float8/bool argument and return types, got {other:?}"),
+        other => anyhow::bail!(
+            "WASM UDFs only support int8/float8/bool argument and return types, got {other:?}"
+        ),
     }
 }
 
@@ -55,18 +63,23 @@ pub fn validate_module(
     let engine = Engine::default();
     let module = Module::new(&engine, wasm_bytes)?;
 
-    let export = module
-        .exports()
-        .find(|e| e.name() == name)
-        .ok_or_else(|| anyhow::anyhow!("WASM module does not export a function named \"{name}\""))?;
+    let export = module.exports().find(|e| e.name() == name).ok_or_else(|| {
+        anyhow::anyhow!("WASM module does not export a function named \"{name}\"")
+    })?;
     let ExternType::Func(func_ty) = export.ty() else {
         anyhow::bail!("export \"{name}\" is not a function");
     };
 
-    let expected_params: Vec<ValType> = arg_types.iter().map(wasm_type).collect::<anyhow::Result<_>>()?;
+    let expected_params: Vec<ValType> = arg_types
+        .iter()
+        .map(wasm_type)
+        .collect::<anyhow::Result<_>>()?;
     let actual_params: Vec<ValType> = func_ty.params().collect();
     let params_match = actual_params.len() == expected_params.len()
-        && actual_params.iter().zip(&expected_params).all(|(a, e)| valtype_eq(a, e));
+        && actual_params
+            .iter()
+            .zip(&expected_params)
+            .all(|(a, e)| valtype_eq(a, e));
     if !params_match {
         anyhow::bail!(
             "function \"{name}\" declares argument types implying Wasm params {expected_params:?}, but the module's export takes {actual_params:?}"
@@ -88,7 +101,12 @@ pub fn validate_module(
 /// sandboxed per `cfg`.
 pub fn call(cfg: UdfConfig, uf: &UserFunction, args: &[Value]) -> anyhow::Result<Value> {
     if args.len() != uf.arg_types.len() {
-        anyhow::bail!("function \"{}\" expects {} argument(s), got {}", uf.name, uf.arg_types.len(), args.len());
+        anyhow::bail!(
+            "function \"{}\" expects {} argument(s), got {}",
+            uf.name,
+            uf.arg_types.len(),
+            args.len()
+        );
     }
 
     let mut config = Config::new();
@@ -96,7 +114,9 @@ pub fn call(cfg: UdfConfig, uf: &UserFunction, args: &[Value]) -> anyhow::Result
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, &uf.wasm_bytes)?;
 
-    let limits = StoreLimitsBuilder::new().memory_size(cfg.memory_limit_bytes).build();
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(cfg.memory_limit_bytes)
+        .build();
     let mut store = Store::new(&engine, limits);
     store.limiter(|s| s);
     store.set_fuel(cfg.fuel_limit)?;
@@ -105,9 +125,12 @@ pub fn call(cfg: UdfConfig, uf: &UserFunction, args: &[Value]) -> anyhow::Result
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| anyhow::anyhow!("failed to instantiate WASM UDF \"{}\": {e}", uf.name))?;
-    let func = instance
-        .get_func(&mut store, &uf.name)
-        .ok_or_else(|| anyhow::anyhow!("function \"{}\" export not found in its own WASM module", uf.name))?;
+    let func = instance.get_func(&mut store, &uf.name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "function \"{}\" export not found in its own WASM module",
+            uf.name
+        )
+    })?;
 
     let params: Vec<Val> = args
         .iter()
@@ -127,7 +150,10 @@ fn to_wasm_val(v: &Value, ty: &ColumnType) -> anyhow::Result<Val> {
         (Value::Float(f), ColumnType::Float8) => Ok(Val::F64(f.to_bits())),
         (Value::Bool(b), ColumnType::Bool) => Ok(Val::I32(if *b { 1 } else { 0 })),
         (Value::Null, _) => anyhow::bail!("NULL is not supported as a WASM UDF argument"),
-        (other, ty) => anyhow::bail!("cannot pass a {} value as a {ty:?} WASM UDF argument", other.type_name()),
+        (other, ty) => anyhow::bail!(
+            "cannot pass a {} value as a {ty:?} WASM UDF argument",
+            other.type_name()
+        ),
     }
 }
 
@@ -155,13 +181,30 @@ mod tests {
         test_db_with_udf_config(UdfConfig::default())
     }
 
-    fn test_db_with_udf_config(udf_config: UdfConfig) -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
+    fn test_db_with_udf_config(
+        udf_config: UdfConfig,
+    ) -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, udf_config).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                udf_config,
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -178,7 +221,8 @@ mod tests {
             r#"(module (func (export "add_one") (param i64) (result i64)
                  (i64.add (local.get 0) (i64.const 1))))"#,
         );
-        let sql = format!("CREATE FUNCTION add_one(n int8) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
+        let sql =
+            format!("CREATE FUNCTION add_one(n int8) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
         execute_query(&sql, db.clone()).unwrap();
 
         let result = execute_query("SELECT add_one(41)", db.clone()).unwrap();
@@ -193,7 +237,8 @@ mod tests {
             r#"(module (func (export "bad") (param i64) (result i64)
                  (local.get 0)))"#,
         );
-        let sql = format!("CREATE FUNCTION bad(n int8) RETURNS float8 LANGUAGE wasm AS '{wasm_b64}'");
+        let sql =
+            format!("CREATE FUNCTION bad(n int8) RETURNS float8 LANGUAGE wasm AS '{wasm_b64}'");
         assert!(execute_query(&sql, db.clone()).is_err());
     }
 
@@ -216,23 +261,31 @@ mod tests {
     #[test]
     fn create_function_rejects_unsupported_type() {
         let (db, _b, _l) = test_db();
-        let wasm_b64 = wat_base64(r#"(module (func (export "f") (param i64) (result i64) (local.get 0)))"#);
+        let wasm_b64 =
+            wat_base64(r#"(module (func (export "f") (param i64) (result i64) (local.get 0)))"#);
         let sql = format!("CREATE FUNCTION f(n text) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
         assert!(execute_query(&sql, db.clone()).is_err());
     }
 
     #[test]
     fn create_function_rejects_oversized_module() {
-        let (db, _b, _l) = test_db_with_udf_config(UdfConfig { max_module_bytes: 4, ..UdfConfig::default() });
+        let (db, _b, _l) = test_db_with_udf_config(UdfConfig {
+            max_module_bytes: 4,
+            ..UdfConfig::default()
+        });
         let wasm_b64 = wat_base64(
             r#"(module (func (export "add_one") (param i64) (result i64)
                  (i64.add (local.get 0) (i64.const 1))))"#,
         );
-        let sql = format!("CREATE FUNCTION add_one(n int8) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
+        let sql =
+            format!("CREATE FUNCTION add_one(n int8) RETURNS int8 LANGUAGE wasm AS '{wasm_b64}'");
         let err = match execute_query(&sql, db.clone()) {
             Err(e) => e,
             Ok(_) => panic!("expected oversized module to be rejected"),
         };
-        assert!(err.to_string().contains("exceeding the 4-byte limit"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("exceeding the 4-byte limit"),
+            "unexpected error: {err}"
+        );
     }
 }

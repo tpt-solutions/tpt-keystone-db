@@ -48,16 +48,28 @@ pub async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest>
         }
     }
 
-    let content_length: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let content_length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body).await?;
     }
 
-    Ok(HttpRequest { method, path, headers, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
-pub async fn write_json_response(stream: &mut TcpStream, status: u16, body: &[u8]) -> anyhow::Result<()> {
+pub async fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &[u8],
+) -> anyhow::Result<()> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",

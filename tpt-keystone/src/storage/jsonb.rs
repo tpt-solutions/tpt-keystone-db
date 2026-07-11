@@ -50,7 +50,9 @@ fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64> {
     let mut result: u64 = 0;
     let mut shift = 0;
     loop {
-        let byte = *buf.get(*pos).ok_or_else(|| anyhow::anyhow!("jsonb: truncated varint"))?;
+        let byte = *buf
+            .get(*pos)
+            .ok_or_else(|| anyhow::anyhow!("jsonb: truncated varint"))?;
         *pos += 1;
         result |= ((byte & 0x7f) as u64) << shift;
         if byte & 0x80 == 0 {
@@ -109,26 +111,38 @@ pub fn decode(buf: &[u8]) -> Result<Value> {
 }
 
 fn decode_at(buf: &[u8], pos: &mut usize) -> Result<Value> {
-    let tag = *buf.get(*pos).ok_or_else(|| anyhow::anyhow!("jsonb: truncated value"))?;
+    let tag = *buf
+        .get(*pos)
+        .ok_or_else(|| anyhow::anyhow!("jsonb: truncated value"))?;
     *pos += 1;
     match tag {
         TAG_NULL => Ok(Value::Null),
         TAG_FALSE => Ok(Value::Bool(false)),
         TAG_TRUE => Ok(Value::Bool(true)),
         TAG_INT => {
-            let bytes = buf.get(*pos..*pos + 8).ok_or_else(|| anyhow::anyhow!("jsonb: truncated int"))?;
+            let bytes = buf
+                .get(*pos..*pos + 8)
+                .ok_or_else(|| anyhow::anyhow!("jsonb: truncated int"))?;
             *pos += 8;
-            Ok(Value::Number(Number::from(i64::from_be_bytes(bytes.try_into().unwrap()))))
+            Ok(Value::Number(Number::from(i64::from_be_bytes(
+                bytes.try_into().unwrap(),
+            ))))
         }
         TAG_FLOAT => {
-            let bytes = buf.get(*pos..*pos + 8).ok_or_else(|| anyhow::anyhow!("jsonb: truncated float"))?;
+            let bytes = buf
+                .get(*pos..*pos + 8)
+                .ok_or_else(|| anyhow::anyhow!("jsonb: truncated float"))?;
             *pos += 8;
             let f = f64::from_be_bytes(bytes.try_into().unwrap());
-            Ok(Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null))
+            Ok(Number::from_f64(f)
+                .map(Value::Number)
+                .unwrap_or(Value::Null))
         }
         TAG_STRING => {
             let len = read_varint(buf, pos)? as usize;
-            let bytes = buf.get(*pos..*pos + len).ok_or_else(|| anyhow::anyhow!("jsonb: truncated string"))?;
+            let bytes = buf
+                .get(*pos..*pos + len)
+                .ok_or_else(|| anyhow::anyhow!("jsonb: truncated string"))?;
             *pos += len;
             Ok(Value::String(String::from_utf8_lossy(bytes).into_owned()))
         }
@@ -145,7 +159,9 @@ fn decode_at(buf: &[u8], pos: &mut usize) -> Result<Value> {
             let mut map = Map::with_capacity(len);
             for _ in 0..len {
                 let klen = read_varint(buf, pos)? as usize;
-                let kbytes = buf.get(*pos..*pos + klen).ok_or_else(|| anyhow::anyhow!("jsonb: truncated key"))?;
+                let kbytes = buf
+                    .get(*pos..*pos + klen)
+                    .ok_or_else(|| anyhow::anyhow!("jsonb: truncated key"))?;
                 *pos += klen;
                 let key = String::from_utf8_lossy(kbytes).into_owned();
                 let value = decode_at(buf, pos)?;

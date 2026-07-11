@@ -13,8 +13,14 @@ pub enum BackendMessage {
     /// `AuthenticationSASLFinal` (code 12) — the server-final-message
     /// (`v=<ServerSignature>`), sent right before `AuthenticationOk`.
     AuthenticationSASLFinal(Vec<u8>),
-    ParameterStatus { name: String, value: String },
-    BackendKeyData { pid: i32, secret: i32 },
+    ParameterStatus {
+        name: String,
+        value: String,
+    },
+    BackendKeyData {
+        pid: i32,
+        secret: i32,
+    },
     ReadyForQuery(TransactionStatus),
     RowDescription(Vec<FieldDescription>),
     DataRow(Vec<Option<Vec<u8>>>),
@@ -28,9 +34,17 @@ pub enum BackendMessage {
     ParameterDescription(Vec<i32>),
     NoData,
     PortalSuspended,
-    NotificationResponse { pid: i32, channel: String, payload: String },
-    CopyInResponse { columns: usize },
-    CopyOutResponse { columns: usize },
+    NotificationResponse {
+        pid: i32,
+        channel: String,
+        payload: String,
+    },
+    CopyInResponse {
+        columns: usize,
+    },
+    CopyOutResponse {
+        columns: usize,
+    },
     CopyData(Vec<u8>),
     CopyDone,
 }
@@ -191,10 +205,18 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
         }
         BackendMessage::ErrorResponse(e) => {
             write_msg(buf, b'E', |b| {
-                b.put_u8(b'S'); b.put_slice(e.severity.as_bytes()); b.put_u8(0);
-                b.put_u8(b'V'); b.put_slice(e.severity.as_bytes()); b.put_u8(0);
-                b.put_u8(b'C'); b.put_slice(e.code.as_bytes()); b.put_u8(0);
-                b.put_u8(b'M'); b.put_slice(e.message.as_bytes()); b.put_u8(0);
+                b.put_u8(b'S');
+                b.put_slice(e.severity.as_bytes());
+                b.put_u8(0);
+                b.put_u8(b'V');
+                b.put_slice(e.severity.as_bytes());
+                b.put_u8(0);
+                b.put_u8(b'C');
+                b.put_slice(e.code.as_bytes());
+                b.put_u8(0);
+                b.put_u8(b'M');
+                b.put_slice(e.message.as_bytes());
+                b.put_u8(0);
                 b.put_u8(0); // terminator
             });
         }
@@ -203,7 +225,9 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
         }
         BackendMessage::NoticeResponse(msg) => {
             write_msg(buf, b'N', |b| {
-                b.put_u8(b'M'); b.put_slice(msg.as_bytes()); b.put_u8(0);
+                b.put_u8(b'M');
+                b.put_slice(msg.as_bytes());
+                b.put_u8(0);
                 b.put_u8(0);
             });
         }
@@ -230,7 +254,11 @@ pub fn encode(msg: &BackendMessage, buf: &mut BytesMut) {
         BackendMessage::PortalSuspended => {
             write_msg(buf, b's', |_| {});
         }
-        BackendMessage::NotificationResponse { pid, channel, payload } => {
+        BackendMessage::NotificationResponse {
+            pid,
+            channel,
+            payload,
+        } => {
             write_msg(buf, b'A', |b| {
                 b.put_i32(*pid);
                 b.put_slice(channel.as_bytes());

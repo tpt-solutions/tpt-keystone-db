@@ -50,7 +50,9 @@ struct ScoredId {
 impl Eq for ScoredId {}
 impl Ord for ScoredId {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.partial_cmp(&other.dist).unwrap_or(Ordering::Equal)
+        self.dist
+            .partial_cmp(&other.dist)
+            .unwrap_or(Ordering::Equal)
     }
 }
 impl PartialOrd for ScoredId {
@@ -99,7 +101,12 @@ pub struct HnswConfig {
 
 impl Default for HnswConfig {
     fn default() -> Self {
-        Self { m: 16, m0: 32, ef_construction: 100, ef_search: 50 }
+        Self {
+            m: 16,
+            m0: 32,
+            ef_construction: 100,
+            ef_search: 50,
+        }
     }
 }
 
@@ -119,7 +126,14 @@ pub struct HnswIndex {
 impl HnswIndex {
     pub fn new(metric: Metric, config: HnswConfig) -> Self {
         let level_mult = 1.0 / (config.m.max(2) as f64).ln();
-        Self { metric, config, nodes: Vec::new(), entry_point: None, top_layer: 0, level_mult }
+        Self {
+            metric,
+            config,
+            nodes: Vec::new(),
+            entry_point: None,
+            top_layer: 0,
+            level_mult,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -165,7 +179,13 @@ impl HnswIndex {
 
     /// Beam search at `layer` starting from `entry_points`, returning up to
     /// `ef` nearest candidates found (the paper's `SEARCH-LAYER`).
-    fn search_layer(&self, query: &[f32], entry_points: &[usize], ef: usize, layer: usize) -> Vec<ScoredId> {
+    fn search_layer(
+        &self,
+        query: &[f32],
+        entry_points: &[usize],
+        ef: usize,
+        layer: usize,
+    ) -> Vec<ScoredId> {
         let mut visited: HashSet<usize> = entry_points.iter().copied().collect();
         let mut candidates: BinaryHeap<MinScoredId> = BinaryHeap::new();
         let mut found: BinaryHeap<ScoredId> = BinaryHeap::new(); // max-heap: worst-of-found on top
@@ -209,7 +229,10 @@ impl HnswIndex {
     pub fn insert(&mut self, vector: Vec<f32>) -> usize {
         let id = self.nodes.len();
         let layer = self.random_layer();
-        self.nodes.push(Node { vector, layers: vec![Vec::new(); layer + 1] });
+        self.nodes.push(Node {
+            vector,
+            layers: vec![Vec::new(); layer + 1],
+        });
 
         let Some(entry) = self.entry_point else {
             self.entry_point = Some(id);
@@ -232,8 +255,13 @@ impl HnswIndex {
         let start_layer = layer.min(self.top_layer);
         let mut entry_points = vec![current];
         for l in (0..=start_layer).rev() {
-            let candidates = self.search_layer(&query, &entry_points, self.config.ef_construction, l);
-            let max_conn = if l == 0 { self.config.m0 } else { self.config.m };
+            let candidates =
+                self.search_layer(&query, &entry_points, self.config.ef_construction, l);
+            let max_conn = if l == 0 {
+                self.config.m0
+            } else {
+                self.config.m
+            };
             let selected: Vec<usize> = candidates.iter().take(max_conn).map(|c| c.id).collect();
 
             self.nodes[id].layers[l] = selected.clone();
@@ -272,7 +300,10 @@ impl HnswIndex {
             let node_vec = self.nodes[node].vector.clone();
             let mut scored: Vec<ScoredId> = self.nodes[node].layers[layer]
                 .iter()
-                .map(|&n| ScoredId { dist: self.dist(&node_vec, &self.nodes[n].vector), id: n })
+                .map(|&n| ScoredId {
+                    dist: self.dist(&node_vec, &self.nodes[n].vector),
+                    id: n,
+                })
                 .collect();
             scored.sort();
             scored.truncate(max_conn);
@@ -283,7 +314,9 @@ impl HnswIndex {
     /// Approximate k-nearest-neighbor search. Returns `(internal_id,
     /// distance)` pairs sorted nearest-first, length `<= k`.
     pub fn search(&self, query: &[f32], k: usize, ef_search: Option<usize>) -> Vec<(usize, f32)> {
-        let Some(entry) = self.entry_point else { return Vec::new() };
+        let Some(entry) = self.entry_point else {
+            return Vec::new();
+        };
         let ef = ef_search.unwrap_or(self.config.ef_search).max(k);
 
         let mut current = entry;
@@ -292,7 +325,11 @@ impl HnswIndex {
         }
 
         let candidates = self.search_layer(query, &[current], ef, 0);
-        candidates.into_iter().take(k).map(|c| (c.id, c.dist)).collect()
+        candidates
+            .into_iter()
+            .take(k)
+            .map(|c| (c.id, c.dist))
+            .collect()
     }
 
     /// The vector stored at internal id `id`, for callers that need to map
@@ -306,12 +343,14 @@ impl HnswIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     fn random_vectors(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
         let mut rng = StdRng::seed_from_u64(seed);
-        (0..n).map(|_| (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect()).collect()
+        (0..n)
+            .map(|_| (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect())
+            .collect()
     }
 
     fn brute_force_knn(vectors: &[Vec<f32>], query: &[f32], k: usize) -> Vec<usize> {
@@ -333,7 +372,10 @@ mod tests {
         }
         for (i, v) in vectors.iter().enumerate() {
             let results = idx.search(v, 1, None);
-            assert_eq!(results[0].0, i, "nearest neighbor of an inserted point should be itself");
+            assert_eq!(
+                results[0].0, i,
+                "nearest neighbor of an inserted point should be itself"
+            );
         }
     }
 
@@ -344,7 +386,15 @@ mod tests {
         let k = 10;
         let vectors = random_vectors(n, dim, 7);
 
-        let mut idx = HnswIndex::new(Metric::L2, HnswConfig { m: 16, m0: 32, ef_construction: 100, ef_search: 80 });
+        let mut idx = HnswIndex::new(
+            Metric::L2,
+            HnswConfig {
+                m: 16,
+                m0: 32,
+                ef_construction: 100,
+                ef_search: 80,
+            },
+        );
         for v in &vectors {
             idx.insert(v.clone());
         }
@@ -352,13 +402,21 @@ mod tests {
         let queries = random_vectors(30, dim, 99);
         let mut total_recall = 0.0;
         for q in &queries {
-            let ground_truth: HashSet<usize> = brute_force_knn(&vectors, q, k).into_iter().collect();
-            let approx: HashSet<usize> = idx.search(q, k, None).into_iter().map(|(id, _)| id).collect();
+            let ground_truth: HashSet<usize> =
+                brute_force_knn(&vectors, q, k).into_iter().collect();
+            let approx: HashSet<usize> = idx
+                .search(q, k, None)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
             let hits = ground_truth.intersection(&approx).count();
             total_recall += hits as f64 / k as f64;
         }
         let avg_recall = total_recall / queries.len() as f64;
-        assert!(avg_recall > 0.90, "expected >90% recall on this small synthetic set, got {avg_recall}");
+        assert!(
+            avg_recall > 0.90,
+            "expected >90% recall on this small synthetic set, got {avg_recall}"
+        );
     }
 
     #[test]
@@ -368,14 +426,27 @@ mod tests {
         // Assert node degree stays bounded by the configured M even as the
         // graph grows well past M — proof the neighbor-pruning/selection
         // logic (not a full scan) is actually what's answering queries.
-        let mut idx = HnswIndex::new(Metric::L2, HnswConfig { m: 8, m0: 16, ef_construction: 50, ef_search: 30 });
+        let mut idx = HnswIndex::new(
+            Metric::L2,
+            HnswConfig {
+                m: 8,
+                m0: 16,
+                ef_construction: 50,
+                ef_search: 30,
+            },
+        );
         let vectors = random_vectors(300, 12, 123);
         for v in &vectors {
             idx.insert(v.clone());
         }
         for node in &idx.nodes {
             if let Some(base_layer) = node.layers.first() {
-                assert!(base_layer.len() <= idx.config.m0, "base-layer degree {} exceeds m0 {}", base_layer.len(), idx.config.m0);
+                assert!(
+                    base_layer.len() <= idx.config.m0,
+                    "base-layer degree {} exceeds m0 {}",
+                    base_layer.len(),
+                    idx.config.m0
+                );
             }
         }
     }
@@ -402,10 +473,17 @@ mod tests {
                 .collect();
             scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
             let ground_truth: HashSet<usize> = scored.into_iter().take(k).map(|(i, _)| i).collect();
-            let approx: HashSet<usize> = idx.search(q, k, None).into_iter().map(|(id, _)| id).collect();
+            let approx: HashSet<usize> = idx
+                .search(q, k, None)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
             total_recall += ground_truth.intersection(&approx).count() as f64 / k as f64;
         }
         let avg_recall = total_recall / queries.len() as f64;
-        assert!(avg_recall > 0.90, "expected >90% cosine recall, got {avg_recall}");
+        assert!(
+            avg_recall > 0.90,
+            "expected >90% cosine recall, got {avg_recall}"
+        );
     }
 }

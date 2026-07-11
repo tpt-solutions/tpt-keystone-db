@@ -56,7 +56,13 @@ impl Wal {
     }
 
     /// Append a record to the WAL and fsync.
-    pub fn append(&mut self, table: &str, key: &[u8], value: &[u8], record_type: u8) -> Result<WalRecord> {
+    pub fn append(
+        &mut self,
+        table: &str,
+        key: &[u8],
+        value: &[u8],
+        record_type: u8,
+    ) -> Result<WalRecord> {
         let seq = self.seq;
         self.seq += 1;
 
@@ -70,7 +76,8 @@ impl Wal {
 
         // Encode: seq(8) | table_len(4) | table | key_len(4) | key | value_len(4) | value | type(1)
         let table_bytes = table.as_bytes();
-        let mut buf = Vec::with_capacity(8 + 4 + table_bytes.len() + 4 + key.len() + 4 + value.len() + 1);
+        let mut buf =
+            Vec::with_capacity(8 + 4 + table_bytes.len() + 4 + key.len() + 4 + value.len() + 1);
         buf.extend_from_slice(&seq.to_be_bytes());
         buf.extend_from_slice(&(table_bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(table_bytes);
@@ -83,7 +90,9 @@ impl Wal {
         self.file.seek(SeekFrom::End(0))?; // no append(true) mode; keep cursor pinned to end
         self.file.write_all(&buf)?;
         self.file.sync_all()?; // fsync for durability
-        crate::metrics::Metrics::global().wal_fsyncs_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::metrics::Metrics::global()
+            .wal_fsyncs_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.bytes_written += buf.len() as u64;
 
         Ok(record)
@@ -164,7 +173,8 @@ impl Wal {
             .read(true)
             .open(&self.path)
             .with_context(|| format!("reopening wal for read at {}", self.path.display()))?;
-        file.seek(SeekFrom::Start(0)).context("seeking wal to start")?;
+        file.seek(SeekFrom::Start(0))
+            .context("seeking wal to start")?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).context("reading wal bytes")?;
         Ok(buf)
@@ -174,8 +184,12 @@ impl Wal {
     pub fn truncate(&mut self) -> Result<()> {
         use anyhow::Context;
         self.file.set_len(0).context("truncating wal file")?;
-        self.file.seek(SeekFrom::Start(0)).context("seeking wal after truncate")?;
-        self.file.sync_all().context("fsyncing wal after truncate")?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .context("seeking wal after truncate")?;
+        self.file
+            .sync_all()
+            .context("fsyncing wal after truncate")?;
         self.bytes_written = 0;
         info!("WAL truncated");
         Ok(())

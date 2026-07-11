@@ -8,9 +8,9 @@
 mod http;
 mod protocol;
 mod server;
-mod tools;
 #[cfg(test)]
 mod tests;
+mod tools;
 
 pub use server::handle;
 /// Re-exported so other in-process modules (Synapse's actor runtime) can

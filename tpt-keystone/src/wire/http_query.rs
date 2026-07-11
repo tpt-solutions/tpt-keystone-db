@@ -77,7 +77,8 @@ fn handle_query(db: &Arc<Database>, body: &[u8]) -> Vec<u8> {
     let result = if params.is_empty() {
         execute_query(sql, db.clone())
     } else {
-        db.parse_cached(sql).and_then(|stmt| execute_parsed(stmt, db.clone(), &params))
+        db.parse_cached(sql)
+            .and_then(|stmt| execute_parsed(stmt, db.clone(), &params))
     };
 
     match result {
@@ -86,7 +87,14 @@ fn handle_query(db: &Arc<Database>, body: &[u8]) -> Vec<u8> {
             let rows: Vec<Vec<Option<String>>> = qr
                 .rows
                 .iter()
-                .map(|row| row.iter().map(|cell| cell.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())).collect())
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| {
+                            cell.as_ref()
+                                .map(|b| String::from_utf8_lossy(b).into_owned())
+                        })
+                        .collect()
+                })
                 .collect();
             json_response(200, &json!({"columns": columns, "rows": rows}))
         }
@@ -101,7 +109,9 @@ fn handle_schema(db: &Arc<Database>) -> Vec<u8> {
     };
     let mut out = Vec::with_capacity(tables.len());
     for name in tables {
-        let Ok(Some(schema)) = db.get_table(&name) else { continue };
+        let Ok(Some(schema)) = db.get_table(&name) else {
+            continue;
+        };
         let columns: Vec<_> = schema
             .columns
             .iter()
@@ -158,7 +168,11 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Option<(String, 
     loop {
         let n = stream.read(&mut byte).await?;
         if n == 0 {
-            return if buf.is_empty() { Ok(None) } else { anyhow::bail!("connection closed mid-request") };
+            return if buf.is_empty() {
+                Ok(None)
+            } else {
+                anyhow::bail!("connection closed mid-request")
+            };
         }
         buf.push(byte[0]);
         if buf.len() >= 4 && &buf[buf.len() - 4..] == b"\r\n\r\n" {
@@ -168,9 +182,14 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Option<(String, 
     }
     let head = String::from_utf8_lossy(&buf);
     let mut lines = head.lines();
-    let request_line = lines.next().ok_or_else(|| anyhow::anyhow!("empty request"))?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty request"))?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or_else(|| anyhow::anyhow!("missing HTTP method"))?.to_string();
+    let method = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing HTTP method"))?
+        .to_string();
     let path = parts.next().unwrap_or("/").to_string();
 
     let content_length: usize = lines
@@ -194,7 +213,11 @@ fn json_response(status: u16, body: &serde_json::Value) -> Vec<u8> {
         404 => "Not Found",
         _ => "Internal Server Error",
     };
-    let payload = if status == 204 { String::new() } else { body.to_string() };
+    let payload = if status == 204 {
+        String::new()
+    } else {
+        body.to_string()
+    };
     format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: application/json\r\n\

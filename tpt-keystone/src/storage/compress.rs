@@ -13,7 +13,11 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        Self { buf: Vec::new(), cur: 0, nbits: 0 }
+        Self {
+            buf: Vec::new(),
+            cur: 0,
+            nbits: 0,
+        }
     }
 
     fn write_bit(&mut self, bit: bool) {
@@ -52,7 +56,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(buf: &'a [u8]) -> Self {
-        Self { buf, byte_pos: 0, bit_pos: 0 }
+        Self {
+            buf,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
     }
 
     fn read_bit(&mut self) -> Option<bool> {
@@ -149,11 +157,17 @@ pub fn gorilla_decode(data: &[u8]) -> Vec<f64> {
             out.push(f64::from_bits(prev));
             continue;
         }
-        let Some(new_window) = r.read_bit() else { break };
+        let Some(new_window) = r.read_bit() else {
+            break;
+        };
         let (leading, trailing) = if new_window {
             let leading = r.read_bits(6).unwrap_or(0) as u8;
             let meaningful_raw = r.read_bits(6).unwrap_or(0) as u8;
-            let meaningful = if meaningful_raw == 0 { 64 } else { meaningful_raw };
+            let meaningful = if meaningful_raw == 0 {
+                64
+            } else {
+                meaningful_raw
+            };
             let trailing = 64 - leading - meaningful;
             prev_leading = leading;
             prev_trailing = trailing;
@@ -243,24 +257,32 @@ pub fn delta_delta_encode(values: &[i64]) -> Vec<u8> {
 /// Inverse of [`delta_delta_encode`].
 pub fn delta_delta_decode(data: &[u8]) -> Vec<i64> {
     let mut pos = 0;
-    let Some(count) = read_varint(data, &mut pos) else { return Vec::new() };
+    let Some(count) = read_varint(data, &mut pos) else {
+        return Vec::new();
+    };
     let count = count as usize;
     let mut out = Vec::with_capacity(count);
     if count == 0 {
         return out;
     }
-    let Some(first) = read_varint(data, &mut pos) else { return out };
+    let Some(first) = read_varint(data, &mut pos) else {
+        return out;
+    };
     let first = zigzag_decode(first);
     out.push(first);
     if count == 1 {
         return out;
     }
-    let Some(d0) = read_varint(data, &mut pos) else { return out };
+    let Some(d0) = read_varint(data, &mut pos) else {
+        return out;
+    };
     let mut prev_delta = zigzag_decode(d0);
     let mut prev = first + prev_delta;
     out.push(prev);
     for _ in 2..count {
-        let Some(dd_raw) = read_varint(data, &mut pos) else { break };
+        let Some(dd_raw) = read_varint(data, &mut pos) else {
+            break;
+        };
         let dd = zigzag_decode(dd_raw);
         let delta = prev_delta + dd;
         let v = prev + delta;
@@ -346,7 +368,10 @@ mod tests {
 
     #[test]
     fn delta_delta_empty_and_single() {
-        assert_eq!(delta_delta_decode(&delta_delta_encode(&[])), Vec::<i64>::new());
+        assert_eq!(
+            delta_delta_decode(&delta_delta_encode(&[])),
+            Vec::<i64>::new()
+        );
         assert_eq!(delta_delta_decode(&delta_delta_encode(&[7])), vec![7]);
     }
 

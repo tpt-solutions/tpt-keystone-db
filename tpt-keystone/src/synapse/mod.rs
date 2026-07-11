@@ -60,7 +60,11 @@ use crate::storage::{ColumnDef, ColumnType};
 /// (TODO.md) means calling the same dispatcher the wire-level MCP server
 /// uses, not a second implementation, and no network hop since Synapse and
 /// the MCP server share the same `Arc<Database>` process.
-pub fn invoke_mcp_tool(db: &Arc<Database>, name: &str, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+pub fn invoke_mcp_tool(
+    db: &Arc<Database>,
+    name: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
     crate::mcp::call_tool(db, name, args)
 }
 
@@ -120,7 +124,8 @@ pub(crate) fn int_cell(n: i64) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn cell_text(cell: &Option<Vec<u8>>) -> Option<String> {
-    cell.as_ref().and_then(|b| String::from_utf8(b.clone()).ok())
+    cell.as_ref()
+        .and_then(|b| String::from_utf8(b.clone()).ok())
 }
 
 pub(crate) fn cell_i64(cell: &Option<Vec<u8>>) -> Option<i64> {
@@ -128,7 +133,13 @@ pub(crate) fn cell_i64(cell: &Option<Vec<u8>>) -> Option<i64> {
 }
 
 pub(crate) fn col(name: &str, ty: ColumnType, nullable: bool, is_pk: bool) -> ColumnDef {
-    ColumnDef { name: name.to_string(), col_type: ty, nullable, default: None, is_pk }
+    ColumnDef {
+        name: name.to_string(),
+        col_type: ty,
+        nullable,
+        default: None,
+        is_pk,
+    }
 }
 
 /// Process-wide monotonic counter used to build unique row ids

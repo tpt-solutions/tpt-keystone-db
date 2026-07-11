@@ -12,7 +12,12 @@ use super::{AdjacencyGraph, Direction, VertexId};
 
 /// Breadth-first traversal from `start`, bounded to `max_depth` hops.
 /// Returns `(vertex, depth)` pairs, `start` included at depth 0.
-pub fn bfs_traverse(g: &AdjacencyGraph, start: VertexId, max_depth: usize, dir: Direction) -> Vec<(VertexId, usize)> {
+pub fn bfs_traverse(
+    g: &AdjacencyGraph,
+    start: VertexId,
+    max_depth: usize,
+    dir: Direction,
+) -> Vec<(VertexId, usize)> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut out = Vec::new();
@@ -34,7 +39,12 @@ pub fn bfs_traverse(g: &AdjacencyGraph, start: VertexId, max_depth: usize, dir: 
 
 /// Unweighted shortest path (fewest hops) from `start` to `end`, as a
 /// sequence of vertices including both endpoints. `None` if unreachable.
-pub fn shortest_path(g: &AdjacencyGraph, start: VertexId, end: VertexId, dir: Direction) -> Option<Vec<VertexId>> {
+pub fn shortest_path(
+    g: &AdjacencyGraph,
+    start: VertexId,
+    end: VertexId,
+    dir: Direction,
+) -> Option<Vec<VertexId>> {
     if start == end {
         return Some(vec![start]);
     }
@@ -104,7 +114,8 @@ pub fn pagerank(g: &AdjacencyGraph, damping: f64, iterations: usize) -> Vec<f64>
     let out_degree: Vec<usize> = g.vertex_ids().map(|v| g.out_edges(v).len()).collect();
 
     for _ in 0..iterations {
-        let dangling_mass: f64 = g.vertex_ids()
+        let dangling_mass: f64 = g
+            .vertex_ids()
             .filter(|&v| out_degree[v as usize] == 0)
             .map(|v| rank[v as usize])
             .sum();
@@ -132,8 +143,15 @@ pub fn pagerank(g: &AdjacencyGraph, damping: f64, iterations: usize) -> Vec<f64>
 /// persisted index structure.
 pub fn triangle_count(g: &AdjacencyGraph) -> (Vec<u64>, u64) {
     let n = g.vertex_count();
-    let neighbor_sets: Vec<HashSet<VertexId>> = g.vertex_ids()
-        .map(|v| g.neighbors(v, Direction::Both).into_iter().map(|(id, _)| id).filter(|&id| id != v).collect())
+    let neighbor_sets: Vec<HashSet<VertexId>> = g
+        .vertex_ids()
+        .map(|v| {
+            g.neighbors(v, Direction::Both)
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|&id| id != v)
+                .collect()
+        })
         .collect();
 
     let mut counts = vec![0u64; n];
@@ -145,7 +163,11 @@ pub fn triangle_count(g: &AdjacencyGraph) -> (Vec<u64>, u64) {
                 continue;
             }
             let nu = &neighbor_sets[u as usize];
-            let (smaller, larger) = if nv.len() < nu.len() { (nv, nu) } else { (nu, nv) };
+            let (smaller, larger) = if nv.len() < nu.len() {
+                (nv, nu)
+            } else {
+                (nu, nv)
+            };
             for &w in smaller {
                 if w > u && larger.contains(&w) {
                     counts[v as usize] += 1;
@@ -168,8 +190,14 @@ pub fn triangle_count(g: &AdjacencyGraph) -> (Vec<u64>, u64) {
 pub fn label_propagation(g: &AdjacencyGraph, iterations: usize) -> Vec<u32> {
     let n = g.vertex_count();
     let mut labels: Vec<u32> = (0..n as u32).collect();
-    let neighbor_lists: Vec<Vec<VertexId>> = g.vertex_ids()
-        .map(|v| g.neighbors(v, Direction::Both).into_iter().map(|(id, _)| id).collect())
+    let neighbor_lists: Vec<Vec<VertexId>> = g
+        .vertex_ids()
+        .map(|v| {
+            g.neighbors(v, Direction::Both)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
         .collect();
 
     for _ in 0..iterations {
@@ -179,12 +207,18 @@ pub fn label_propagation(g: &AdjacencyGraph, iterations: usize) -> Vec<u32> {
             if neighbors.is_empty() {
                 continue;
             }
-            let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
             for &n_id in neighbors {
                 *counts.entry(labels[n_id as usize]).or_insert(0) += 1;
             }
             let max_count = *counts.values().max().unwrap();
-            let best = counts.iter().filter(|&(_, &c)| c == max_count).map(|(&l, _)| l).min().unwrap();
+            let best = counts
+                .iter()
+                .filter(|&(_, &c)| c == max_count)
+                .map(|(&l, _)| l)
+                .min()
+                .unwrap();
             if best != labels[v] {
                 labels[v] = best;
                 changed = true;
@@ -214,7 +248,10 @@ mod tests {
     fn bfs_respects_max_depth() {
         let g = line_graph();
         let a = g.id_of(b"a").unwrap();
-        let reached: Vec<usize> = bfs_traverse(&g, a, 2, Direction::Out).into_iter().map(|(_, d)| d).collect();
+        let reached: Vec<usize> = bfs_traverse(&g, a, 2, Direction::Out)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
         assert_eq!(reached, vec![0, 1, 2]);
     }
 

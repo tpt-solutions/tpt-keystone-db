@@ -50,7 +50,12 @@ struct ExtendedState {
 /// `stream` has already been through `wire::tls::negotiate` by the time it
 /// gets here — plain `TcpStream` and TLS-upgraded connections are
 /// indistinguishable from this point on.
-pub async fn handle(stream: BoxedStream, peer: std::net::SocketAddr, db: Arc<Database>, roles: Arc<RoleStore>) {
+pub async fn handle(
+    stream: BoxedStream,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+    roles: Arc<RoleStore>,
+) {
     info!(%peer, "client connected");
     let mut conn = Conn::from_boxed(stream);
 
@@ -63,7 +68,12 @@ pub async fn handle(stream: BoxedStream, peer: std::net::SocketAddr, db: Arc<Dat
 }
 
 #[tracing::instrument(skip_all, fields(%peer))]
-async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>, roles: Arc<RoleStore>) -> anyhow::Result<()> {
+async fn run(
+    conn: &mut Conn,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+    roles: Arc<RoleStore>,
+) -> anyhow::Result<()> {
     // --- Startup handshake ---
     let startup = conn.read_startup().await?;
     debug!(%peer, version = startup.protocol_version, "startup received");
@@ -77,10 +87,18 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>, rol
     if roles.is_empty()? {
         conn.send(&BackendMessage::AuthenticationOk);
     } else {
-        let user = startup.params.iter().find(|(k, _)| k == "user").map(|(_, v)| v.clone()).unwrap_or_default();
+        let user = startup
+            .params
+            .iter()
+            .find(|(k, _)| k == "user")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
         if let Err(e) = authenticate(conn, &roles, &user).await {
             debug!(%peer, %user, error = %e, "authentication failed");
-            conn.send_error(ErrorInfo::fatal("28P01", format!("password authentication failed for user \"{user}\"")));
+            conn.send_error(ErrorInfo::fatal(
+                "28P01",
+                format!("password authentication failed for user \"{user}\""),
+            ));
             conn.flush().await?;
             return Ok(());
         }
@@ -113,9 +131,13 @@ async fn run(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>, rol
 /// "password authentication failed" error either way — same as real
 /// Postgres, a client can't tell "no such user" from "wrong password".
 async fn authenticate(conn: &mut Conn, roles: &RoleStore, user: &str) -> anyhow::Result<()> {
-    let cred = roles.find(user)?.ok_or_else(|| anyhow::anyhow!("no such role \"{user}\""))?;
+    let cred = roles
+        .find(user)?
+        .ok_or_else(|| anyhow::anyhow!("no such role \"{user}\""))?;
 
-    conn.send(&BackendMessage::AuthenticationSASL(vec![scram::MECHANISM.to_string()]));
+    conn.send(&BackendMessage::AuthenticationSASL(vec![
+        scram::MECHANISM.to_string()
+    ]));
     conn.flush().await?;
 
     let FrontendMessage::PasswordData(initial) = conn.read_message().await? else {
@@ -127,7 +149,9 @@ async fn authenticate(conn: &mut Conn, roles: &RoleStore, user: &str) -> anyhow:
     }
 
     let first = scram::server_first(&client_first, &cred)?;
-    conn.send(&BackendMessage::AuthenticationSASLContinue(first.message_bytes()));
+    conn.send(&BackendMessage::AuthenticationSASLContinue(
+        first.message_bytes(),
+    ));
     conn.flush().await?;
 
     let FrontendMessage::PasswordData(client_final) = conn.read_message().await? else {
@@ -144,20 +168,31 @@ async fn authenticate(conn: &mut Conn, roles: &RoleStore, user: &str) -> anyhow:
 /// length-prefixed blob of SASL data (the `client-first-message`). Unlike
 /// the later `SASLResponse`, which is just raw SASL data with no framing.
 fn parse_sasl_initial_response(data: &[u8]) -> anyhow::Result<(String, Vec<u8>)> {
-    let nul = data.iter().position(|&b| b == 0).ok_or_else(|| anyhow::anyhow!("malformed SASLInitialResponse"))?;
+    let nul = data
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| anyhow::anyhow!("malformed SASLInitialResponse"))?;
     let mechanism = String::from_utf8(data[..nul].to_vec())?;
     let rest = &data[nul + 1..];
     if rest.len() < 4 {
         anyhow::bail!("malformed SASLInitialResponse: missing length");
     }
     let len = i32::from_be_bytes(rest[0..4].try_into().unwrap());
-    let sasl_data = if len < 0 { Vec::new() } else {
-        rest.get(4..4 + len as usize).ok_or_else(|| anyhow::anyhow!("SASLInitialResponse length out of bounds"))?.to_vec()
+    let sasl_data = if len < 0 {
+        Vec::new()
+    } else {
+        rest.get(4..4 + len as usize)
+            .ok_or_else(|| anyhow::anyhow!("SASLInitialResponse length out of bounds"))?
+            .to_vec()
     };
     Ok((mechanism, sasl_data))
 }
 
-async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Database>) -> anyhow::Result<()> {
+async fn run_query_loop(
+    conn: &mut Conn,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+) -> anyhow::Result<()> {
     let mut ext = ExtendedState::default();
     let mut notify_rx = db.subscribe_notifications();
 
@@ -185,14 +220,20 @@ async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Dat
             FrontendMessage::Query(sql) => {
                 let sql = sql.trim().to_string();
                 debug!(%peer, %sql, "query received");
-                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening).await?;
+                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening)
+                    .await?;
             }
 
-            FrontendMessage::Parse { name, query, param_types } => {
+            FrontendMessage::Parse {
+                name,
+                query,
+                param_types,
+            } => {
                 debug!(%peer, "parse: {query}");
                 match db.parse_cached(&query) {
                     Ok(stmt) => {
-                        ext.prepared.insert(name, PreparedStmt { stmt, param_types });
+                        ext.prepared
+                            .insert(name, PreparedStmt { stmt, param_types });
                         conn.send(&BackendMessage::ParseComplete);
                     }
                     Err(e) => {
@@ -202,18 +243,37 @@ async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Dat
                 conn.flush().await?;
             }
 
-            FrontendMessage::Bind { portal, stmt, params, param_formats, .. } => {
+            FrontendMessage::Bind {
+                portal,
+                stmt,
+                params,
+                param_formats,
+                ..
+            } => {
                 match ext.prepared.get(&stmt) {
                     Some(prepared) => {
-                        let values: Vec<Value> = params.iter().enumerate().map(|(i, bytes)| {
-                            let format = param_formats.get(i).copied().unwrap_or(0);
-                            decode_param(bytes.as_deref(), format)
-                        }).collect();
-                        ext.portals.insert(portal, Portal { stmt: prepared.stmt.clone(), params: values });
+                        let values: Vec<Value> = params
+                            .iter()
+                            .enumerate()
+                            .map(|(i, bytes)| {
+                                let format = param_formats.get(i).copied().unwrap_or(0);
+                                decode_param(bytes.as_deref(), format)
+                            })
+                            .collect();
+                        ext.portals.insert(
+                            portal,
+                            Portal {
+                                stmt: prepared.stmt.clone(),
+                                params: values,
+                            },
+                        );
                         conn.send(&BackendMessage::BindComplete);
                     }
                     None => {
-                        conn.send_error(ErrorInfo::new("26000", format!("prepared statement \"{stmt}\" does not exist")));
+                        conn.send_error(ErrorInfo::new(
+                            "26000",
+                            format!("prepared statement \"{stmt}\" does not exist"),
+                        ));
                     }
                 }
                 conn.flush().await?;
@@ -223,22 +283,36 @@ async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Dat
                 if kind == b'S' {
                     match ext.prepared.get(&name) {
                         Some(prepared) => {
-                            let n_params = max_param_index(&prepared.stmt).max(prepared.param_types.len() as u32);
-                            let types: Vec<i32> = (0..n_params).map(|i| {
-                                prepared.param_types.get(i as usize).copied().filter(|t| *t != 0).unwrap_or(oid::TEXT)
-                            }).collect();
+                            let n_params = max_param_index(&prepared.stmt)
+                                .max(prepared.param_types.len() as u32);
+                            let types: Vec<i32> = (0..n_params)
+                                .map(|i| {
+                                    prepared
+                                        .param_types
+                                        .get(i as usize)
+                                        .copied()
+                                        .filter(|t| *t != 0)
+                                        .unwrap_or(oid::TEXT)
+                                })
+                                .collect();
                             conn.send(&BackendMessage::ParameterDescription(types));
                             send_row_description_for(conn, &prepared.stmt, &db)?;
                         }
                         None => {
-                            conn.send_error(ErrorInfo::new("26000", format!("prepared statement \"{name}\" does not exist")));
+                            conn.send_error(ErrorInfo::new(
+                                "26000",
+                                format!("prepared statement \"{name}\" does not exist"),
+                            ));
                         }
                     }
                 } else {
                     match ext.portals.get(&name) {
                         Some(portal) => send_row_description_for(conn, &portal.stmt, &db)?,
                         None => {
-                            conn.send_error(ErrorInfo::new("34000", format!("portal \"{name}\" does not exist")));
+                            conn.send_error(ErrorInfo::new(
+                                "34000",
+                                format!("portal \"{name}\" does not exist"),
+                            ));
                         }
                     }
                 }
@@ -247,29 +321,34 @@ async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Dat
 
             FrontendMessage::Execute { portal, max_rows } => {
                 match ext.portals.get(&portal) {
-                    Some(p) => {
-                        match execute_parsed(p.stmt.clone(), db.clone(), &p.params) {
-                            Ok(result) => {
-                                let total = result.rows.len();
-                                let limited = max_rows > 0 && (max_rows as usize) < total;
-                                let rows = if limited { &result.rows[..max_rows as usize] } else { &result.rows[..] };
-                                for row in rows {
-                                    conn.send(&BackendMessage::DataRow(row.clone()));
-                                }
-                                if limited {
-                                    conn.send(&BackendMessage::PortalSuspended);
-                                } else {
-                                    conn.send(&BackendMessage::CommandComplete(result.tag));
-                                }
+                    Some(p) => match execute_parsed(p.stmt.clone(), db.clone(), &p.params) {
+                        Ok(result) => {
+                            let total = result.rows.len();
+                            let limited = max_rows > 0 && (max_rows as usize) < total;
+                            let rows = if limited {
+                                &result.rows[..max_rows as usize]
+                            } else {
+                                &result.rows[..]
+                            };
+                            for row in rows {
+                                conn.send(&BackendMessage::DataRow(row.clone()));
                             }
-                            Err(e) => {
-                                error!("execute error: {e}");
-                                conn.send_error(ErrorInfo::new("42601", e.to_string()));
+                            if limited {
+                                conn.send(&BackendMessage::PortalSuspended);
+                            } else {
+                                conn.send(&BackendMessage::CommandComplete(result.tag));
                             }
                         }
-                    }
+                        Err(e) => {
+                            error!("execute error: {e}");
+                            conn.send_error(ErrorInfo::new("42601", e.to_string()));
+                        }
+                    },
                     None => {
-                        conn.send_error(ErrorInfo::new("34000", format!("portal \"{portal}\" does not exist")));
+                        conn.send_error(ErrorInfo::new(
+                            "34000",
+                            format!("portal \"{portal}\" does not exist"),
+                        ));
                     }
                 }
                 conn.flush().await?;
@@ -299,7 +378,9 @@ async fn run_query_loop(conn: &mut Conn, peer: std::net::SocketAddr, db: Arc<Dat
             FrontendMessage::CancelRequest => {
                 warn!(%peer, "cancel request ignored");
             }
-            FrontendMessage::CopyData(_) | FrontendMessage::CopyDone | FrontendMessage::CopyFail(_) => {
+            FrontendMessage::CopyData(_)
+            | FrontendMessage::CopyDone
+            | FrontendMessage::CopyFail(_) => {
                 // Only expected while `handle_copy_in` is reading directly
                 // off `conn`, which bypasses this dispatch loop entirely.
                 warn!(%peer, "unexpected COPY message outside an active COPY");
@@ -377,19 +458,43 @@ fn execute_simple(
     match stmt {
         Stmt::Listen(channel) => {
             listening.insert(channel);
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: "LISTEN".into() })
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "LISTEN".into(),
+            })
         }
         Stmt::Unlisten(channel) => {
-            if channel == "*" { listening.clear(); } else { listening.remove(&channel); }
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: "UNLISTEN".into() })
+            if channel == "*" {
+                listening.clear();
+            } else {
+                listening.remove(&channel);
+            }
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "UNLISTEN".into(),
+            })
         }
         Stmt::DeclareCursor(d) => {
             let result = execute_parsed(Stmt::Select(d.query), db, &[])?;
-            cursors.insert(d.name, CursorState { fields: result.fields, rows: result.rows, pos: 0 });
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: "DECLARE CURSOR".into() })
+            cursors.insert(
+                d.name,
+                CursorState {
+                    fields: result.fields,
+                    rows: result.rows,
+                    pos: 0,
+                },
+            );
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "DECLARE CURSOR".into(),
+            })
         }
         Stmt::Fetch(f) => {
-            let cursor = cursors.get_mut(&f.cursor)
+            let cursor = cursors
+                .get_mut(&f.cursor)
                 .ok_or_else(|| anyhow::anyhow!("cursor \"{}\" does not exist", f.cursor))?;
             let n = fetch_count(&f.count, cursor);
             let end = (cursor.pos + n).min(cursor.rows.len());
@@ -397,20 +502,35 @@ fn execute_simple(
             cursor.pos = end;
             let fields = cursor.fields.clone();
             let count = rows.len();
-            Ok(QueryResult { fields, rows, tag: format!("FETCH {count}") })
+            Ok(QueryResult {
+                fields,
+                rows,
+                tag: format!("FETCH {count}"),
+            })
         }
         Stmt::MoveCursor(f) => {
-            let cursor = cursors.get_mut(&f.cursor)
+            let cursor = cursors
+                .get_mut(&f.cursor)
                 .ok_or_else(|| anyhow::anyhow!("cursor \"{}\" does not exist", f.cursor))?;
             let n = fetch_count(&f.count, cursor);
             let end = (cursor.pos + n).min(cursor.rows.len());
             let moved = end - cursor.pos;
             cursor.pos = end;
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: format!("MOVE {moved}") })
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: format!("MOVE {moved}"),
+            })
         }
         Stmt::CloseCursor(name) => {
-            cursors.remove(&name).ok_or_else(|| anyhow::anyhow!("cursor \"{name}\" does not exist"))?;
-            Ok(QueryResult { fields: vec![], rows: vec![], tag: "CLOSE CURSOR".into() })
+            cursors
+                .remove(&name)
+                .ok_or_else(|| anyhow::anyhow!("cursor \"{name}\" does not exist"))?;
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "CLOSE CURSOR".into(),
+            })
         }
         other => execute_parsed(other, db, &[]),
     }
@@ -432,7 +552,9 @@ fn fetch_count(count: &FetchCount, cursor: &CursorState) -> usize {
 async fn handle_copy_in(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> anyhow::Result<()> {
     let schema = match db.get_table(&copy.table) {
         Ok(Some(s)) => s,
-        Ok(None) => return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await,
+        Ok(None) => {
+            return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await
+        }
         Err(e) => return copy_abort(conn, e.to_string()).await,
     };
     let target = match crate::executor::copy::target_columns(&schema, &copy.columns) {
@@ -440,7 +562,9 @@ async fn handle_copy_in(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> a
         Err(e) => return copy_abort(conn, e.to_string()).await,
     };
 
-    conn.send(&BackendMessage::CopyInResponse { columns: target.len() });
+    conn.send(&BackendMessage::CopyInResponse {
+        columns: target.len(),
+    });
     conn.flush().await?;
 
     let mut buf: Vec<u8> = Vec::new();
@@ -455,7 +579,13 @@ async fn handle_copy_in(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> a
                     let line = &line[..line.len().saturating_sub(1)]; // strip trailing '\n'
                     if failed.is_none() {
                         let text = String::from_utf8_lossy(line);
-                        match crate::executor::copy::insert_copy_line(&db, &copy.table, &schema, &target, &text) {
+                        match crate::executor::copy::insert_copy_line(
+                            &db,
+                            &copy.table,
+                            &schema,
+                            &target,
+                            &text,
+                        ) {
                             Ok(()) => row_count += 1,
                             Err(e) => failed = Some(e.to_string()),
                         }
@@ -473,7 +603,9 @@ async fn handle_copy_in(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> a
 
     match failed {
         Some(msg) => conn.send_error(ErrorInfo::new("22P04", msg)),
-        None => conn.send(&BackendMessage::CommandComplete(format!("COPY {row_count}"))),
+        None => conn.send(&BackendMessage::CommandComplete(format!(
+            "COPY {row_count}"
+        ))),
     }
     conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
     conn.flush().await?;
@@ -495,7 +627,9 @@ async fn copy_abort(conn: &mut Conn, message: String) -> anyhow::Result<()> {
 async fn handle_copy_out(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> anyhow::Result<()> {
     let schema = match db.get_table(&copy.table) {
         Ok(Some(s)) => s,
-        Ok(None) => return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await,
+        Ok(None) => {
+            return copy_abort(conn, format!("table \"{}\" does not exist", copy.table)).await
+        }
         Err(e) => return copy_abort(conn, e.to_string()).await,
     };
     let target = match crate::executor::copy::target_columns(&schema, &copy.columns) {
@@ -507,13 +641,19 @@ async fn handle_copy_out(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> 
         Err(e) => return copy_abort(conn, e.to_string()).await,
     };
 
-    conn.send(&BackendMessage::CopyOutResponse { columns: target.len() });
+    conn.send(&BackendMessage::CopyOutResponse {
+        columns: target.len(),
+    });
     let row_count = rows.len();
     for row in &rows {
-        conn.send(&BackendMessage::CopyData(crate::executor::copy::encode_copy_line(row)));
+        conn.send(&BackendMessage::CopyData(
+            crate::executor::copy::encode_copy_line(row),
+        ));
     }
     conn.send(&BackendMessage::CopyDone);
-    conn.send(&BackendMessage::CommandComplete(format!("COPY {row_count}")));
+    conn.send(&BackendMessage::CommandComplete(format!(
+        "COPY {row_count}"
+    )));
     conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
     conn.flush().await?;
     Ok(())
@@ -521,15 +661,17 @@ async fn handle_copy_out(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> 
 
 /// Send RowDescription (or NoData for non-SELECT / no-FROM statements) for
 /// a prepared statement or portal, ahead of Execute.
-fn send_row_description_for(conn: &mut Conn, stmt: &Stmt, db: &Arc<Database>) -> anyhow::Result<()> {
+fn send_row_description_for(
+    conn: &mut Conn,
+    stmt: &Stmt,
+    db: &Arc<Database>,
+) -> anyhow::Result<()> {
     match stmt {
-        Stmt::Select(select) => {
-            match describe_select(select, db.clone()) {
-                Ok(fields) if !fields.is_empty() => conn.send(&BackendMessage::RowDescription(fields)),
-                Ok(_) => conn.send(&BackendMessage::NoData),
-                Err(_) => conn.send(&BackendMessage::NoData),
-            }
-        }
+        Stmt::Select(select) => match describe_select(select, db.clone()) {
+            Ok(fields) if !fields.is_empty() => conn.send(&BackendMessage::RowDescription(fields)),
+            Ok(_) => conn.send(&BackendMessage::NoData),
+            Err(_) => conn.send(&BackendMessage::NoData),
+        },
         _ => conn.send(&BackendMessage::NoData),
     }
     Ok(())
@@ -562,14 +704,34 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
-    fn exec(sql: &str, db: Arc<Database>, cursors: &mut HashMap<String, CursorState>, listening: &mut HashSet<String>) -> anyhow::Result<QueryResult> {
+    fn exec(
+        sql: &str,
+        db: Arc<Database>,
+        cursors: &mut HashMap<String, CursorState>,
+        listening: &mut HashSet<String>,
+    ) -> anyhow::Result<QueryResult> {
         execute_simple(crate::sql::parse(sql).unwrap(), db, cursors, listening)
     }
 
@@ -578,16 +740,34 @@ mod tests {
         let (db, _b, _l) = test_db();
         db.create_table(
             "nums",
-            &[crate::storage::ColumnDef { name: "n".into(), col_type: crate::storage::ColumnType::Int4, nullable: false, default: None, is_pk: true }],
-        ).unwrap();
+            &[crate::storage::ColumnDef {
+                name: "n".into(),
+                col_type: crate::storage::ColumnType::Int4,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            }],
+        )
+        .unwrap();
         for i in 1..=5 {
-            execute_parsed(crate::sql::parse(&format!("INSERT INTO nums VALUES ({i})")).unwrap(), db.clone(), &[]).unwrap();
+            execute_parsed(
+                crate::sql::parse(&format!("INSERT INTO nums VALUES ({i})")).unwrap(),
+                db.clone(),
+                &[],
+            )
+            .unwrap();
         }
 
         let mut cursors = HashMap::new();
         let mut listening = HashSet::new();
 
-        let declared = exec("DECLARE c CURSOR FOR SELECT n FROM nums ORDER BY n", db.clone(), &mut cursors, &mut listening).unwrap();
+        let declared = exec(
+            "DECLARE c CURSOR FOR SELECT n FROM nums ORDER BY n",
+            db.clone(),
+            &mut cursors,
+            &mut listening,
+        )
+        .unwrap();
         assert_eq!(declared.tag, "DECLARE CURSOR");
         assert!(cursors.contains_key("c"));
 
@@ -632,7 +812,13 @@ mod tests {
 
         let mut cursors = HashMap::new();
         let mut listening = HashSet::new();
-        let result = exec("NOTIFY foo, 'hello'", db.clone(), &mut cursors, &mut listening).unwrap();
+        let result = exec(
+            "NOTIFY foo, 'hello'",
+            db.clone(),
+            &mut cursors,
+            &mut listening,
+        )
+        .unwrap();
         assert_eq!(result.tag, "NOTIFY");
 
         let (channel, payload) = rx.try_recv().unwrap();
@@ -640,4 +826,3 @@ mod tests {
         assert_eq!(payload, "hello");
     }
 }
-

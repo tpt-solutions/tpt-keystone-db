@@ -15,9 +15,23 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
     let local = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
     (db, bucket, local)
 }
 
@@ -73,11 +87,21 @@ async fn initialize_and_tools_list() {
     let (db, _b, _l) = test_db();
     let addr = spawn_mcp(db, None).await;
 
-    let (status, resp) = rpc(addr, None, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})).await;
+    let (status, resp) = rpc(
+        addr,
+        None,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(resp["result"]["serverInfo"]["name"], "tpt-keystone");
 
-    let (status, resp) = rpc(addr, None, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})).await;
+    let (status, resp) = rpc(
+        addr,
+        None,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    )
+    .await;
     assert_eq!(status, 200);
     let tools = resp["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 7);
@@ -89,8 +113,20 @@ async fn tables_columns_schema_reflect_created_table() {
     db.create_table(
         "widgets",
         &[
-            ColumnDef { name: "id".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true },
-            ColumnDef { name: "name".into(), col_type: ColumnType::Text, nullable: true, default: None, is_pk: false },
+            ColumnDef {
+                name: "id".into(),
+                col_type: ColumnType::Int4,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            },
+            ColumnDef {
+                name: "name".into(),
+                col_type: ColumnType::Text,
+                nullable: true,
+                default: None,
+                is_pk: false,
+            },
         ],
     )
     .unwrap();
@@ -104,7 +140,12 @@ async fn tables_columns_schema_reflect_created_table() {
     let tables: Vec<String> = serde_json::from_str(text).unwrap();
     assert_eq!(tables, vec!["widgets".to_string()]);
 
-    let (_status, resp) = rpc(addr, None, call_tool("columns", json!({"table": "widgets"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("columns", json!({"table": "widgets"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let columns: Json = serde_json::from_str(text).unwrap();
     assert_eq!(columns.as_array().unwrap().len(), 2);
@@ -115,10 +156,15 @@ async fn tables_columns_schema_reflect_created_table() {
     let schema: Json = serde_json::from_str(text).unwrap();
     assert_eq!(schema["tables"][0]["name"], "widgets");
     assert_eq!(schema["tables"][0]["row_count"], 3);
-    let name_histogram = schema["tables"][0]["histograms"]["name"].as_array().unwrap();
+    let name_histogram = schema["tables"][0]["histograms"]["name"]
+        .as_array()
+        .unwrap();
     assert_eq!(name_histogram[0]["value"], "a");
     assert_eq!(name_histogram[0]["count"], 2);
-    assert!(schema["relationship_graph"]["nodes"].as_array().unwrap().contains(&json!("widgets")));
+    assert!(schema["relationship_graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("widgets")));
 }
 
 #[tokio::test]
@@ -135,22 +181,37 @@ async fn related_walks_foreign_keys_in_both_directions() {
     )
     .unwrap();
     crate::executor::execute_query("INSERT INTO authors VALUES (1, 'Ada')", db.clone()).unwrap();
-    crate::executor::execute_query("INSERT INTO books VALUES (10, 'Notes', 1)", db.clone()).unwrap();
+    crate::executor::execute_query("INSERT INTO books VALUES (10, 'Notes', 1)", db.clone())
+        .unwrap();
     let addr = spawn_mcp(db, None).await;
 
     // From the book: outgoing FK to its author.
-    let (_status, resp) = rpc(addr, None, call_tool("related", json!({"table": "books", "id": "10"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("related", json!({"table": "books", "id": "10"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let result: Json = serde_json::from_str(text).unwrap();
     let facts = result["facts"].as_array().unwrap();
-    assert!(facts.iter().any(|f| f["direction"] == "outgoing" && f["object"] == "authors:1"));
+    assert!(facts
+        .iter()
+        .any(|f| f["direction"] == "outgoing" && f["object"] == "authors:1"));
 
     // From the author: incoming FK from the book.
-    let (_status, resp) = rpc(addr, None, call_tool("related", json!({"table": "authors", "id": "1"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("related", json!({"table": "authors", "id": "1"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let result: Json = serde_json::from_str(text).unwrap();
     let facts = result["facts"].as_array().unwrap();
-    assert!(facts.iter().any(|f| f["direction"] == "incoming" && f["subject"] == "books:10" && f["subject_label"] == "title=Notes"));
+    assert!(facts.iter().any(|f| f["direction"] == "incoming"
+        && f["subject"] == "books:10"
+        && f["subject_label"] == "title=Notes"));
 }
 
 #[tokio::test]
@@ -158,21 +219,40 @@ async fn query_executes_select_and_rejects_mutating_sql() {
     let (db, _b, _l) = test_db();
     db.create_table(
         "nums",
-        &[ColumnDef { name: "n".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true }],
+        &[ColumnDef {
+            name: "n".into(),
+            col_type: ColumnType::Int4,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
     )
     .unwrap();
     crate::executor::execute_query("INSERT INTO nums VALUES (1)", db.clone()).unwrap();
     crate::executor::execute_query("INSERT INTO nums VALUES (2)", db.clone()).unwrap();
     let addr = spawn_mcp(db, None).await;
 
-    let (_status, resp) = rpc(addr, None, call_tool("query", json!({"sql": "SELECT n FROM nums ORDER BY n"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("query", json!({"sql": "SELECT n FROM nums ORDER BY n"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let result: Json = serde_json::from_str(text).unwrap();
     assert_eq!(result["row_count"], 2);
     assert_eq!(result["rows"][0]["n"], "1");
 
-    let (_status, resp) = rpc(addr, None, call_tool("query", json!({"sql": "INSERT INTO nums VALUES (3)"}))).await;
-    assert!(resp.get("error").is_some(), "query() must reject non-read-only statements");
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("query", json!({"sql": "INSERT INTO nums VALUES (3)"})),
+    )
+    .await;
+    assert!(
+        resp.get("error").is_some(),
+        "query() must reject non-read-only statements"
+    );
 }
 
 #[tokio::test]
@@ -180,17 +260,33 @@ async fn mutate_runs_insert_and_explain_describes_shape() {
     let (db, _b, _l) = test_db();
     db.create_table(
         "nums",
-        &[ColumnDef { name: "n".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true }],
+        &[ColumnDef {
+            name: "n".into(),
+            col_type: ColumnType::Int4,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
     )
     .unwrap();
     let addr = spawn_mcp(db, None).await;
 
-    let (_status, resp) = rpc(addr, None, call_tool("mutate", json!({"sql": "INSERT INTO nums VALUES (1)"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("mutate", json!({"sql": "INSERT INTO nums VALUES (1)"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let result: Json = serde_json::from_str(text).unwrap();
     assert_eq!(result["rows_affected"], 1);
 
-    let (_status, resp) = rpc(addr, None, call_tool("explain", json!({"sql": "SELECT n FROM nums WHERE n > 0"}))).await;
+    let (_status, resp) = rpc(
+        addr,
+        None,
+        call_tool("explain", json!({"sql": "SELECT n FROM nums WHERE n > 0"})),
+    )
+    .await;
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let plan: Json = serde_json::from_str(text).unwrap();
     assert_eq!(plan["statement"], "select");

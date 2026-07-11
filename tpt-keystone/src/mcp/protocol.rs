@@ -48,9 +48,15 @@ pub fn dispatch(db: &Arc<Database>, body: &[u8]) -> Json {
 
 fn handle_tools_call(db: &Arc<Database>, id: Json, params: &Json) -> Json {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     match tools::call(db, name, &args) {
-        Ok(value) => success_response(id, json!({"content": [{"type": "text", "text": value.to_string()}]})),
+        Ok(value) => success_response(
+            id,
+            json!({"content": [{"type": "text", "text": value.to_string()}]}),
+        ),
         Err(e) => error_response(id, -32000, &e.to_string()),
     }
 }

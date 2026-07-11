@@ -96,14 +96,34 @@ impl Partition {
                 records.push_back(rec);
             }
         }
-        Ok(Self { path: path.to_path_buf(), records, next_offset, total_bytes, newest_ts })
+        Ok(Self {
+            path: path.to_path_buf(),
+            records,
+            next_offset,
+            total_bytes,
+            newest_ts,
+        })
     }
 
-    fn append(&mut self, key: Option<Vec<u8>>, value: Vec<u8>, timestamp_ms: i64, retention: RetentionPolicy) -> Result<u64> {
+    fn append(
+        &mut self,
+        key: Option<Vec<u8>>,
+        value: Vec<u8>,
+        timestamp_ms: i64,
+        retention: RetentionPolicy,
+    ) -> Result<u64> {
         let offset = self.next_offset;
-        let rec = FluxRecord { offset, key, value, timestamp_ms };
+        let rec = FluxRecord {
+            offset,
+            key,
+            value,
+            timestamp_ms,
+        };
         let encoded = bincode::serialize(&rec)?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;
         file.write_all(&encoded)?;
         self.next_offset += 1;
@@ -139,7 +159,12 @@ impl Partition {
     }
 
     fn poll(&self, from_offset: u64, max: usize) -> Vec<FluxRecord> {
-        self.records.iter().filter(|r| r.offset >= from_offset).take(max).cloned().collect()
+        self.records
+            .iter()
+            .filter(|r| r.offset >= from_offset)
+            .take(max)
+            .cloned()
+            .collect()
     }
 
     fn all(&self) -> Vec<FluxRecord> {
@@ -217,14 +242,31 @@ impl FluxLog {
         }
         let offsets_path = dir.join("offsets.log");
         let offsets = Self::read_offsets(&offsets_path)?;
-        Ok(Self { dir: dir.to_path_buf(), partitions, retention, offsets_path, offsets, rr_counter: 0 })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            partitions,
+            retention,
+            offsets_path,
+            offsets,
+            rr_counter: 0,
+        })
     }
 
     fn write_meta(dir: &Path, num_partitions: u32, retention: RetentionPolicy) -> Result<()> {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(dir.join("meta"))?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(dir.join("meta"))?;
         file.write_all(&num_partitions.to_be_bytes())?;
         file.write_all(&retention.retention_ms.unwrap_or(-1).to_be_bytes())?;
-        file.write_all(&retention.retention_bytes.map(|b| b as i64).unwrap_or(-1).to_be_bytes())?;
+        file.write_all(
+            &retention
+                .retention_bytes
+                .map(|b| b as i64)
+                .unwrap_or(-1)
+                .to_be_bytes(),
+        )?;
         Ok(())
     }
 
@@ -238,8 +280,16 @@ impl FluxLog {
         Ok((
             num_partitions,
             RetentionPolicy {
-                retention_ms: if retention_ms < 0 { None } else { Some(retention_ms) },
-                retention_bytes: if retention_bytes < 0 { None } else { Some(retention_bytes as u64) },
+                retention_ms: if retention_ms < 0 {
+                    None
+                } else {
+                    Some(retention_ms)
+                },
+                retention_bytes: if retention_bytes < 0 {
+                    None
+                } else {
+                    Some(retention_bytes as u64)
+                },
             },
         ))
     }
@@ -272,11 +322,19 @@ impl FluxLog {
 
     /// Publishes one record, returning `(partition, offset)`. See module
     /// docs for partition assignment when `partition` is `None`.
-    pub fn publish(&mut self, partition: Option<u32>, key: Option<Vec<u8>>, value: Vec<u8>) -> Result<(u32, u64)> {
+    pub fn publish(
+        &mut self,
+        partition: Option<u32>,
+        key: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<(u32, u64)> {
         let n = self.num_partitions();
         let target = match partition {
             Some(p) => {
-                anyhow::ensure!(p < n, "partition {p} out of range (topic has {n} partition(s))");
+                anyhow::ensure!(
+                    p < n,
+                    "partition {p} out of range (topic has {n} partition(s))"
+                );
                 p
             }
             None => match &key {
@@ -288,25 +346,43 @@ impl FluxLog {
                 }
             },
         };
-        let offset = self.partitions[target as usize].append(key, value, now_ms(), self.retention)?;
+        let offset =
+            self.partitions[target as usize].append(key, value, now_ms(), self.retention)?;
         Ok((target, offset))
     }
 
     /// Records at/after `group`'s tracked offset for `partition`, without
     /// advancing it. Defaults to offset 0 for a group never committed.
     pub fn poll(&self, group: &str, partition: u32, max: usize) -> Result<Vec<FluxRecord>> {
-        let p = self.partitions.get(partition as usize).ok_or_else(|| anyhow::anyhow!("partition {partition} does not exist"))?;
-        let from = self.offsets.get(&(group.to_string(), partition)).copied().unwrap_or(0);
+        let p = self
+            .partitions
+            .get(partition as usize)
+            .ok_or_else(|| anyhow::anyhow!("partition {partition} does not exist"))?;
+        let from = self
+            .offsets
+            .get(&(group.to_string(), partition))
+            .copied()
+            .unwrap_or(0);
         Ok(p.poll(from, max))
     }
 
     /// Advances `group`'s tracked offset for `partition` to `offset`,
     /// persisting the commit.
     pub fn commit(&mut self, group: &str, partition: u32, offset: u64) -> Result<()> {
-        anyhow::ensure!((partition as usize) < self.partitions.len(), "partition {partition} does not exist");
-        let commit = OffsetCommit { group: group.to_string(), partition, offset };
+        anyhow::ensure!(
+            (partition as usize) < self.partitions.len(),
+            "partition {partition} does not exist"
+        );
+        let commit = OffsetCommit {
+            group: group.to_string(),
+            partition,
+            offset,
+        };
         let encoded = bincode::serialize(&commit)?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.offsets_path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.offsets_path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;
         file.write_all(&encoded)?;
         self.offsets.insert((group.to_string(), partition), offset);
@@ -332,15 +408,20 @@ mod tests {
     use super::*;
 
     fn no_retention() -> RetentionPolicy {
-        RetentionPolicy { retention_ms: None, retention_bytes: None }
+        RetentionPolicy {
+            retention_ms: None,
+            retention_bytes: None,
+        }
     }
 
     #[test]
     fn publish_poll_commit_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = FluxLog::create(&dir.path().join("t"), 1, no_retention()).unwrap();
-        log.publish(None, Some(b"k1".to_vec()), b"v1".to_vec()).unwrap();
-        log.publish(None, Some(b"k1".to_vec()), b"v2".to_vec()).unwrap();
+        log.publish(None, Some(b"k1".to_vec()), b"v1".to_vec())
+            .unwrap();
+        log.publish(None, Some(b"k1".to_vec()), b"v2".to_vec())
+            .unwrap();
 
         let polled = log.poll("g1", 0, 10).unwrap();
         assert_eq!(polled.len(), 2);
@@ -357,8 +438,12 @@ mod tests {
     fn partition_hashing_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = FluxLog::create(&dir.path().join("t"), 4, no_retention()).unwrap();
-        let (p1, _) = log.publish(None, Some(b"same-key".to_vec()), b"a".to_vec()).unwrap();
-        let (p2, _) = log.publish(None, Some(b"same-key".to_vec()), b"b".to_vec()).unwrap();
+        let (p1, _) = log
+            .publish(None, Some(b"same-key".to_vec()), b"a".to_vec())
+            .unwrap();
+        let (p2, _) = log
+            .publish(None, Some(b"same-key".to_vec()), b"b".to_vec())
+            .unwrap();
         assert_eq!(p1, p2);
     }
 
@@ -384,7 +469,10 @@ mod tests {
     #[test]
     fn time_based_retention_evicts_old_records() {
         let dir = tempfile::tempdir().unwrap();
-        let retention = RetentionPolicy { retention_ms: Some(1000), retention_bytes: None };
+        let retention = RetentionPolicy {
+            retention_ms: Some(1000),
+            retention_bytes: None,
+        };
         let mut log = FluxLog::create(&dir.path().join("t"), 1, retention).unwrap();
         // Manually drive the partition with explicit timestamps by calling
         // through `Partition::append` isn't exposed publicly, so exercise
@@ -392,10 +480,20 @@ mod tests {
         // avoided by asserting on record count relative to a synthetic old
         // record injected directly into the log file before reopening.
         let p_path = log.dir().join("partition-0.log");
-        let old = FluxRecord { offset: 0, key: None, value: b"old".to_vec(), timestamp_ms: 0 };
+        let old = FluxRecord {
+            offset: 0,
+            key: None,
+            value: b"old".to_vec(),
+            timestamp_ms: 0,
+        };
         let encoded = bincode::serialize(&old).unwrap();
-        let mut file = OpenOptions::new().create(true).append(true).open(&p_path).unwrap();
-        file.write_all(&(encoded.len() as u32).to_be_bytes()).unwrap();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p_path)
+            .unwrap();
+        file.write_all(&(encoded.len() as u32).to_be_bytes())
+            .unwrap();
         file.write_all(&encoded).unwrap();
         drop(file);
         drop(log);
@@ -414,7 +512,10 @@ mod tests {
     #[test]
     fn size_based_retention_evicts_oldest_first() {
         let dir = tempfile::tempdir().unwrap();
-        let retention = RetentionPolicy { retention_ms: None, retention_bytes: Some(10) };
+        let retention = RetentionPolicy {
+            retention_ms: None,
+            retention_bytes: Some(10),
+        };
         let mut log = FluxLog::create(&dir.path().join("t"), 1, retention).unwrap();
         for i in 0..5 {
             log.publish(None, None, vec![i as u8; 4]).unwrap();

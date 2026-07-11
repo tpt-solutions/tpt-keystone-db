@@ -65,7 +65,13 @@ pub struct JsonPathIndex {
 
 impl JsonPathIndex {
     pub fn create(file_path: &Path, json_path: &str) -> Self {
-        Self { file_path: file_path.to_path_buf(), data: PathIndexData { json_path: json_path.to_string(), map: HashMap::new() } }
+        Self {
+            file_path: file_path.to_path_buf(),
+            data: PathIndexData {
+                json_path: json_path.to_string(),
+                map: HashMap::new(),
+            },
+        }
     }
 
     /// Open an existing index file, or fall back to an empty index keyed on
@@ -75,7 +81,10 @@ impl JsonPathIndex {
         if file_path.exists() {
             let bytes = std::fs::read(file_path)?;
             let data: PathIndexData = bincode::deserialize(&bytes)?;
-            Ok(Self { file_path: file_path.to_path_buf(), data })
+            Ok(Self {
+                file_path: file_path.to_path_buf(),
+                data,
+            })
         } else {
             Ok(Self::create(file_path, fallback_path))
         }
@@ -91,7 +100,9 @@ impl JsonPathIndex {
     /// via a full scan).
     pub fn insert(&mut self, row_key: &[u8], doc_text: &str) -> Result<()> {
         if let Ok(doc) = serde_json::from_str::<Value>(doc_text) {
-            if let Some(key_text) = extract_path(&doc, &self.data.json_path).and_then(scalar_key_text) {
+            if let Some(key_text) =
+                extract_path(&doc, &self.data.json_path).and_then(scalar_key_text)
+            {
                 let bucket = self.data.map.entry(key_text).or_default();
                 if !bucket.iter().any(|k| k == row_key) {
                     bucket.push(row_key.to_vec());
@@ -173,14 +184,20 @@ const BM25_B: f64 = 0.75;
 
 impl FtsIndex {
     pub fn create(file_path: &Path) -> Self {
-        Self { file_path: file_path.to_path_buf(), data: FtsIndexData::default() }
+        Self {
+            file_path: file_path.to_path_buf(),
+            data: FtsIndexData::default(),
+        }
     }
 
     pub fn open(file_path: &Path) -> Result<Self> {
         if file_path.exists() {
             let bytes = std::fs::read(file_path)?;
             let data: FtsIndexData = bincode::deserialize(&bytes)?;
-            Ok(Self { file_path: file_path.to_path_buf(), data })
+            Ok(Self {
+                file_path: file_path.to_path_buf(),
+                data,
+            })
         } else {
             Ok(Self::create(file_path))
         }
@@ -195,7 +212,9 @@ impl FtsIndex {
     pub fn insert(&mut self, row_key: &[u8], text: &str) -> Result<()> {
         self.remove(row_key);
         let tokens = tokenize(text);
-        self.data.doc_lengths.insert(row_key.to_vec(), tokens.len() as u32);
+        self.data
+            .doc_lengths
+            .insert(row_key.to_vec(), tokens.len() as u32);
         for token in tokens {
             let bucket = self.data.postings.entry(token).or_default();
             *bucket.entry(row_key.to_vec()).or_insert(0) += 1;
@@ -223,8 +242,12 @@ impl FtsIndex {
         }
         let mut iter = tokens.iter();
         let first = iter.next().unwrap();
-        let mut result: Vec<Vec<u8>> = self.data.postings.get(first)
-            .map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        let mut result: Vec<Vec<u8>> = self
+            .data
+            .postings
+            .get(first)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
         for token in iter {
             let bucket = self.data.postings.get(token);
             result.retain(|k| bucket.is_some_and(|b| b.contains_key(k)));
@@ -242,11 +265,19 @@ impl FtsIndex {
             return Vec::new();
         }
         let n = self.data.doc_lengths.len() as f64;
-        let avgdl = self.data.doc_lengths.values().map(|&l| l as f64).sum::<f64>() / n;
+        let avgdl = self
+            .data
+            .doc_lengths
+            .values()
+            .map(|&l| l as f64)
+            .sum::<f64>()
+            / n;
 
         let mut scores: HashMap<Vec<u8>, f64> = HashMap::new();
         for token in &tokens {
-            let Some(bucket) = self.data.postings.get(token) else { continue };
+            let Some(bucket) = self.data.postings.get(token) else {
+                continue;
+            };
             let n_t = bucket.len() as f64;
             // BM25 IDF (the "+1" form keeps it non-negative even when a term
             // appears in more than half the corpus).
@@ -279,7 +310,8 @@ mod tests {
 
     #[test]
     fn path_index_extracts_nested_scalar() {
-        let doc: Value = serde_json::from_str(r#"{"user":{"address":{"city":"Wellington"}}}"#).unwrap();
+        let doc: Value =
+            serde_json::from_str(r#"{"user":{"address":{"city":"Wellington"}}}"#).unwrap();
         let v = extract_path(&doc, "user.address.city").unwrap();
         assert_eq!(scalar_key_text(v).unwrap(), "Wellington");
     }
@@ -290,9 +322,12 @@ mod tests {
         let file = dir.path().join("docs_data.jsonpath");
         {
             let mut idx = JsonPathIndex::create(&file, "user.address.city");
-            idx.insert(b"row1", r#"{"user":{"address":{"city":"Wellington"}}}"#).unwrap();
-            idx.insert(b"row2", r#"{"user":{"address":{"city":"Auckland"}}}"#).unwrap();
-            idx.insert(b"row3", r#"{"user":{"address":{"city":"Wellington"}}}"#).unwrap();
+            idx.insert(b"row1", r#"{"user":{"address":{"city":"Wellington"}}}"#)
+                .unwrap();
+            idx.insert(b"row2", r#"{"user":{"address":{"city":"Auckland"}}}"#)
+                .unwrap();
+            idx.insert(b"row3", r#"{"user":{"address":{"city":"Wellington"}}}"#)
+                .unwrap();
         }
         let idx = JsonPathIndex::open(&file, "").unwrap();
         assert_eq!(idx.json_path(), "user.address.city");

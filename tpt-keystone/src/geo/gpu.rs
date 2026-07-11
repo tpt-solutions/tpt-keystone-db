@@ -46,7 +46,10 @@ fn gpu_disabled() -> bool {
 }
 
 fn max_pairs() -> u64 {
-    std::env::var(MAX_PAIRS_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_PAIRS)
+    std::env::var(MAX_PAIRS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_PAIRS)
 }
 
 /// A GPU-side axis-aligned bounding box, matching the WGSL `BBox` struct
@@ -120,7 +123,12 @@ fn init_gpu_context() -> Option<GpuContext> {
         );
         return None;
     }
-    tracing::info!("GPU spatial join: using adapter {} ({:?}, backend {:?})", info.name, info.device_type, info.backend);
+    tracing::info!(
+        "GPU spatial join: using adapter {} ({:?}, backend {:?})",
+        info.name,
+        info.device_type,
+        info.backend
+    );
 
     let device_result = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
@@ -165,12 +173,20 @@ fn init_gpu_context() -> Option<GpuContext> {
         tracing::warn!("GPU spatial join: uncaptured wgpu error, GPU path disabled for remainder of process: {e}");
     }));
 
-    Some(GpuContext { device, queue, bbox_overlap_pipeline, dwithin_pipeline, poisoned: AtomicBool::new(false) })
+    Some(GpuContext {
+        device,
+        queue,
+        bbox_overlap_pipeline,
+        dwithin_pipeline,
+        poisoned: AtomicBool::new(false),
+    })
 }
 
 fn gpu_context() -> Option<&'static GpuContext> {
     static CTX: OnceLock<Option<GpuContext>> = OnceLock::new();
-    CTX.get_or_init(init_gpu_context).as_ref().filter(|ctx| ctx.is_usable())
+    CTX.get_or_init(init_gpu_context)
+        .as_ref()
+        .filter(|ctx| ctx.is_usable())
 }
 
 /// Broad-phase GPU bbox-vs-bbox overlap test: for every `(i, j)` in
@@ -180,15 +196,33 @@ fn gpu_context() -> Option<&'static GpuContext> {
 /// (unavailable, disabled, batch too large, or a dispatch failure) — the
 /// caller must fall back to the CPU nested-loop join in that case.
 pub fn gpu_bbox_overlap_pairs(left: &[GpuBBox], right: &[GpuBBox]) -> Result<Vec<(u32, u32)>> {
-    run_pairwise(left, right, 0.0, |ctx| &ctx.bbox_overlap_pipeline, bindings::LEFT_BBOX, bindings::RIGHT_BBOX)
+    run_pairwise(
+        left,
+        right,
+        0.0,
+        |ctx| &ctx.bbox_overlap_pipeline,
+        bindings::LEFT_BBOX,
+        bindings::RIGHT_BBOX,
+    )
 }
 
 /// Broad-phase GPU point-radius test for `ST_DWithin` joins: `left`/`right`
 /// are representative (lon, lat) points; `radius_m` is the distance
 /// threshold in meters, tested via the same haversine formula as
 /// `geometry::haversine_distance_m` (ported to WGSL at `f32` precision).
-pub fn gpu_dwithin_pairs(left: &[GpuPoint], right: &[GpuPoint], radius_m: f32) -> Result<Vec<(u32, u32)>> {
-    run_pairwise(left, right, radius_m, |ctx| &ctx.dwithin_pipeline, bindings::LEFT_POINT, bindings::RIGHT_POINT)
+pub fn gpu_dwithin_pairs(
+    left: &[GpuPoint],
+    right: &[GpuPoint],
+    radius_m: f32,
+) -> Result<Vec<(u32, u32)>> {
+    run_pairwise(
+        left,
+        right,
+        radius_m,
+        |ctx| &ctx.dwithin_pipeline,
+        bindings::LEFT_POINT,
+        bindings::RIGHT_POINT,
+    )
 }
 
 fn run_pairwise<T: Pod>(
@@ -213,7 +247,10 @@ fn run_pairwise<T: Pod>(
         .checked_mul(right_len)
         .ok_or_else(|| anyhow!("GPU spatial join pair count overflowed"))?;
     if pair_count > max_pairs() {
-        bail!("GPU spatial join batch too large ({pair_count} pairs > {} cap)", max_pairs());
+        bail!(
+            "GPU spatial join batch too large ({pair_count} pairs > {} cap)",
+            max_pairs()
+        );
     }
 
     let device = &ctx.device;
@@ -229,7 +266,12 @@ fn run_pairwise<T: Pod>(
         contents: bytemuck::cast_slice(right),
         usage: wgpu::BufferUsages::STORAGE,
     });
-    let params = Params { left_len: left.len() as u32, right_len: right.len() as u32, radius_m, _pad: 0 };
+    let params = Params {
+        left_len: left.len() as u32,
+        right_len: right.len() as u32,
+        radius_m,
+        _pad: 0,
+    };
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("params"),
         contents: bytemuck::bytes_of(&params),
@@ -257,16 +299,33 @@ fn run_pairwise<T: Pod>(
         label: Some("spatial_join_bind_group"),
         layout: &bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: left_binding, resource: left_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: right_binding, resource: right_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: result_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: left_binding,
+                resource: left_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: right_binding,
+                resource: right_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: result_buf.as_entire_binding(),
+            },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spatial_join_encoder") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("spatial_join_encoder"),
+    });
     {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("spatial_join_pass"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("spatial_join_pass"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         let wg_x = left.len().div_ceil(8) as u32;
@@ -282,7 +341,9 @@ fn run_pairwise<T: Pod>(
         let _ = tx.send(res);
     });
     device.poll(wgpu::Maintain::Wait);
-    rx.recv().map_err(|e| anyhow!("GPU result readback channel closed: {e}"))?.map_err(|e| anyhow!("GPU result buffer map failed: {e}"))?;
+    rx.recv()
+        .map_err(|e| anyhow!("GPU result readback channel closed: {e}"))?
+        .map_err(|e| anyhow!("GPU result buffer map failed: {e}"))?;
 
     let data = slice.get_mapped_range();
     let flags: &[u32] = bytemuck::cast_slice(&data);
@@ -344,14 +405,44 @@ mod tests {
         }
         let _guard = GPU_ENV_TEST_LOCK.lock().unwrap();
         let left = [
-            GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 }, // overlaps right[0]
-            GpuBBox { min_x: 100.0, min_y: 100.0, max_x: 110.0, max_y: 110.0 }, // no overlap
-            GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 5.0, max_y: 5.0 }, // touches right[2] at the edge
+            GpuBBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            }, // overlaps right[0]
+            GpuBBox {
+                min_x: 100.0,
+                min_y: 100.0,
+                max_x: 110.0,
+                max_y: 110.0,
+            }, // no overlap
+            GpuBBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 5.0,
+                max_y: 5.0,
+            }, // touches right[2] at the edge
         ];
         let right = [
-            GpuBBox { min_x: 5.0, min_y: 5.0, max_x: 15.0, max_y: 15.0 },
-            GpuBBox { min_x: 200.0, min_y: 200.0, max_x: 210.0, max_y: 210.0 },
-            GpuBBox { min_x: 5.0, min_y: 5.0, max_x: 20.0, max_y: 20.0 },
+            GpuBBox {
+                min_x: 5.0,
+                min_y: 5.0,
+                max_x: 15.0,
+                max_y: 15.0,
+            },
+            GpuBBox {
+                min_x: 200.0,
+                min_y: 200.0,
+                max_x: 210.0,
+                max_y: 210.0,
+            },
+            GpuBBox {
+                min_x: 5.0,
+                min_y: 5.0,
+                max_x: 20.0,
+                max_y: 20.0,
+            },
         ];
         let mut got = gpu_bbox_overlap_pairs(&left, &right).expect("gpu bbox overlap");
         got.sort();
@@ -359,8 +450,18 @@ mod tests {
         let mut want = Vec::new();
         for (i, a) in left.iter().enumerate() {
             for (j, b) in right.iter().enumerate() {
-                let bbox_a = crate::geo::geometry::BBox { min_x: a.min_x as f64, min_y: a.min_y as f64, max_x: a.max_x as f64, max_y: a.max_y as f64 };
-                let bbox_b = crate::geo::geometry::BBox { min_x: b.min_x as f64, min_y: b.min_y as f64, max_x: b.max_x as f64, max_y: b.max_y as f64 };
+                let bbox_a = crate::geo::geometry::BBox {
+                    min_x: a.min_x as f64,
+                    min_y: a.min_y as f64,
+                    max_x: a.max_x as f64,
+                    max_y: a.max_y as f64,
+                };
+                let bbox_b = crate::geo::geometry::BBox {
+                    min_x: b.min_x as f64,
+                    min_y: b.min_y as f64,
+                    max_x: b.max_x as f64,
+                    max_y: b.max_y as f64,
+                };
                 if crate::geo::geometry::bbox_intersects(&bbox_a, &bbox_b) {
                     want.push((i as u32, j as u32));
                 }
@@ -377,8 +478,20 @@ mod tests {
         }
         let _guard = GPU_ENV_TEST_LOCK.lock().unwrap();
         // London, Paris, New York.
-        let left = [GpuPoint { x: -0.1276, y: 51.5074 }];
-        let right = [GpuPoint { x: 2.3522, y: 48.8566 }, GpuPoint { x: -74.0060, y: 40.7128 }];
+        let left = [GpuPoint {
+            x: -0.1276,
+            y: 51.5074,
+        }];
+        let right = [
+            GpuPoint {
+                x: 2.3522,
+                y: 48.8566,
+            },
+            GpuPoint {
+                x: -74.0060,
+                y: 40.7128,
+            },
+        ];
         let got = gpu_dwithin_pairs(&left, &right, 400_000.0).expect("gpu dwithin");
         // London-Paris ~344km (within 400km), London-NYC ~5570km (not within).
         assert_eq!(got, vec![(0, 0)]);
@@ -391,7 +504,12 @@ mod tests {
         }
         let _guard = GPU_ENV_TEST_LOCK.lock().unwrap();
         let left: [GpuBBox; 0] = [];
-        let right = [GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 }];
+        let right = [GpuBBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        }];
         assert!(gpu_bbox_overlap_pairs(&left, &right).unwrap().is_empty());
     }
 
@@ -402,7 +520,20 @@ mod tests {
         }
         let _guard = GPU_ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var(DISABLE_ENV, "1");
-        let result = gpu_bbox_overlap_pairs(&[GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 }], &[GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 }]);
+        let result = gpu_bbox_overlap_pairs(
+            &[GpuBBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            }],
+            &[GpuBBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            }],
+        );
         std::env::remove_var(DISABLE_ENV);
         assert!(result.is_err());
     }

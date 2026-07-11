@@ -31,7 +31,9 @@ use anyhow::Result;
 use crate::storage::database::Database;
 use crate::storage::ts_index::TimeBucketPolicy;
 use crate::storage::{ColumnType, StorageEngine};
-use crate::synapse::{cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell};
+use crate::synapse::{
+    cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell,
+};
 use crate::vector::hnsw::{HnswConfig, Metric};
 use crate::vector::vector::Vector;
 
@@ -102,7 +104,15 @@ impl MemoryStore {
             )?;
         }
         if !db.indexed_column_time(TABLE, "ts") {
-            db.create_time_index(TABLE, "ts", "seq", TimeBucketPolicy { granularity_ms: 3_600_000, retention_ms: None })?;
+            db.create_time_index(
+                TABLE,
+                "ts",
+                "seq",
+                TimeBucketPolicy {
+                    granularity_ms: 3_600_000,
+                    retention_ms: None,
+                },
+            )?;
         }
         if !db.indexed_column_vector(TABLE, "embedding") {
             db.create_vector_index(TABLE, "embedding", Metric::Cosine, HnswConfig::default())?;
@@ -110,7 +120,15 @@ impl MemoryStore {
         Ok(())
     }
 
-    fn insert(&self, agent_id: &str, tier: &str, key: Option<&str>, content: &str, embedding: Option<&[f32]>, expires_at: Option<i64>) -> Result<String> {
+    fn insert(
+        &self,
+        agent_id: &str,
+        tier: &str,
+        key: Option<&str>,
+        content: &str,
+        embedding: Option<&[f32]>,
+        expires_at: Option<i64>,
+    ) -> Result<String> {
         let id = new_id("mem");
         let seq = now_ms(); // monotonic enough for a single-node index; see module docs
         let cells = vec![
@@ -119,7 +137,10 @@ impl MemoryStore {
             text_cell(tier),
             key.map(text_cell).unwrap_or(None),
             text_cell(content),
-            embedding.map(|v| Vector(v.to_vec()).to_text()).map(text_cell).unwrap_or(None),
+            embedding
+                .map(|v| Vector(v.to_vec()).to_text())
+                .map(text_cell)
+                .unwrap_or(None),
             int_cell(seq),
             int_cell(now_ms()),
             expires_at.map(int_cell).unwrap_or(None),
@@ -131,12 +152,30 @@ impl MemoryStore {
     /// Short-term ("Keystone in-session") memory: durable in Keystone (not
     /// pure process memory, unlike `actor::AgentState::short_term`), but
     /// tagged with a TTL and swept by `gc`.
-    pub fn remember_short(&self, agent_id: &str, key: Option<&str>, content: &str, ttl_ms: i64) -> Result<String> {
-        self.insert(agent_id, "short", key, content, None, Some(now_ms() + ttl_ms))
+    pub fn remember_short(
+        &self,
+        agent_id: &str,
+        key: Option<&str>,
+        content: &str,
+        ttl_ms: i64,
+    ) -> Result<String> {
+        self.insert(
+            agent_id,
+            "short",
+            key,
+            content,
+            None,
+            Some(now_ms() + ttl_ms),
+        )
     }
 
     /// Long-term ("Keystone persistent") memory: no expiry, never GC'd.
-    pub fn remember_long(&self, agent_id: &str, key: Option<&str>, content: &str) -> Result<String> {
+    pub fn remember_long(
+        &self,
+        agent_id: &str,
+        key: Option<&str>,
+        content: &str,
+    ) -> Result<String> {
         self.insert(agent_id, "long", key, content, None, None)
     }
 
@@ -150,7 +189,12 @@ impl MemoryStore {
     /// same agent's existing semantic memories: if an existing entry's
     /// embedding is within `DEDUP_THRESHOLD` cosine distance, its id is
     /// returned instead of inserting a near-duplicate.
-    pub fn remember_semantic(&self, agent_id: &str, content: &str, embedding: &[f32]) -> Result<String> {
+    pub fn remember_semantic(
+        &self,
+        agent_id: &str,
+        content: &str,
+        embedding: &[f32],
+    ) -> Result<String> {
         if let Some(existing) = self.find_near_duplicate(agent_id, embedding)? {
             return Ok(existing);
         }
@@ -158,7 +202,12 @@ impl MemoryStore {
     }
 
     fn find_near_duplicate(&self, agent_id: &str, embedding: &[f32]) -> Result<Option<String>> {
-        let Some(hits) = self.db.vector_knn_query(TABLE, "embedding", embedding, 8, None) else { return Ok(None) };
+        let Some(hits) = self
+            .db
+            .vector_knn_query(TABLE, "embedding", embedding, 8, None)
+        else {
+            return Ok(None);
+        };
         for (kv, dist) in hits {
             if dist > DEDUP_THRESHOLD {
                 continue;
@@ -173,7 +222,10 @@ impl MemoryStore {
     }
 
     pub fn recall_long(&self, agent_id: &str, key: &str) -> Result<Option<String>> {
-        let mut matches: Vec<MemoryEntry> = self.db.scan(TABLE)?.into_iter()
+        let mut matches: Vec<MemoryEntry> = self
+            .db
+            .scan(TABLE)?
+            .into_iter()
             .filter_map(|kv| decode_entry(&kv.value))
             .filter(|e| e.tier == "long" && e.agent_id == agent_id && e.key.as_deref() == Some(key))
             .collect();
@@ -185,8 +237,11 @@ impl MemoryStore {
     /// answered via the Chronos time-index range scan rather than a table
     /// scan, oldest first.
     pub fn recall_episodic(&self, agent_id: &str, t0: i64, t1: i64) -> Result<Vec<MemoryEntry>> {
-        let Some(rows) = self.db.time_range_query(TABLE, "ts", t0, t1) else { return Ok(Vec::new()) };
-        let mut out: Vec<MemoryEntry> = rows.into_iter()
+        let Some(rows) = self.db.time_range_query(TABLE, "ts", t0, t1) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<MemoryEntry> = rows
+            .into_iter()
             .filter_map(|kv| decode_entry(&kv.value))
             .filter(|e| e.tier == "episodic" && e.agent_id == agent_id)
             .collect();
@@ -200,9 +255,20 @@ impl MemoryStore {
     /// documented scope cut: at large multi-tenant scale this would need a
     /// per-agent-partitioned index to stay both correct and cheap; fine for
     /// the single-node scale everything else in this codebase targets.
-    pub fn recall_semantic(&self, agent_id: &str, query: &[f32], k: usize) -> Result<Vec<(MemoryEntry, f32)>> {
-        let Some(hits) = self.db.vector_knn_query(TABLE, "embedding", query, k.saturating_mul(4).max(k), None) else { return Ok(Vec::new()) };
-        let mut out: Vec<(MemoryEntry, f32)> = hits.into_iter()
+    pub fn recall_semantic(
+        &self,
+        agent_id: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        let Some(hits) =
+            self.db
+                .vector_knn_query(TABLE, "embedding", query, k.saturating_mul(4).max(k), None)
+        else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<(MemoryEntry, f32)> = hits
+            .into_iter()
             .filter_map(|(kv, dist)| decode_entry(&kv.value).map(|e| (e, dist)))
             .filter(|(e, _)| e.tier == "semantic" && e.agent_id == agent_id)
             .collect();
@@ -245,10 +311,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -258,8 +339,12 @@ mod tests {
         let mem = MemoryStore::new(db).unwrap();
         mem.remember_long("agent1", Some("name"), "Alice").unwrap();
         std::thread::sleep(Duration::from_millis(2));
-        mem.remember_long("agent1", Some("name"), "Alice Smith").unwrap();
-        assert_eq!(mem.recall_long("agent1", "name").unwrap(), Some("Alice Smith".to_string()));
+        mem.remember_long("agent1", Some("name"), "Alice Smith")
+            .unwrap();
+        assert_eq!(
+            mem.recall_long("agent1", "name").unwrap(),
+            Some("Alice Smith".to_string())
+        );
     }
 
     #[test]
@@ -267,7 +352,8 @@ mod tests {
         let (db, _b, _l) = test_db();
         let mem = MemoryStore::new(db).unwrap();
         mem.remember_short("agent1", None, "ephemeral", -1).unwrap(); // already expired
-        mem.remember_short("agent1", None, "still fresh", 60_000).unwrap();
+        mem.remember_short("agent1", None, "still fresh", 60_000)
+            .unwrap();
         let deleted = mem.gc().unwrap();
         assert_eq!(deleted, 1);
     }
@@ -280,17 +366,28 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         mem.remember_episodic("agent1", "event-2").unwrap();
         let events = mem.recall_episodic("agent1", 0, now_ms() + 60_000).unwrap();
-        assert_eq!(events.iter().map(|e| e.content.clone()).collect::<Vec<_>>(), vec!["event-1", "event-2"]);
+        assert_eq!(
+            events.iter().map(|e| e.content.clone()).collect::<Vec<_>>(),
+            vec!["event-1", "event-2"]
+        );
     }
 
     #[test]
     fn semantic_recall_ranks_nearest_first_and_dedups_near_identical() {
         let (db, _b, _l) = test_db();
         let mem = MemoryStore::new(db).unwrap();
-        let id1 = mem.remember_semantic("agent1", "cats are great", &[1.0, 0.0, 0.0]).unwrap();
-        let id2 = mem.remember_semantic("agent1", "cats are great (paraphrase)", &[1.0, 0.0001, 0.0]).unwrap();
-        assert_eq!(id1, id2, "near-identical embedding should dedup to the same entry");
-        mem.remember_semantic("agent1", "dogs are great", &[0.0, 1.0, 0.0]).unwrap();
+        let id1 = mem
+            .remember_semantic("agent1", "cats are great", &[1.0, 0.0, 0.0])
+            .unwrap();
+        let id2 = mem
+            .remember_semantic("agent1", "cats are great (paraphrase)", &[1.0, 0.0001, 0.0])
+            .unwrap();
+        assert_eq!(
+            id1, id2,
+            "near-identical embedding should dedup to the same entry"
+        );
+        mem.remember_semantic("agent1", "dogs are great", &[0.0, 1.0, 0.0])
+            .unwrap();
 
         let hits = mem.recall_semantic("agent1", &[1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(hits.len(), 2);
@@ -301,8 +398,10 @@ mod tests {
     fn semantic_recall_is_scoped_to_the_requesting_agent() {
         let (db, _b, _l) = test_db();
         let mem = MemoryStore::new(db).unwrap();
-        mem.remember_semantic("agent1", "agent1 memory", &[1.0, 0.0]).unwrap();
-        mem.remember_semantic("agent2", "agent2 memory", &[1.0, 0.0]).unwrap();
+        mem.remember_semantic("agent1", "agent1 memory", &[1.0, 0.0])
+            .unwrap();
+        mem.remember_semantic("agent2", "agent2 memory", &[1.0, 0.0])
+            .unwrap();
         let hits = mem.recall_semantic("agent1", &[1.0, 0.0], 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0.agent_id, "agent1");

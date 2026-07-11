@@ -25,7 +25,12 @@ pub struct Coord {
 
 impl Coord {
     pub fn xy(x: f64, y: f64) -> Self {
-        Self { x, y, z: None, t: None }
+        Self {
+            x,
+            y,
+            z: None,
+            t: None,
+        }
     }
 }
 
@@ -48,7 +53,12 @@ pub struct BBox {
 
 impl Geometry {
     pub fn bbox(&self) -> BBox {
-        let mut b = BBox { min_x: f64::INFINITY, min_y: f64::INFINITY, max_x: f64::NEG_INFINITY, max_y: f64::NEG_INFINITY };
+        let mut b = BBox {
+            min_x: f64::INFINITY,
+            min_y: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
+        };
         let mut acc = |c: &Coord| {
             b.min_x = b.min_x.min(c.x);
             b.min_y = b.min_y.min(c.y);
@@ -75,7 +85,9 @@ impl Geometry {
                 if ring.is_empty() {
                     return Coord::xy(0.0, 0.0);
                 }
-                let (sx, sy) = ring.iter().fold((0.0, 0.0), |(sx, sy), c| (sx + c.x, sy + c.y));
+                let (sx, sy) = ring
+                    .iter()
+                    .fold((0.0, 0.0), |(sx, sy), c| (sx + c.x, sy + c.y));
                 Coord::xy(sx / ring.len() as f64, sy / ring.len() as f64)
             }
         }
@@ -101,7 +113,11 @@ impl Geometry {
             }
         }
         match self {
-            Geometry::Point(c) => format!("POINT{}({})", tag(c.z.is_some(), c.t.is_some()), coord_str(c)),
+            Geometry::Point(c) => format!(
+                "POINT{}({})",
+                tag(c.z.is_some(), c.t.is_some()),
+                coord_str(c)
+            ),
             Geometry::LineString(pts) => {
                 let has_z = pts.iter().any(|c| c.z.is_some());
                 let has_t = pts.iter().any(|c| c.t.is_some());
@@ -113,7 +129,12 @@ impl Geometry {
                 let has_t = rings.iter().flatten().any(|c| c.t.is_some());
                 let body = rings
                     .iter()
-                    .map(|r| format!("({})", r.iter().map(coord_str).collect::<Vec<_>>().join(", ")))
+                    .map(|r| {
+                        format!(
+                            "({})",
+                            r.iter().map(coord_str).collect::<Vec<_>>().join(", ")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("POLYGON{}({})", tag(has_z, has_t), body)
@@ -126,7 +147,10 @@ impl Geometry {
         let upper = s.to_uppercase();
         if let Some(rest) = strip_tag(&upper, s, "POINT") {
             let coords = parse_coord_list(rest)?;
-            let c = coords.into_iter().next().ok_or_else(|| anyhow::anyhow!("POINT with no coordinate"))?;
+            let c = coords
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("POINT with no coordinate"))?;
             return Ok(Geometry::Point(c));
         }
         if let Some(rest) = strip_tag(&upper, s, "LINESTRING") {
@@ -135,10 +159,16 @@ impl Geometry {
         }
         if let Some(rest) = strip_tag(&upper, s, "POLYGON") {
             let rest = rest.trim();
-            let inner = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')).unwrap_or(rest);
+            let inner = rest
+                .strip_prefix('(')
+                .and_then(|r| r.strip_suffix(')'))
+                .unwrap_or(rest);
             let mut rings = Vec::new();
             for ring_src in split_top_level(inner) {
-                let ring_src = ring_src.trim().trim_start_matches('(').trim_end_matches(')');
+                let ring_src = ring_src
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')');
                 rings.push(parse_coord_list_body(ring_src)?);
             }
             return Ok(Geometry::Polygon(rings));
@@ -161,7 +191,11 @@ fn strip_tag<'a>(upper: &str, orig: &'a str, tag: &str) -> Option<&'a str> {
     // Reject if there's a longer identifier prefix (e.g. "POINTY" shouldn't
     // match "POINT") by requiring only whitespace/Z/M letters before '('.
     let between = after_tag_upper[..paren].trim();
-    if !between.is_empty() && !between.chars().all(|c| c == 'Z' || c == 'M' || c.is_whitespace()) {
+    if !between.is_empty()
+        && !between
+            .chars()
+            .all(|c| c == 'Z' || c == 'M' || c.is_whitespace())
+    {
         return None;
     }
     Some(&after_tag[paren..])
@@ -182,12 +216,30 @@ fn parse_coord_list_body(inner: &str) -> Result<Vec<Coord>> {
         .map(|part| {
             let nums: Vec<f64> = part
                 .split_whitespace()
-                .map(|n| n.parse::<f64>().map_err(|e| anyhow::anyhow!("bad coordinate number {n:?}: {e}")))
+                .map(|n| {
+                    n.parse::<f64>()
+                        .map_err(|e| anyhow::anyhow!("bad coordinate number {n:?}: {e}"))
+                })
                 .collect::<Result<_>>()?;
             match nums.len() {
-                2 => Ok(Coord { x: nums[0], y: nums[1], z: None, t: None }),
-                3 => Ok(Coord { x: nums[0], y: nums[1], z: Some(nums[2]), t: None }),
-                4 => Ok(Coord { x: nums[0], y: nums[1], z: Some(nums[2]), t: Some(nums[3] as i64) }),
+                2 => Ok(Coord {
+                    x: nums[0],
+                    y: nums[1],
+                    z: None,
+                    t: None,
+                }),
+                3 => Ok(Coord {
+                    x: nums[0],
+                    y: nums[1],
+                    z: Some(nums[2]),
+                    t: None,
+                }),
+                4 => Ok(Coord {
+                    x: nums[0],
+                    y: nums[1],
+                    z: Some(nums[2]),
+                    t: Some(nums[3] as i64),
+                }),
                 n => bail!("expected 2-4 ordinates per coordinate, got {n}"),
             }
         })
@@ -281,7 +333,9 @@ mod tests {
     #[test]
     fn polygon_and_pip() {
         let g = Geometry::from_wkt("POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))").unwrap();
-        let Geometry::Polygon(rings) = &g else { panic!() };
+        let Geometry::Polygon(rings) = &g else {
+            panic!()
+        };
         assert!(point_in_polygon(5.0, 5.0, &rings[0]));
         assert!(!point_in_polygon(50.0, 50.0, &rings[0]));
     }

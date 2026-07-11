@@ -49,7 +49,11 @@ impl GeoIndex {
     /// later open uses the same bucketing.
     pub fn open(path: &Path, default_level: u8) -> Result<Self> {
         if !path.exists() {
-            let idx = Self { path: path.to_path_buf(), level: default_level, cells: HashMap::new() };
+            let idx = Self {
+                path: path.to_path_buf(),
+                level: default_level,
+                cells: HashMap::new(),
+            };
             idx.write_header()?;
             return Ok(idx);
         }
@@ -72,11 +76,19 @@ impl GeoIndex {
             let cell = s2::cell_id_for_point(entry.lon, entry.lat, level);
             cells.entry(cell).or_default().push(entry);
         }
-        Ok(Self { path: path.to_path_buf(), level, cells })
+        Ok(Self {
+            path: path.to_path_buf(),
+            level,
+            cells,
+        })
     }
 
     fn write_header(&self) -> Result<()> {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
         file.write_all(&[self.level])?;
         Ok(())
     }
@@ -88,7 +100,12 @@ impl GeoIndex {
     /// Indexes one row's geometry value. Appends to the on-disk log and
     /// updates the in-memory bucket map.
     pub fn insert(&mut self, row_key: &[u8], lon: f64, lat: f64, time: Option<i64>) -> Result<()> {
-        let entry = GeoEntry { row_key: row_key.to_vec(), lon, lat, time };
+        let entry = GeoEntry {
+            row_key: row_key.to_vec(),
+            lon,
+            lat,
+            time,
+        };
         let encoded = bincode::serialize(&entry)?;
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;
@@ -111,9 +128,13 @@ impl GeoIndex {
     ) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         for cell in s2::neighborhood(center_lon, center_lat, self.level) {
-            let Some(entries) = self.cells.get(&cell) else { continue };
+            let Some(entries) = self.cells.get(&cell) else {
+                continue;
+            };
             for e in entries {
-                let dist = crate::geo::geometry::haversine_distance_m(center_lon, center_lat, e.lon, e.lat);
+                let dist = crate::geo::geometry::haversine_distance_m(
+                    center_lon, center_lat, e.lon, e.lat,
+                );
                 if dist > radius_m {
                     continue;
                 }

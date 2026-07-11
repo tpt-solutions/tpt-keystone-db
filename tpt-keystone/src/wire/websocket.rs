@@ -171,7 +171,9 @@ async fn read_frame(stream: &mut TcpStream) -> anyhow::Result<Option<Frame>> {
         }
     }
     match opcode {
-        0x1 => Ok(Some(Frame::Text(String::from_utf8_lossy(&payload).into_owned()))),
+        0x1 => Ok(Some(Frame::Text(
+            String::from_utf8_lossy(&payload).into_owned(),
+        ))),
         0x8 => Ok(Some(Frame::Close)),
         _ => Ok(Some(Frame::Ignored)),
     }

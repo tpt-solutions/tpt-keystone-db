@@ -91,7 +91,11 @@ pub fn cell_center(id: CellId) -> (f64, f64) {
     let (res, q, r) = unpack(id);
     let (x, y) = axial_to_pixel(q, r, hex_size(res));
     let lat = y;
-    let lon = if lat.to_radians().cos().abs() > 1e-9 { x / lat.to_radians().cos() } else { x };
+    let lon = if lat.to_radians().cos().abs() > 1e-9 {
+        x / lat.to_radians().cos()
+    } else {
+        x
+    };
     (lon, lat)
 }
 
@@ -100,7 +104,10 @@ const AXIAL_DIRS: [(i64, i64); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1),
 /// The 6 edge-adjacent neighbors of `id` at the same resolution.
 pub fn neighbors(id: CellId) -> Vec<CellId> {
     let (res, q, r) = unpack(id);
-    AXIAL_DIRS.iter().map(|(dq, dr)| pack(res, q + dq, r + dr)).collect()
+    AXIAL_DIRS
+        .iter()
+        .map(|(dq, dr)| pack(res, q + dq, r + dr))
+        .collect()
 }
 
 /// All cells within `k` hex-steps of `id` (inclusive of `id` itself), i.e.

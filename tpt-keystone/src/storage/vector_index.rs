@@ -79,7 +79,12 @@ impl VectorIndex {
         let m0 = u32::from_be_bytes(header[5..9].try_into().unwrap()) as usize;
         let ef_construction = u32::from_be_bytes(header[9..13].try_into().unwrap()) as usize;
         let ef_search = u32::from_be_bytes(header[13..17].try_into().unwrap()) as usize;
-        let config = HnswConfig { m, m0, ef_construction, ef_search };
+        let config = HnswConfig {
+            m,
+            m0,
+            ef_construction,
+            ef_search,
+        };
 
         let mut hnsw = HnswIndex::new(metric, config);
         let mut row_keys = Vec::new();
@@ -98,11 +103,21 @@ impl VectorIndex {
             row_keys.push(entry.row_key);
         }
 
-        Ok(Self { path: path.to_path_buf(), metric, config, hnsw, row_keys })
+        Ok(Self {
+            path: path.to_path_buf(),
+            metric,
+            config,
+            hnsw,
+            row_keys,
+        })
     }
 
     fn write_header(&self) -> Result<()> {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
         let mut header = Vec::with_capacity(17);
         header.push(metric_to_u8(self.metric));
         header.extend_from_slice(&(self.config.m as u32).to_be_bytes());
@@ -132,7 +147,10 @@ impl VectorIndex {
     /// Indexes one row's vector value. Appends to the on-disk log and
     /// inserts into the in-memory HNSW graph.
     pub fn insert(&mut self, row_key: &[u8], vector: Vec<f32>) -> Result<()> {
-        let entry = VectorEntry { row_key: row_key.to_vec(), vector: vector.clone() };
+        let entry = VectorEntry {
+            row_key: row_key.to_vec(),
+            vector: vector.clone(),
+        };
         let encoded = bincode::serialize(&entry)?;
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;
@@ -145,7 +163,12 @@ impl VectorIndex {
 
     /// Approximate k-nearest-neighbor search. Returns `(row_key, distance)`
     /// pairs sorted nearest-first, length `<= k`.
-    pub fn query_knn(&self, query: &[f32], k: usize, ef_search: Option<usize>) -> Vec<(Vec<u8>, f32)> {
+    pub fn query_knn(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Vec<(Vec<u8>, f32)> {
         self.hnsw
             .search(query, k, ef_search)
             .into_iter()

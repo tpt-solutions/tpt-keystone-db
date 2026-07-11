@@ -16,9 +16,23 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
     let local = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
     (db, bucket, local)
 }
 
@@ -32,9 +46,14 @@ fn insert_with_column_list_fills_correct_columns_and_defaults() {
     execute_query(
         "CREATE TABLE people (id int8 PRIMARY KEY, name text, active bool DEFAULT true)",
         db.clone(),
-    ).unwrap();
+    )
+    .unwrap();
 
-    execute_query("INSERT INTO people (id, name) VALUES (1, 'Alice')", db.clone()).unwrap();
+    execute_query(
+        "INSERT INTO people (id, name) VALUES (1, 'Alice')",
+        db.clone(),
+    )
+    .unwrap();
     let result = execute_query("SELECT id, name, active FROM people", db.clone()).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(cell_text(&result.rows[0][0]), "1");
@@ -45,7 +64,11 @@ fn insert_with_column_list_fills_correct_columns_and_defaults() {
 #[test]
 fn insert_missing_not_null_column_without_default_errors() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE t (id int8 PRIMARY KEY, name text NOT NULL)", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE t (id int8 PRIMARY KEY, name text NOT NULL)",
+        db.clone(),
+    )
+    .unwrap();
     assert!(execute_query("INSERT INTO t (id) VALUES (1)", db.clone()).is_err());
 }
 
@@ -70,7 +93,11 @@ fn sequence_nextval_currval_setval() {
 #[test]
 fn serial_primary_key_auto_increments() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE items (id SERIAL PRIMARY KEY, name text)", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE items (id SERIAL PRIMARY KEY, name text)",
+        db.clone(),
+    )
+    .unwrap();
     execute_query("INSERT INTO items (name) VALUES ('a')", db.clone()).unwrap();
     execute_query("INSERT INTO items (name) VALUES ('b')", db.clone()).unwrap();
 
@@ -83,9 +110,21 @@ fn serial_primary_key_auto_increments() {
 #[test]
 fn unique_constraint_rejects_duplicate() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE u (id int8 PRIMARY KEY, email text UNIQUE)", db.clone()).unwrap();
-    execute_query("INSERT INTO u (id, email) VALUES (1, 'a@x.com')", db.clone()).unwrap();
-    assert!(execute_query("INSERT INTO u (id, email) VALUES (2, 'a@x.com')", db.clone()).is_err());
+    execute_query(
+        "CREATE TABLE u (id int8 PRIMARY KEY, email text UNIQUE)",
+        db.clone(),
+    )
+    .unwrap();
+    execute_query(
+        "INSERT INTO u (id, email) VALUES (1, 'a@x.com')",
+        db.clone(),
+    )
+    .unwrap();
+    assert!(execute_query(
+        "INSERT INTO u (id, email) VALUES (2, 'a@x.com')",
+        db.clone()
+    )
+    .is_err());
     // A second NULL is fine — NULLs don't participate in uniqueness.
     execute_query("INSERT INTO u (id) VALUES (3)", db.clone()).unwrap();
     execute_query("INSERT INTO u (id) VALUES (4)", db.clone()).unwrap();
@@ -98,14 +137,23 @@ fn foreign_key_enforces_referential_integrity() {
     execute_query(
         "CREATE TABLE child (id int8 PRIMARY KEY, parent_id int8 REFERENCES parent(id))",
         db.clone(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // No matching parent row: rejected.
-    assert!(execute_query("INSERT INTO child (id, parent_id) VALUES (1, 99)", db.clone()).is_err());
+    assert!(execute_query(
+        "INSERT INTO child (id, parent_id) VALUES (1, 99)",
+        db.clone()
+    )
+    .is_err());
 
     // Matching parent row: accepted.
     execute_query("INSERT INTO parent (id) VALUES (99)", db.clone()).unwrap();
-    execute_query("INSERT INTO child (id, parent_id) VALUES (1, 99)", db.clone()).unwrap();
+    execute_query(
+        "INSERT INTO child (id, parent_id) VALUES (1, 99)",
+        db.clone(),
+    )
+    .unwrap();
 
     // NULL FK value is exempt.
     execute_query("INSERT INTO child (id) VALUES (2)", db.clone()).unwrap();
@@ -121,9 +169,21 @@ fn table_level_unique_and_foreign_key_constraints() {
         db.clone(),
     ).unwrap();
 
-    execute_query("INSERT INTO child (id, parent_id) VALUES (1, 1)", db.clone()).unwrap();
-    assert!(execute_query("INSERT INTO child (id, parent_id) VALUES (1, 1)", db.clone()).is_err());
-    assert!(execute_query("INSERT INTO child (id, parent_id) VALUES (2, 5)", db.clone()).is_err());
+    execute_query(
+        "INSERT INTO child (id, parent_id) VALUES (1, 1)",
+        db.clone(),
+    )
+    .unwrap();
+    assert!(execute_query(
+        "INSERT INTO child (id, parent_id) VALUES (1, 1)",
+        db.clone()
+    )
+    .is_err());
+    assert!(execute_query(
+        "INSERT INTO child (id, parent_id) VALUES (2, 5)",
+        db.clone()
+    )
+    .is_err());
 }
 
 #[test]
@@ -136,13 +196,15 @@ fn pg_constraint_and_pg_sequence_reflect_created_objects() {
     ).unwrap();
     execute_query("CREATE SEQUENCE my_seq START WITH 5", db.clone()).unwrap();
 
-    let constraints = execute_query("SELECT contype FROM pg_catalog.pg_constraint", db.clone()).unwrap();
+    let constraints =
+        execute_query("SELECT contype FROM pg_catalog.pg_constraint", db.clone()).unwrap();
     let types: Vec<String> = constraints.rows.iter().map(|r| cell_text(&r[0])).collect();
     assert!(types.contains(&"p".to_string()));
     assert!(types.contains(&"u".to_string()));
     assert!(types.contains(&"f".to_string()));
 
-    let sequences = execute_query("SELECT seqname FROM pg_catalog.pg_sequence", db.clone()).unwrap();
+    let sequences =
+        execute_query("SELECT seqname FROM pg_catalog.pg_sequence", db.clone()).unwrap();
     let names: Vec<String> = sequences.rows.iter().map(|r| cell_text(&r[0])).collect();
     assert!(names.contains(&"my_seq".to_string()));
 }
@@ -150,8 +212,16 @@ fn pg_constraint_and_pg_sequence_reflect_created_objects() {
 #[test]
 fn alter_table_set_default_applies_to_future_inserts() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE t (id int8 PRIMARY KEY, status text)", db.clone()).unwrap();
-    execute_query("ALTER TABLE t ALTER COLUMN status SET DEFAULT 'pending'", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE t (id int8 PRIMARY KEY, status text)",
+        db.clone(),
+    )
+    .unwrap();
+    execute_query(
+        "ALTER TABLE t ALTER COLUMN status SET DEFAULT 'pending'",
+        db.clone(),
+    )
+    .unwrap();
     execute_query("INSERT INTO t (id) VALUES (1)", db.clone()).unwrap();
     let result = execute_query("SELECT status FROM t", db.clone()).unwrap();
     assert_eq!(cell_text(&result.rows[0][0]), "pending");
@@ -168,7 +238,11 @@ fn regclass_cast_passes_through_as_text() {
 #[test]
 fn schema_qualified_ddl_and_dml_names_strip_public_prefix() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE public.widgets (id int8 PRIMARY KEY)", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE public.widgets (id int8 PRIMARY KEY)",
+        db.clone(),
+    )
+    .unwrap();
     execute_query("INSERT INTO public.widgets (id) VALUES (1)", db.clone()).unwrap();
     let result = execute_query("SELECT id FROM widgets", db.clone()).unwrap();
     assert_eq!(result.rows.len(), 1);

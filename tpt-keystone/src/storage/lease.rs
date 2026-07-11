@@ -24,7 +24,10 @@ struct Lease {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 /// Cheap, shareable view of the lease's current validity/token, read by the
@@ -55,7 +58,12 @@ pub struct LeaseManager {
 }
 
 impl LeaseManager {
-    pub fn new(store: Arc<dyn ObjectStore>, keyspace: &str, holder_id: String, ttl: Duration) -> Self {
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        keyspace: &str,
+        holder_id: String,
+        ttl: Duration,
+    ) -> Self {
         Self {
             store,
             key: format!("_lease/{keyspace}"),
@@ -100,7 +108,10 @@ impl LeaseManager {
             expires_at_ms: now_ms() + self.ttl.as_millis() as u64,
         };
         let bytes = bincode::serialize(&new_lease)?;
-        match self.store.put_if_match(&self.key, &bytes, expected_etag.as_deref()) {
+        match self
+            .store
+            .put_if_match(&self.key, &bytes, expected_etag.as_deref())
+        {
             Ok(meta) => {
                 *self.current_etag.lock().unwrap() = Some(meta.etag);
                 self.handle.token.store(next_token, Ordering::Release);
@@ -128,7 +139,10 @@ impl LeaseManager {
             expires_at_ms: now_ms() + self.ttl.as_millis() as u64,
         };
         let bytes = bincode::serialize(&new_lease)?;
-        match self.store.put_if_match(&self.key, &bytes, Some(&expected_etag)) {
+        match self
+            .store
+            .put_if_match(&self.key, &bytes, Some(&expected_etag))
+        {
             Ok(meta) => {
                 *self.current_etag.lock().unwrap() = Some(meta.etag);
                 Ok(())
@@ -175,7 +189,12 @@ mod tests {
     fn second_node_cannot_acquire_active_lease() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(dir.path()).unwrap());
-        let a = LeaseManager::new(store.clone(), "db", "node-a".into(), Duration::from_secs(30));
+        let a = LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-a".into(),
+            Duration::from_secs(30),
+        );
         a.try_acquire().unwrap();
 
         let b = LeaseManager::new(store, "db", "node-b".into(), Duration::from_secs(30));
@@ -187,7 +206,12 @@ mod tests {
     fn takeover_after_expiry_bumps_fencing_token() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(dir.path()).unwrap());
-        let a = LeaseManager::new(store.clone(), "db", "node-a".into(), Duration::from_millis(1));
+        let a = LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-a".into(),
+            Duration::from_millis(1),
+        );
         a.try_acquire().unwrap();
         assert_eq!(a.handle().token(), 1);
 
@@ -195,7 +219,11 @@ mod tests {
 
         let b = LeaseManager::new(store, "db", "node-b".into(), Duration::from_secs(30));
         b.try_acquire().unwrap();
-        assert_eq!(b.handle().token(), 2, "fencing token must strictly increase on takeover");
+        assert_eq!(
+            b.handle().token(),
+            2,
+            "fencing token must strictly increase on takeover"
+        );
     }
 
     #[test]

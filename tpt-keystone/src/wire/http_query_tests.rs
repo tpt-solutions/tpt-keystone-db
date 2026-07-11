@@ -22,15 +22,41 @@ async fn test_server() -> (std::net::SocketAddr, tempfile::TempDir, tempfile::Te
     let bucket = tempfile::tempdir().unwrap();
     let local = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
 
     db.create_table(
         "widgets",
         &[
-            ColumnDef { name: "id".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true },
-            ColumnDef { name: "name".into(), col_type: ColumnType::Text, nullable: true, default: None, is_pk: false },
+            ColumnDef {
+                name: "id".into(),
+                col_type: ColumnType::Int4,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            },
+            ColumnDef {
+                name: "name".into(),
+                col_type: ColumnType::Text,
+                nullable: true,
+                default: None,
+                is_pk: false,
+            },
         ],
     )
     .unwrap();
@@ -102,6 +128,10 @@ async fn schema_endpoint_reports_columns() {
     let tables = body["tables"].as_array().unwrap();
     let widgets = tables.iter().find(|t| t["name"] == "widgets").unwrap();
     let columns = widgets["columns"].as_array().unwrap();
-    assert!(columns.iter().any(|c| c["name"] == "id" && c["type"] == "int4"));
-    assert!(columns.iter().any(|c| c["name"] == "name" && c["type"] == "text"));
+    assert!(columns
+        .iter()
+        .any(|c| c["name"] == "id" && c["type"] == "int4"));
+    assert!(columns
+        .iter()
+        .any(|c| c["name"] == "name" && c["type"] == "text"));
 }

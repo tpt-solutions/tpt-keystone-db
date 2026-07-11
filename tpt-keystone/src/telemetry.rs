@@ -21,27 +21,45 @@ pub fn init() {
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") else {
-        tracing_subscriber::registry().with(filter()).with(fmt_layer).init();
+        tracing_subscriber::registry()
+            .with(filter())
+            .with(fmt_layer)
+            .init();
         return;
     };
 
-    let exporter = match opentelemetry_otlp::SpanExporter::builder().with_tonic().with_endpoint(&endpoint).build() {
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+    {
         Ok(exporter) => exporter,
         Err(e) => {
             eprintln!("failed to build OTLP exporter for {endpoint}: {e}; tracing spans will not be exported to a collector");
-            tracing_subscriber::registry().with(filter()).with(fmt_layer).init();
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(fmt_layer)
+                .init();
             return;
         }
     };
 
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(Resource::builder().with_service_name("tpt-keystone").build())
+        .with_resource(
+            Resource::builder()
+                .with_service_name("tpt-keystone")
+                .build(),
+        )
         .build();
     let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "tpt-keystone");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    tracing_subscriber::registry().with(filter()).with(fmt_layer).with(otel_layer).init();
+    tracing_subscriber::registry()
+        .with(filter())
+        .with(fmt_layer)
+        .with(otel_layer)
+        .init();
 
     // Leaked deliberately: this provider's background batch-export task must
     // outlive `init()` for the process's whole lifetime, and there's no

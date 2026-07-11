@@ -30,7 +30,11 @@ pub struct UdfConfig {
 
 impl Default for UdfConfig {
     fn default() -> Self {
-        Self { fuel_limit: 100_000_000, memory_limit_bytes: 16 * 1024 * 1024, max_module_bytes: 4 * 1024 * 1024 }
+        Self {
+            fuel_limit: 100_000_000,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            max_module_bytes: 4 * 1024 * 1024,
+        }
     }
 }
 
@@ -44,8 +48,15 @@ pub enum NodeRole {
 
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
-    Local { dir: PathBuf },
-    S3 { bucket: String, region: Option<String>, endpoint_url: Option<String>, prefix: String },
+    Local {
+        dir: PathBuf,
+    },
+    S3 {
+        bucket: String,
+        region: Option<String>,
+        endpoint_url: Option<String>,
+        prefix: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -91,13 +102,16 @@ impl StorageConfig {
     pub fn from_env() -> Self {
         let backend = if env_or("TPT_STORAGE_BACKEND", "local").eq_ignore_ascii_case("s3") {
             StorageBackend::S3 {
-                bucket: env::var("TPT_S3_BUCKET").expect("TPT_S3_BUCKET must be set when TPT_STORAGE_BACKEND=s3"),
+                bucket: env::var("TPT_S3_BUCKET")
+                    .expect("TPT_S3_BUCKET must be set when TPT_STORAGE_BACKEND=s3"),
                 region: env::var("TPT_S3_REGION").ok(),
                 endpoint_url: env::var("TPT_S3_ENDPOINT").ok(),
                 prefix: env_or("TPT_S3_PREFIX", ""),
             }
         } else {
-            StorageBackend::Local { dir: PathBuf::from(env_or("TPT_LOCAL_STORE_DIR", "tpt-data/objects")) }
+            StorageBackend::Local {
+                dir: PathBuf::from(env_or("TPT_LOCAL_STORE_DIR", "tpt-data/objects")),
+            }
         };
 
         let role = match env_or("TPT_NODE_ROLE", "writer").to_lowercase().as_str() {
@@ -105,7 +119,8 @@ impl StorageConfig {
             _ => NodeRole::Writer,
         };
 
-        let node_id = env::var("TPT_NODE_ID").unwrap_or_else(|_| format!("node-{:08x}", rand::random::<u32>()));
+        let node_id = env::var("TPT_NODE_ID")
+            .unwrap_or_else(|_| format!("node-{:08x}", rand::random::<u32>()));
 
         Self {
             backend,
@@ -116,17 +131,37 @@ impl StorageConfig {
                 .unwrap_or(256 * 1024 * 1024),
             node_id,
             role,
-            lease_ttl: Duration::from_secs(env::var("TPT_LEASE_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(15)),
+            lease_ttl: Duration::from_secs(
+                env::var("TPT_LEASE_TTL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(15),
+            ),
             manifest_refresh_interval: Duration::from_secs(
-                env::var("TPT_MANIFEST_REFRESH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+                env::var("TPT_MANIFEST_REFRESH_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5),
             ),
             local_dir: PathBuf::from(env_or("TPT_LOCAL_DIR", "tpt-data")),
             udf: UdfConfig {
-                fuel_limit: env::var("TPT_UDF_FUEL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().fuel_limit),
-                memory_limit_bytes: env::var("TPT_UDF_MEMORY_LIMIT_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().memory_limit_bytes),
-                max_module_bytes: env::var("TPT_UDF_MAX_MODULE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(UdfConfig::default().max_module_bytes),
+                fuel_limit: env::var("TPT_UDF_FUEL_LIMIT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(UdfConfig::default().fuel_limit),
+                memory_limit_bytes: env::var("TPT_UDF_MEMORY_LIMIT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(UdfConfig::default().memory_limit_bytes),
+                max_module_bytes: env::var("TPT_UDF_MAX_MODULE_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(UdfConfig::default().max_module_bytes),
             },
-            max_connections: env::var("TPT_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
+            max_connections: env::var("TPT_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
             mcp_token: env::var("TPT_MCP_TOKEN").ok(),
             auth_bootstrap_user: env::var("TPT_AUTH_BOOTSTRAP_USER").ok(),
             auth_bootstrap_password: env::var("TPT_AUTH_BOOTSTRAP_PASSWORD").ok(),
@@ -138,8 +173,19 @@ impl StorageConfig {
     pub async fn build_object_store(&self) -> Result<Arc<dyn ObjectStore>> {
         match &self.backend {
             StorageBackend::Local { dir } => Ok(Arc::new(LocalFsObjectStore::open(dir)?)),
-            StorageBackend::S3 { bucket, region, endpoint_url, prefix } => {
-                let store = S3ObjectStore::connect(bucket.clone(), region.clone(), endpoint_url.clone(), prefix.clone()).await?;
+            StorageBackend::S3 {
+                bucket,
+                region,
+                endpoint_url,
+                prefix,
+            } => {
+                let store = S3ObjectStore::connect(
+                    bucket.clone(),
+                    region.clone(),
+                    endpoint_url.clone(),
+                    prefix.clone(),
+                )
+                .await?;
                 Ok(Arc::new(store))
             }
         }

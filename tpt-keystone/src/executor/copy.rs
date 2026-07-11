@@ -42,7 +42,11 @@ pub fn insert_copy_line(
 ) -> anyhow::Result<()> {
     let raw_cells: Vec<Option<Vec<u8>>> = line.split('\t').map(decode_copy_cell).collect();
     if raw_cells.len() != target.len() {
-        anyhow::bail!("COPY: expected {} columns, got {}", target.len(), raw_cells.len());
+        anyhow::bail!(
+            "COPY: expected {} columns, got {}",
+            target.len(),
+            raw_cells.len()
+        );
     }
 
     let mut cells: Vec<Option<Vec<u8>>> = vec![None; schema.columns.len()];
@@ -94,13 +98,22 @@ fn decode_copy_cell(raw: &str) -> Option<Vec<u8>> {
 
 /// Scan `table` and project each row down to `target` columns, ready for
 /// `encode_copy_line`.
-pub fn scan_for_copy(db: &Arc<Database>, table: &str, target: &[usize]) -> anyhow::Result<Vec<Vec<Option<Vec<u8>>>>> {
+pub fn scan_for_copy(
+    db: &Arc<Database>,
+    table: &str,
+    target: &[usize],
+) -> anyhow::Result<Vec<Vec<Option<Vec<u8>>>>> {
     let kvs = db.scan(table)?;
     let schema = db.get_table(table)?;
     let rows = parse_rows(&kvs, &schema);
     Ok(rows
         .into_iter()
-        .map(|row| target.iter().map(|&i| row.get(i).cloned().flatten()).collect())
+        .map(|row| {
+            target
+                .iter()
+                .map(|&i| row.get(i).cloned().flatten())
+                .collect()
+        })
         .collect())
 }
 
@@ -142,10 +155,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -155,10 +183,23 @@ mod tests {
         db.create_table(
             "people",
             &[
-                ColumnDef { name: "id".into(), col_type: crate::storage::ColumnType::Int4, nullable: false, default: None, is_pk: true },
-                ColumnDef { name: "name".into(), col_type: crate::storage::ColumnType::Text, nullable: true, default: None, is_pk: false },
+                ColumnDef {
+                    name: "id".into(),
+                    col_type: crate::storage::ColumnType::Int4,
+                    nullable: false,
+                    default: None,
+                    is_pk: true,
+                },
+                ColumnDef {
+                    name: "name".into(),
+                    col_type: crate::storage::ColumnType::Text,
+                    nullable: true,
+                    default: None,
+                    is_pk: false,
+                },
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let schema = db.get_table("people").unwrap().unwrap();
         let target = target_columns(&schema, &[]).unwrap();
         insert_copy_line(&db, "people", &schema, &target, "1\tAlice").unwrap();
@@ -168,7 +209,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let lines: Vec<String> = rows
             .iter()
-            .map(|r| String::from_utf8_lossy(&encode_copy_line(r)).trim_end().to_string())
+            .map(|r| {
+                String::from_utf8_lossy(&encode_copy_line(r))
+                    .trim_end()
+                    .to_string()
+            })
             .collect();
         assert!(lines.contains(&"1\tAlice".to_string()));
         assert!(lines.contains(&"2\t\\N".to_string()));
@@ -185,7 +230,10 @@ mod tests {
                 default: None,
                 is_pk: true,
             }],
-            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![],
+            pk_columns: vec![0],
+            unique_groups: vec![],
+            foreign_keys: vec![],
+            json_schemas: vec![],
         };
         assert!(target_columns(&schema, &["nope".to_string()]).is_err());
     }
@@ -195,10 +243,25 @@ mod tests {
         let schema = TableSchema {
             name: "t".into(),
             columns: vec![
-                ColumnDef { name: "a".into(), col_type: crate::storage::ColumnType::Int4, nullable: false, default: None, is_pk: true },
-                ColumnDef { name: "b".into(), col_type: crate::storage::ColumnType::Text, nullable: true, default: None, is_pk: false },
+                ColumnDef {
+                    name: "a".into(),
+                    col_type: crate::storage::ColumnType::Int4,
+                    nullable: false,
+                    default: None,
+                    is_pk: true,
+                },
+                ColumnDef {
+                    name: "b".into(),
+                    col_type: crate::storage::ColumnType::Text,
+                    nullable: true,
+                    default: None,
+                    is_pk: false,
+                },
             ],
-            pk_columns: vec![0], unique_groups: vec![], foreign_keys: vec![], json_schemas: vec![],
+            pk_columns: vec![0],
+            unique_groups: vec![],
+            foreign_keys: vec![],
+            json_schemas: vec![],
         };
         // COPY t (b, a) FROM STDIN — reversed order.
         let target = target_columns(&schema, &["b".to_string(), "a".to_string()]).unwrap();

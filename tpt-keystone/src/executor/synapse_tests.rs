@@ -20,9 +20,23 @@ use crate::synapse::tools::ToolRegistry;
 
 fn open_db(bucket: &std::path::Path, local: &std::path::Path, node_id: &str) -> Arc<Database> {
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", node_id.into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        node_id.into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    Arc::new(Database::open(local, store, lease.handle(), NodeRole::Writer, Default::default()).unwrap())
+    Arc::new(
+        Database::open(
+            local,
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    )
 }
 
 fn cell_text(cell: &Option<Vec<u8>>) -> String {
@@ -36,10 +50,16 @@ fn synapse_recall_semantic_sql_function_ranks_nearest_first() {
     let db = open_db(bucket.path(), local.path(), "node-1");
 
     let mem = MemoryStore::new(db.clone()).unwrap();
-    mem.remember_semantic("agent1", "the sky is blue", &[1.0, 0.0, 0.0]).unwrap();
-    mem.remember_semantic("agent1", "grass is green", &[0.0, 1.0, 0.0]).unwrap();
+    mem.remember_semantic("agent1", "the sky is blue", &[1.0, 0.0, 0.0])
+        .unwrap();
+    mem.remember_semantic("agent1", "grass is green", &[0.0, 1.0, 0.0])
+        .unwrap();
 
-    let result = execute_query("SELECT content FROM synapse_recall_semantic('agent1', '[1.0,0.0,0.0]', 1)", db.clone()).unwrap();
+    let result = execute_query(
+        "SELECT content FROM synapse_recall_semantic('agent1', '[1.0,0.0,0.0]', 1)",
+        db.clone(),
+    )
+    .unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(cell_text(&result.rows[0][0]), "the sky is blue");
 }
@@ -51,10 +71,16 @@ fn synapse_discover_tools_sql_function_ranks_nearest_first() {
     let db = open_db(bucket.path(), local.path(), "node-1");
 
     let reg = ToolRegistry::new(db.clone()).unwrap();
-    reg.register("web_search", "search the web", "{}", Some(&[1.0, 0.0])).unwrap();
-    reg.register("calculator", "does arithmetic", "{}", Some(&[0.0, 1.0])).unwrap();
+    reg.register("web_search", "search the web", "{}", Some(&[1.0, 0.0]))
+        .unwrap();
+    reg.register("calculator", "does arithmetic", "{}", Some(&[0.0, 1.0]))
+        .unwrap();
 
-    let result = execute_query("SELECT name FROM synapse_discover_tools('[0.9,0.1]', 1)", db.clone()).unwrap();
+    let result = execute_query(
+        "SELECT name FROM synapse_discover_tools('[0.9,0.1]', 1)",
+        db.clone(),
+    )
+    .unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(cell_text(&result.rows[0][0]), "web_search");
 }
@@ -84,7 +110,9 @@ async fn milestone_three_agent_workflow_with_shared_state_and_cross_session_reca
 
         let agents = ["planner", "researcher", "writer"];
         for name in agents {
-            registry.spawn(name, name, Box::new(|_state, msg| format!("done:{msg}"))).unwrap();
+            registry
+                .spawn(name, name, Box::new(|_state, msg| format!("done:{msg}")))
+                .unwrap();
         }
 
         coord.delegate_task("report", "gather sources").unwrap();
@@ -92,26 +120,54 @@ async fn milestone_three_agent_workflow_with_shared_state_and_cross_session_reca
         coord.delegate_task("report", "write summary").unwrap();
 
         for name in agents {
-            let (offset, task) = coord.claim_task("report", "workers").unwrap()
+            let (offset, task) = coord
+                .claim_task("report", "workers")
+                .unwrap()
                 .expect("a task should be available for each of the 3 agents");
             let reply = registry.get(name).unwrap().send(&task).await.unwrap();
             assert_eq!(reply, format!("done:{task}"));
             coord.complete_task("report", "workers", offset).unwrap();
-            coord.set_shared_state("report", name, "done", name).unwrap();
+            coord
+                .set_shared_state("report", name, "done", name)
+                .unwrap();
         }
-        assert!(coord.claim_task("report", "workers").unwrap().is_none(), "all 3 tasks should be claimed");
+        assert!(
+            coord.claim_task("report", "workers").unwrap().is_none(),
+            "all 3 tasks should be claimed"
+        );
 
         let state = coord.list_shared_state("report").unwrap();
         assert_eq!(state.len(), 3);
-        assert!(state.iter().all(|(_, v)| v == "done"), "workflow completes with shared state");
+        assert!(
+            state.iter().all(|(_, v)| v == "done"),
+            "workflow completes with shared state"
+        );
 
-        mem.remember_semantic("planner", "the report deadline is Friday", &[1.0, 0.0, 0.0]).unwrap();
+        mem.remember_semantic("planner", "the report deadline is Friday", &[1.0, 0.0, 0.0])
+            .unwrap();
 
-        tools.register("web_search", "search the web for sources", "{}", Some(&[0.0, 1.0, 0.0])).unwrap();
-        tools.register("calendar", "look up calendar deadlines", "{}", Some(&[0.9, 0.1, 0.0])).unwrap();
+        tools
+            .register(
+                "web_search",
+                "search the web for sources",
+                "{}",
+                Some(&[0.0, 1.0, 0.0]),
+            )
+            .unwrap();
+        tools
+            .register(
+                "calendar",
+                "look up calendar deadlines",
+                "{}",
+                Some(&[0.9, 0.1, 0.0]),
+            )
+            .unwrap();
 
         for name in agents {
-            registry.set_status(name, AgentStatus::Terminated).await.unwrap();
+            registry
+                .set_status(name, AgentStatus::Terminated)
+                .await
+                .unwrap();
         }
     }
 
@@ -122,18 +178,37 @@ async fn milestone_three_agent_workflow_with_shared_state_and_cross_session_reca
     let registry2 = AgentRegistry::new(db2.clone()).unwrap();
     let persisted_agents = registry2.list_all().unwrap();
     assert_eq!(persisted_agents.len(), 3);
-    assert!(persisted_agents.iter().all(|(_, _, status, _)| status == "terminated"));
+    assert!(persisted_agents
+        .iter()
+        .all(|(_, _, status, _)| status == "terminated"));
 
     let coord2 = Coordinator::new(db2.clone()).unwrap();
-    assert_eq!(coord2.list_shared_state("report").unwrap().len(), 3, "shared state survives a restart");
+    assert_eq!(
+        coord2.list_shared_state("report").unwrap().len(),
+        3,
+        "shared state survives a restart"
+    );
 
     let mem2 = MemoryStore::new(db2.clone()).unwrap();
-    let recalled = mem2.recall_semantic("planner", &[1.0, 0.0, 0.0], 1).unwrap();
+    let recalled = mem2
+        .recall_semantic("planner", &[1.0, 0.0, 0.0], 1)
+        .unwrap();
     assert_eq!(recalled.len(), 1);
-    assert_eq!(recalled[0].0.content, "the report deadline is Friday", "semantic memory recalled across sessions");
+    assert_eq!(
+        recalled[0].0.content, "the report deadline is Friday",
+        "semantic memory recalled across sessions"
+    );
 
     // Ranked tool discovery via the SQL-level table function.
-    let result = execute_query("SELECT name FROM synapse_discover_tools('[1.0,0.0,0.0]', 1)", db2.clone()).unwrap();
+    let result = execute_query(
+        "SELECT name FROM synapse_discover_tools('[1.0,0.0,0.0]', 1)",
+        db2.clone(),
+    )
+    .unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(cell_text(&result.rows[0][0]), "calendar", "tool discovery returns ranked results via Prism");
+    assert_eq!(
+        cell_text(&result.rows[0][0]),
+        "calendar",
+        "tool discovery returns ranked results via Prism"
+    );
 }

@@ -25,12 +25,36 @@
 - [x] Write-Ahead Log (WAL) with fsync guarantees
 - [x] MemTable (BTreeMap-based, in-memory write buffer)
 - [x] SSTable format + bloom filters
-- [ ] LSM-tree compaction (levelled strategy) — not implemented. `storage/lsm.rs`
-  currently only appends new SSTables on flush (`trigger_flush`); nothing merges or
-  rewrites existing SSTables, drops overwritten/tombstoned keys, or reclaims space, so
-  `read()`/`scan()` linearly search an unboundedly growing SSTable list. Bloom filters
-  (`storage/sstable.rs`) are real and unaffected by this gap. Previously mis-marked
-  done; corrected during a review pass on 2026-07-10.
+- [x] LSM-tree compaction — implemented as a full (size-tiered, not true
+  multi-level) compaction rather than real per-level LSM leveling: once the
+  live SSTable count reaches a threshold (`TPT_COMPACTION_SSTABLE_THRESHOLD`,
+  default 4), `LsmEngine::compact_all` (`storage/lsm.rs`) merges every current
+  SSTable into one, dropping any key shadowed by a newer table's write or
+  tombstone, and commits the new single-SSTable set via the same manifest CAS
+  flush already uses. Fixed a real latent bug found while building this:
+  `SSTable::scan()` used to walk only the data section, which never contains
+  tombstone bytes at all (`build_bytes` only records a tombstone in the
+  index), so a tombstone in a newer SSTable was invisible to any multi-table
+  scan and could never shadow an older table's live value — `scan()` now
+  walks the index (`Option<Vec<u8>>`, `None` = tombstone) and both
+  `LsmEngine::scan()` and `compact_all` merge correctly across tables.
+  Reader nodes' `refresh()` also used to only ever *add* SSTables listed in
+  a newer manifest, never drop ones no longer listed — meaning a reader's
+  own SSTable list would keep growing across writer-side compactions,
+  defeating the point for anyone but the writer; fixed to retain only what
+  the current manifest lists. Compacted-away objects are deleted from the
+  store best-effort (a delete failure just orphans the object rather than
+  failing the compaction that already committed — no GC grace period/delay,
+  a documented scope cut given this is a single-writer model). Verified in
+  `storage/lsm.rs`'s own tests: multi-flush compaction bounds the SSTable
+  list and preserves the latest value per key, tombstones survive a
+  compaction and disappear from `scan()`, and a reader's `refresh()` drops
+  SSTables the writer compacted away while still answering `read()`
+  correctly for both surviving keys. Not attempted: true per-level LSM
+  leveling (separate L0/L1/... tiers with per-level size ratios) — this is a
+  single global merge, cheaper to reason about correctness-wise but doesn't
+  bound compaction I/O cost the way real leveling does at very large data
+  sizes.
 - [x] MVCC (Multi-Version Concurrency Control)
 - [x] Transaction manager (BEGIN / COMMIT / ROLLBACK)
 - [x] B-Tree indexes for primary keys + secondary indexes
@@ -352,13 +376,34 @@ S3 throughput, and query planning. Verified against the actual code; two were al
 addressed by the existing single-writer/CAS-lease design (see `storage/lease.rs`,
 Phase 3) and are not tracked here. The remaining real gaps:
 
-- [ ] LSM-tree compaction — see Phase 1 item above (cross-referenced, not duplicated work)
-- [ ] Query planner statistics (`ANALYZE`, row-count/distinct-value/histogram tracking,
-  cost-based join-order selection) — `executor/planner.rs`'s own doc comment already
-  admits "not a full cost-based optimizer (no cardinality estimation or plan
-  enumeration)"; join strategy today is predicate-shape heuristic (hash join when an
-  equi-join key exists, nested-loop otherwise) plus a runtime size-aware hash-build-side
-  choice, not persisted statistics
+- [x] LSM-tree compaction — see Phase 1 item above (cross-referenced, not duplicated work)
+- [x] Query planner statistics (`ANALYZE`, row-count/distinct-value tracking,
+  cost-based join-order selection) — scoped down from a full histogram-based
+  cost model: `ANALYZE [table]` (new `Stmt::Analyze`, `sql/lexer.rs`/`parser.rs`/`ast.rs`)
+  full-table-scans (no sampling) and persists a row count plus per-column distinct-value
+  count into a new `_tpt_stats` system table (`executor/stats.rs`), following the same
+  "plain Keystone table, `CREATE TABLE IF NOT EXISTS` at open time" precedent Synapse/
+  Mirror/`_tpt_roles` already established. `executor/planner.rs::reorder_inner_joins`
+  uses the persisted row counts to reorder a 3+-way join: a maximal leading run of
+  `INNER`/`CROSS` joins (stopping at the first `LEFT`/`RIGHT`/`FULL`, whose semantics and
+  anything depending on its null-extended columns are order-sensitive) gets greedily
+  scheduled smallest-estimated-row-count-first, respecting a dependency graph built from
+  each join's `ON`-clause column references so a join can never be scheduled ahead of a
+  table its predicate actually reads from. Safety-first design: if any table lacks a
+  persisted stat, if any `ON`-clause column reference can't be unambiguously attributed to
+  exactly one table, or if the schedule would require a forward reference, the whole
+  reorder is abandoned and the original (today's) join order runs unchanged — a bug or
+  blind spot in this heuristic can only leave a plan as it already was, never produce
+  wrong rows, since `INNER`/`CROSS` joins are commutative/associative regardless of order.
+  Verified in `executor/planner.rs`'s own tests: independent joins get reordered by
+  ascending row count even when listed larger-table-first in SQL; a dependency chain
+  (`c` depends on `b` depends on `a`) is respected even though naive size-only sorting
+  would try to schedule the smallest table first; missing stats leave the order
+  unchanged; and an end-to-end 3-table join with `ANALYZE` run first returns correct
+  results. Not attempted: per-column histograms/selectivity estimation for WHERE-clause
+  cardinality, or reordering across `LEFT`/`RIGHT`/`FULL` joins (semantically unsafe
+  without a much larger rewrite) — this is real, working, safety-netted join-order
+  selection for the common "several INNER joins" case, not a general cost-based optimizer.
 - [ ] S3 object-key prefix sharding for `sst/`/`wal/` — currently flat prefixes
   (`storage/lsm.rs`'s `sstable_key`/`wal_segment_key`), a risk if per-prefix S3
   request-rate limits are hit under heavy multi-reader fan-out. The AWS SDK's default
@@ -851,13 +896,21 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   are set (PEM files); otherwise `SSLRequest` is still declined with `N` exactly as before this existed.
   Verified against a real `psql sslmode=require` connection with an `openssl`-generated self-signed dev
   cert, both alone and combined with the SCRAM auth above over the same connection.
-- [ ] Extend `pg_catalog`/`information_schema` coverage — add `pg_constraint`, `pg_attribute`,
-  `pg_index`, etc. as needed, scoped to whichever ORM/driver compatibility target is chosen next,
-  building on the existing `pg_tables`/`pg_type`/`information_schema.tables`/`.columns` views in
-  `executor/catalog.rs`
-- [ ] Multi-table statistics for the query planner — real row-count/selectivity stats feeding join order
-  across 3+ table queries, beyond the current heuristic (index-aware point lookups + size-aware
-  hash-join build side)
+- [~] Extend `pg_catalog`/`information_schema` coverage — `pg_constraint`/`pg_attribute`/`pg_index`
+  (this line's original wording) already existed in `executor/catalog.rs` before this pass. Verified
+  against a real `psql 15` client this time (previous verification passes in this file were run against
+  an unrelated real PostgreSQL server accidentally squatting on the test machine's port 5432 — a
+  measurement error, not a finding about this engine — corrected by testing against `tpt-keystone`'s
+  actual listener directly). Direct `SELECT`s against every virtual catalog table work; `\dt` and `\d
+  <table>` do **not** — psql's own introspection queries for those meta-commands use `!~`/`~` (POSIX
+  regex match/non-match operators), the `OPERATOR(pg_catalog.~)` schema-qualified operator syntax, and
+  a trailing `COLLATE pg_catalog.default` clause, none of which this hand-written lexer/parser
+  recognizes at all (`unexpected character: !`/`~`), plus calls to `pg_table_is_visible(oid)` and
+  `pg_get_userbyid(oid)` which don't exist as functions and a `pg_class.relam`/`pg_am` join `\dt`
+  needs. Real, concrete, and larger than "add a few catalog tables" — a genuine follow-up, not
+  attempted this pass.
+- [x] Multi-table statistics for the query planner — see Phase 12a's "Query planner statistics" item
+  above (cross-referenced, not duplicated work)
 - [ ] Harbor production-scale validation — exercise `discover`/`validate`/`transfer`/`replicate`/
   `verify`/`cutover` against a real multi-GB source database with concurrent writes during `replicate`,
   and a real zero-downtime `cutover`, not just the current in-process/loopback verification

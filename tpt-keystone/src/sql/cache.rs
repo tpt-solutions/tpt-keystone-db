@@ -57,9 +57,19 @@ impl StatementCache {
 
         let mut entries = self.entries.lock().unwrap();
         let tick = self.clock.fetch_add(1, Ordering::Relaxed);
-        entries.insert(sql.to_string(), Entry { stmt: stmt.clone(), last_access: tick });
+        entries.insert(
+            sql.to_string(),
+            Entry {
+                stmt: stmt.clone(),
+                last_access: tick,
+            },
+        );
         if entries.len() > self.max_entries {
-            if let Some(victim) = entries.iter().min_by_key(|(_, e)| e.last_access).map(|(k, _)| k.clone()) {
+            if let Some(victim) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_access)
+                .map(|(k, _)| k.clone())
+            {
                 entries.remove(&victim);
             }
         }
@@ -69,6 +79,10 @@ impl StatementCache {
     /// `(entry_count, hits, misses)` — for tests/observability.
     pub fn stats(&self) -> (usize, u64, u64) {
         let entries = self.entries.lock().unwrap();
-        (entries.len(), self.hits.load(Ordering::Relaxed), self.misses.load(Ordering::Relaxed))
+        (
+            entries.len(),
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
     }
 }

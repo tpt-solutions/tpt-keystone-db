@@ -38,9 +38,23 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
     let local = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
     (db, bucket, local)
 }
 
@@ -71,27 +85,60 @@ fn gpu_intersects_join_matches_cpu_nested_loop() {
     let (db, _b, _l) = test_db();
     execute_query("CREATE TABLE zones (id INT4, area GEOMETRY)", db.clone()).unwrap();
     execute_query("CREATE TABLE drones (id INT4, pos GEOMETRY)", db.clone()).unwrap();
-    execute_query("INSERT INTO zones VALUES (1, 'POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')", db.clone()).unwrap();
-    execute_query("INSERT INTO zones VALUES (2, 'POLYGON((100 100, 100 110, 110 110, 110 100, 100 100))')", db.clone()).unwrap();
+    execute_query(
+        "INSERT INTO zones VALUES (1, 'POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))')",
+        db.clone(),
+    )
+    .unwrap();
+    execute_query(
+        "INSERT INTO zones VALUES (2, 'POLYGON((100 100, 100 110, 110 110, 110 100, 100 100))')",
+        db.clone(),
+    )
+    .unwrap();
     execute_query("INSERT INTO drones VALUES (1, 'POINT(5 5)')", db.clone()).unwrap(); // inside zone 1's bbox
-    execute_query("INSERT INTO drones VALUES (2, 'POINT(500 500)')", db.clone()).unwrap(); // inside neither
-    execute_query("INSERT INTO drones VALUES (3, 'POINT(105 105)')", db.clone()).unwrap(); // inside zone 2's bbox
+    execute_query(
+        "INSERT INTO drones VALUES (2, 'POINT(500 500)')",
+        db.clone(),
+    )
+    .unwrap(); // inside neither
+    execute_query(
+        "INSERT INTO drones VALUES (3, 'POINT(105 105)')",
+        db.clone(),
+    )
+    .unwrap(); // inside zone 2's bbox
 
     let query = "SELECT zones.id, drones.id FROM zones JOIN drones ON ST_Intersects(zones.area, drones.pos) ORDER BY zones.id, drones.id";
 
     let gpu_result = execute_query(query, db.clone()).unwrap();
-    let mut gpu_pairs: Vec<(String, String)> = gpu_result.rows.iter().map(|r| (cell_text(&r[0]), cell_text(&r[1]))).collect();
+    let mut gpu_pairs: Vec<(String, String)> = gpu_result
+        .rows
+        .iter()
+        .map(|r| (cell_text(&r[0]), cell_text(&r[1])))
+        .collect();
     gpu_pairs.sort();
 
     std::env::set_var("TPT_DISABLE_GPU_JOIN", "1");
     let cpu_result = execute_query(query, db.clone()).unwrap();
     std::env::remove_var("TPT_DISABLE_GPU_JOIN");
     std::env::remove_var("TPT_GPU_JOIN_THRESHOLD");
-    let mut cpu_pairs: Vec<(String, String)> = cpu_result.rows.iter().map(|r| (cell_text(&r[0]), cell_text(&r[1]))).collect();
+    let mut cpu_pairs: Vec<(String, String)> = cpu_result
+        .rows
+        .iter()
+        .map(|r| (cell_text(&r[0]), cell_text(&r[1])))
+        .collect();
     cpu_pairs.sort();
 
-    assert_eq!(gpu_pairs, cpu_pairs, "GPU and CPU spatial join paths must agree exactly");
-    assert_eq!(gpu_pairs, vec![("1".to_string(), "1".to_string()), ("2".to_string(), "3".to_string())]);
+    assert_eq!(
+        gpu_pairs, cpu_pairs,
+        "GPU and CPU spatial join paths must agree exactly"
+    );
+    assert_eq!(
+        gpu_pairs,
+        vec![
+            ("1".to_string(), "1".to_string()),
+            ("2".to_string(), "3".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -105,24 +152,47 @@ fn gpu_dwithin_join_matches_cpu_nested_loop() {
     let (db, _b, _l) = test_db();
     execute_query("CREATE TABLE cities (id INT4, pos GEOMETRY)", db.clone()).unwrap();
     execute_query("CREATE TABLE drones (id INT4, pos GEOMETRY)", db.clone()).unwrap();
-    execute_query("INSERT INTO cities VALUES (1, 'POINT(-0.1276 51.5074)')", db.clone()).unwrap(); // London
-    execute_query("INSERT INTO cities VALUES (2, 'POINT(-74.0060 40.7128)')", db.clone()).unwrap(); // New York
-    execute_query("INSERT INTO drones VALUES (1, 'POINT(2.3522 48.8566)')", db.clone()).unwrap(); // Paris (~344km from London)
+    execute_query(
+        "INSERT INTO cities VALUES (1, 'POINT(-0.1276 51.5074)')",
+        db.clone(),
+    )
+    .unwrap(); // London
+    execute_query(
+        "INSERT INTO cities VALUES (2, 'POINT(-74.0060 40.7128)')",
+        db.clone(),
+    )
+    .unwrap(); // New York
+    execute_query(
+        "INSERT INTO drones VALUES (1, 'POINT(2.3522 48.8566)')",
+        db.clone(),
+    )
+    .unwrap(); // Paris (~344km from London)
 
     let query = "SELECT cities.id, drones.id FROM cities JOIN drones ON ST_DWithin(cities.pos, drones.pos, 400000) ORDER BY cities.id, drones.id";
 
     let gpu_result = execute_query(query, db.clone()).unwrap();
-    let mut gpu_pairs: Vec<(String, String)> = gpu_result.rows.iter().map(|r| (cell_text(&r[0]), cell_text(&r[1]))).collect();
+    let mut gpu_pairs: Vec<(String, String)> = gpu_result
+        .rows
+        .iter()
+        .map(|r| (cell_text(&r[0]), cell_text(&r[1])))
+        .collect();
     gpu_pairs.sort();
 
     std::env::set_var("TPT_DISABLE_GPU_JOIN", "1");
     let cpu_result = execute_query(query, db.clone()).unwrap();
     std::env::remove_var("TPT_DISABLE_GPU_JOIN");
     std::env::remove_var("TPT_GPU_JOIN_THRESHOLD");
-    let mut cpu_pairs: Vec<(String, String)> = cpu_result.rows.iter().map(|r| (cell_text(&r[0]), cell_text(&r[1]))).collect();
+    let mut cpu_pairs: Vec<(String, String)> = cpu_result
+        .rows
+        .iter()
+        .map(|r| (cell_text(&r[0]), cell_text(&r[1])))
+        .collect();
     cpu_pairs.sort();
 
-    assert_eq!(gpu_pairs, cpu_pairs, "GPU and CPU spatial join paths must agree exactly");
+    assert_eq!(
+        gpu_pairs, cpu_pairs,
+        "GPU and CPU spatial join paths must agree exactly"
+    );
     assert_eq!(gpu_pairs, vec![("1".to_string(), "1".to_string())]);
 }
 
@@ -148,7 +218,11 @@ fn gpu_vs_cpu_wall_clock_at_moderate_scale() {
     for i in 0..200 {
         let x = (i % 20) as f64 * 10.0 + 2.0;
         let y = (i / 20) as f64 * 10.0 + 2.0;
-        execute_query(&format!("INSERT INTO drones VALUES ({i}, 'POINT({x} {y})')"), db.clone()).unwrap();
+        execute_query(
+            &format!("INSERT INTO drones VALUES ({i}, 'POINT({x} {y})')"),
+            db.clone(),
+        )
+        .unwrap();
     }
     let query = "SELECT zones.id, drones.id FROM zones JOIN drones ON ST_Intersects(zones.area, drones.pos)";
 

@@ -43,9 +43,17 @@ pub fn unpack(id: CellId) -> (u8, u8, u32, u32) {
 fn face_uv(x: f64, y: f64, z: f64) -> (u8, f64, f64) {
     let (ax, ay, az) = (x.abs(), y.abs(), z.abs());
     if ax >= ay && ax >= az {
-        if x > 0.0 { (0, y / ax, z / ax) } else { (1, -y / ax, z / ax) }
+        if x > 0.0 {
+            (0, y / ax, z / ax)
+        } else {
+            (1, -y / ax, z / ax)
+        }
     } else if ay >= ax && ay >= az {
-        if y > 0.0 { (2, -x / ay, z / ay) } else { (3, x / ay, z / ay) }
+        if y > 0.0 {
+            (2, -x / ay, z / ay)
+        } else {
+            (3, x / ay, z / ay)
+        }
     } else if z > 0.0 {
         (4, x / az, y / az)
     } else {
@@ -151,7 +159,10 @@ pub fn covering(bbox: &BBox, level: u8) -> Vec<CellId> {
         (bbox.max_x, bbox.min_y),
         (bbox.min_x, bbox.max_y),
         (bbox.max_x, bbox.max_y),
-        ((bbox.min_x + bbox.max_x) / 2.0, (bbox.min_y + bbox.max_y) / 2.0),
+        (
+            (bbox.min_x + bbox.max_x) / 2.0,
+            (bbox.min_y + bbox.max_y) / 2.0,
+        ),
     ];
     let mut ids: Vec<CellId> = samples
         .iter()

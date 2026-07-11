@@ -65,7 +65,12 @@ pub trait ObjectStore: Send + Sync {
     fn put(&self, key: &str, data: &[u8]) -> Result<ObjectMeta>;
     /// Write an object only if its current ETag matches `expected_etag`
     /// (`None` means "only if the object does not currently exist").
-    fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError>;
+    fn put_if_match(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected_etag: Option<&str>,
+    ) -> Result<ObjectMeta, CasError>;
     /// Delete an object. Deleting a missing object is not an error.
     fn delete(&self, key: &str) -> Result<()>;
     /// List all keys with the given prefix.
@@ -82,7 +87,12 @@ impl ObjectStore for std::sync::Arc<dyn ObjectStore> {
     fn put(&self, key: &str, data: &[u8]) -> Result<ObjectMeta> {
         (**self).put(key, data)
     }
-    fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError> {
+    fn put_if_match(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected_etag: Option<&str>,
+    ) -> Result<ObjectMeta, CasError> {
         (**self).put_if_match(key, data, expected_etag)
     }
     fn delete(&self, key: &str) -> Result<()> {
@@ -144,19 +154,40 @@ impl ObjectStore for LocalFsObjectStore {
     fn put(&self, key: &str, data: &[u8]) -> Result<ObjectMeta> {
         let path = self.path_for(key);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating parent dir for object {key} ({})", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "creating parent dir for object {key} ({})",
+                    parent.display()
+                )
+            })?;
         }
-        let tmp_name = format!("{}.tmp-{}", path.file_name().unwrap().to_string_lossy(), rand::random::<u64>());
+        let tmp_name = format!(
+            "{}.tmp-{}",
+            path.file_name().unwrap().to_string_lossy(),
+            rand::random::<u64>()
+        );
         let tmp_path = path.with_file_name(tmp_name);
-        fs::write(&tmp_path, data).with_context(|| format!("writing temp object for {key} at {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, &path).with_context(|| format!("renaming temp object into place for {key} ({} -> {})", tmp_path.display(), path.display()))?;
+        fs::write(&tmp_path, data)
+            .with_context(|| format!("writing temp object for {key} at {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &path).with_context(|| {
+            format!(
+                "renaming temp object into place for {key} ({} -> {})",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
         Ok(ObjectMeta {
             etag: sha256_hex(data),
             size: data.len() as u64,
         })
     }
 
-    fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError> {
+    fn put_if_match(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected_etag: Option<&str>,
+    ) -> Result<ObjectMeta, CasError> {
         let _guard = self.cas_lock.lock().unwrap();
         let current = self.get(key)?;
         let current_etag = current.as_ref().map(|(_, m)| m.etag.clone());
@@ -183,7 +214,10 @@ impl ObjectStore for LocalFsObjectStore {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let mut results = Vec::new();
         visit_dir(&self.root, &self.root, &mut results)?;
-        Ok(results.into_iter().filter(|k| k.starts_with(prefix)).collect())
+        Ok(results
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .collect())
     }
 }
 
@@ -226,7 +260,12 @@ pub struct S3ObjectStore {
 impl S3ObjectStore {
     /// Build a client from the ambient AWS config (env vars / instance
     /// profile / etc), optionally pointed at a custom endpoint (e.g. MinIO).
-    pub async fn connect(bucket: String, region: Option<String>, endpoint_url: Option<String>, prefix: String) -> Result<Self> {
+    pub async fn connect(
+        bucket: String,
+        region: Option<String>,
+        endpoint_url: Option<String>,
+        prefix: String,
+    ) -> Result<Self> {
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if let Some(region) = region {
             loader = loader.region(aws_config::Region::new(region));
@@ -234,7 +273,9 @@ impl S3ObjectStore {
         let sdk_config = loader.load().await;
         let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
         if let Some(endpoint) = endpoint_url {
-            s3_config_builder = s3_config_builder.endpoint_url(endpoint).force_path_style(true);
+            s3_config_builder = s3_config_builder
+                .endpoint_url(endpoint)
+                .force_path_style(true);
         }
         let client = aws_sdk_s3::Client::from_conf(s3_config_builder.build());
         Ok(Self {
@@ -315,7 +356,12 @@ impl ObjectStore for S3ObjectStore {
         })
     }
 
-    fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError> {
+    fn put_if_match(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected_etag: Option<&str>,
+    ) -> Result<ObjectMeta, CasError> {
         let full = self.full_key(key);
         let mut req = self
             .client
@@ -341,7 +387,9 @@ impl ObjectStore for S3ObjectStore {
                     let current_etag = self.get(key).ok().flatten().map(|(_, m)| m.etag);
                     Err(CasError::Conflict { current_etag })
                 } else {
-                    Err(CasError::Other(anyhow!(err).context(format!("S3 PutObject(if-match) {key}"))))
+                    Err(CasError::Other(
+                        anyhow!(err).context(format!("S3 PutObject(if-match) {key}")),
+                    ))
                 }
             }
         }
@@ -444,7 +492,9 @@ mod tests {
         assert_eq!(store.get("k").unwrap().unwrap().0, b"v2");
 
         // CAS with a stale etag fails.
-        let err = store.put_if_match("k", b"v3", Some(&meta1.etag)).unwrap_err();
+        let err = store
+            .put_if_match("k", b"v3", Some(&meta1.etag))
+            .unwrap_err();
         assert!(matches!(err, CasError::Conflict { .. }));
         assert_eq!(store.get("k").unwrap().unwrap().0, b"v2");
         let _ = meta2;
@@ -460,6 +510,9 @@ mod tests {
 
         let mut keys = store.list("sst/orders/").unwrap();
         keys.sort();
-        assert_eq!(keys, vec!["sst/orders/1".to_string(), "sst/orders/2".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["sst/orders/1".to_string(), "sst/orders/2".to_string()]
+        );
     }
 }

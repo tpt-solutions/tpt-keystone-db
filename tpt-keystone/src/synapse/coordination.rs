@@ -75,7 +75,9 @@ impl Coordinator {
     /// `workflow`'s task queue. Returns the Flux offset it was published at.
     pub fn delegate_task(&self, workflow: &str, task_json: &str) -> Result<u64> {
         let topic = self.ensure_workflow_topic(workflow)?;
-        let (_partition, offset) = self.db.flux_publish(&topic, Some(0), None, task_json.as_bytes().to_vec())?;
+        let (_partition, offset) =
+            self.db
+                .flux_publish(&topic, Some(0), None, task_json.as_bytes().to_vec())?;
         Ok(offset)
     }
 
@@ -89,7 +91,10 @@ impl Coordinator {
     pub fn claim_task(&self, workflow: &str, group: &str) -> Result<Option<(u64, String)>> {
         let topic = self.ensure_workflow_topic(workflow)?;
         let records = self.db.flux_poll(&topic, 0, group, 1)?;
-        Ok(records.into_iter().next().map(|r| (r.offset, String::from_utf8_lossy(&r.value).into_owned())))
+        Ok(records
+            .into_iter()
+            .next()
+            .map(|r| (r.offset, String::from_utf8_lossy(&r.value).into_owned())))
     }
 
     /// Acknowledges a claimed task, advancing `group`'s offset past it.
@@ -101,7 +106,13 @@ impl Coordinator {
     /// Sets `workflow`'s shared `key` to `value`. Last-write-wins: this
     /// simply overwrites the row stored under `(workflow, key)`'s
     /// deterministic id.
-    pub fn set_shared_state(&self, workflow: &str, key: &str, value: &str, updated_by: &str) -> Result<()> {
+    pub fn set_shared_state(
+        &self,
+        workflow: &str,
+        key: &str,
+        value: &str,
+        updated_by: &str,
+    ) -> Result<()> {
         let id = format!("{workflow}:{key}");
         let cells = vec![
             text_cell(&id),
@@ -111,17 +122,24 @@ impl Coordinator {
             text_cell(updated_by),
             Some(now_ms().to_string().into_bytes()),
         ];
-        self.db.write(STATE_TABLE, id.as_bytes(), &encode_cells(&cells))
+        self.db
+            .write(STATE_TABLE, id.as_bytes(), &encode_cells(&cells))
     }
 
     pub fn get_shared_state(&self, workflow: &str, key: &str) -> Result<Option<String>> {
         let id = format!("{workflow}:{key}");
-        Ok(self.db.read(STATE_TABLE, id.as_bytes())?.and_then(|v| cell_text(&decode_cell(&v, COL_VALUE))))
+        Ok(self
+            .db
+            .read(STATE_TABLE, id.as_bytes())?
+            .and_then(|v| cell_text(&decode_cell(&v, COL_VALUE))))
     }
 
     /// `(key, value)` for every shared-state entry belonging to `workflow`.
     pub fn list_shared_state(&self, workflow: &str) -> Result<Vec<(String, String)>> {
-        Ok(self.db.scan(STATE_TABLE)?.into_iter()
+        Ok(self
+            .db
+            .scan(STATE_TABLE)?
+            .into_iter()
             .filter_map(|kv| {
                 let wf = cell_text(&decode_cell(&kv.value, COL_WORKFLOW))?;
                 if wf != workflow {
@@ -146,10 +164,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -157,7 +190,9 @@ mod tests {
     fn delegate_claim_and_complete_a_task() {
         let (db, _b, _l) = test_db();
         let coord = Coordinator::new(db).unwrap();
-        coord.delegate_task("wf1", "{\"job\":\"summarize\"}").unwrap();
+        coord
+            .delegate_task("wf1", "{\"job\":\"summarize\"}")
+            .unwrap();
 
         let (offset, payload) = coord.claim_task("wf1", "workers").unwrap().unwrap();
         assert_eq!(payload, "{\"job\":\"summarize\"}");
@@ -186,9 +221,20 @@ mod tests {
     fn shared_state_last_write_wins() {
         let (db, _b, _l) = test_db();
         let coord = Coordinator::new(db).unwrap();
-        coord.set_shared_state("wf1", "status", "planning", "agent-a").unwrap();
-        coord.set_shared_state("wf1", "status", "executing", "agent-b").unwrap();
-        assert_eq!(coord.get_shared_state("wf1", "status").unwrap(), Some("executing".to_string()));
-        assert_eq!(coord.list_shared_state("wf1").unwrap().len(), 1, "overwrite, not a second row");
+        coord
+            .set_shared_state("wf1", "status", "planning", "agent-a")
+            .unwrap();
+        coord
+            .set_shared_state("wf1", "status", "executing", "agent-b")
+            .unwrap();
+        assert_eq!(
+            coord.get_shared_state("wf1", "status").unwrap(),
+            Some("executing".to_string())
+        );
+        assert_eq!(
+            coord.list_shared_state("wf1").unwrap().len(),
+            1,
+            "overwrite, not a second row"
+        );
     }
 }

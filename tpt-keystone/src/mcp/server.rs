@@ -13,13 +13,22 @@ use super::protocol;
 /// Handles one MCP connection: read a single HTTP request, check the auth
 /// token (if configured), dispatch the JSON-RPC body, write the response,
 /// and return — the caller drops the socket, closing the connection.
-pub async fn handle(mut stream: TcpStream, peer: SocketAddr, db: Arc<Database>, token: Option<String>) {
+pub async fn handle(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    db: Arc<Database>,
+    token: Option<String>,
+) {
     if let Err(e) = handle_inner(&mut stream, &db, &token).await {
         warn!(%peer, error = %e, "MCP connection error");
     }
 }
 
-async fn handle_inner(stream: &mut TcpStream, db: &Arc<Database>, token: &Option<String>) -> anyhow::Result<()> {
+async fn handle_inner(
+    stream: &mut TcpStream,
+    db: &Arc<Database>,
+    token: &Option<String>,
+) -> anyhow::Result<()> {
     let request = read_request(stream).await?;
     debug!(method = %request.method, path = %request.path, "MCP request");
 

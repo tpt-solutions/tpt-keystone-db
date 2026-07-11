@@ -40,7 +40,10 @@ impl Vector {
         }
         let mut out = Vec::new();
         for part in inner.split(',') {
-            let v: f32 = part.trim().parse().map_err(|_| anyhow::anyhow!("invalid vector component: {part}"))?;
+            let v: f32 = part
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid vector component: {part}"))?;
             out.push(v);
         }
         Ok(Vector(out))

@@ -26,14 +26,32 @@ fn two_nodes_share_one_bucket_consistent_reads() {
     let reader_cache = tempfile::tempdir().unwrap();
 
     let writer_store = node_store(bucket.path(), writer_cache.path());
-    let writer_lease = Arc::new(LeaseManager::new(writer_store.clone(), "db", "writer-1".into(), Duration::from_secs(30)));
+    let writer_lease = Arc::new(LeaseManager::new(
+        writer_store.clone(),
+        "db",
+        "writer-1".into(),
+        Duration::from_secs(30),
+    ));
     writer_lease.try_acquire().unwrap();
-    let writer_db = Database::open(writer_local.path(), writer_store, writer_lease.handle(), NodeRole::Writer, Default::default()).unwrap();
+    let writer_db = Database::open(
+        writer_local.path(),
+        writer_store,
+        writer_lease.handle(),
+        NodeRole::Writer,
+        Default::default(),
+    )
+    .unwrap();
 
     writer_db
         .create_table(
             "orders",
-            &[ColumnDef { name: "id".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true }],
+            &[ColumnDef {
+                name: "id".into(),
+                col_type: ColumnType::Int4,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            }],
         )
         .unwrap();
     writer_db.write("orders", b"1", b"row1").unwrap();
@@ -42,8 +60,20 @@ fn two_nodes_share_one_bucket_consistent_reads() {
 
     // A second compute node, pointed at the same bucket, starts cold.
     let reader_store = node_store(bucket.path(), reader_cache.path());
-    let reader_lease = Arc::new(LeaseManager::new(reader_store.clone(), "db", "reader-1".into(), Duration::from_secs(30)));
-    let reader_db = Database::open(reader_local.path(), reader_store, reader_lease.handle(), NodeRole::Reader, Default::default()).unwrap();
+    let reader_lease = Arc::new(LeaseManager::new(
+        reader_store.clone(),
+        "db",
+        "reader-1".into(),
+        Duration::from_secs(30),
+    ));
+    let reader_db = Database::open(
+        reader_local.path(),
+        reader_store,
+        reader_lease.handle(),
+        NodeRole::Reader,
+        Default::default(),
+    )
+    .unwrap();
 
     // It sees the table (schema is shared) and, after refreshing, the rows
     // the writer already flushed.
@@ -80,10 +110,32 @@ fn stale_writer_is_fenced_off_after_lease_takeover() {
 
     // Node A acquires the lease with a very short TTL and flushes once.
     let a_store = node_store(bucket.path(), a_cache.path());
-    let a_lease = Arc::new(LeaseManager::new(a_store.clone(), "db", "node-a".into(), Duration::from_millis(1)));
+    let a_lease = Arc::new(LeaseManager::new(
+        a_store.clone(),
+        "db",
+        "node-a".into(),
+        Duration::from_millis(1),
+    ));
     a_lease.try_acquire().unwrap();
-    let a_db = Database::open(a_local.path(), a_store, a_lease.handle(), NodeRole::Writer, Default::default()).unwrap();
-    a_db.create_table("t", &[ColumnDef { name: "id".into(), col_type: ColumnType::Int4, nullable: false, default: None, is_pk: true }]).unwrap();
+    let a_db = Database::open(
+        a_local.path(),
+        a_store,
+        a_lease.handle(),
+        NodeRole::Writer,
+        Default::default(),
+    )
+    .unwrap();
+    a_db.create_table(
+        "t",
+        &[ColumnDef {
+            name: "id".into(),
+            col_type: ColumnType::Int4,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
+    )
+    .unwrap();
     a_db.write("t", b"1", b"v1").unwrap();
     a_db.flush().unwrap();
 
@@ -91,10 +143,26 @@ fn stale_writer_is_fenced_off_after_lease_takeover() {
     // lease and fencing token, and flushes its own write.
     std::thread::sleep(Duration::from_millis(10));
     let b_store = node_store(bucket.path(), b_cache.path());
-    let b_lease = Arc::new(LeaseManager::new(b_store.clone(), "db", "node-b".into(), Duration::from_secs(30)));
+    let b_lease = Arc::new(LeaseManager::new(
+        b_store.clone(),
+        "db",
+        "node-b".into(),
+        Duration::from_secs(30),
+    ));
     b_lease.try_acquire().unwrap();
-    assert_eq!(b_lease.handle().token(), 2, "fencing token must have advanced on takeover");
-    let b_db = Database::open(b_local.path(), b_store, b_lease.handle(), NodeRole::Writer, Default::default()).unwrap();
+    assert_eq!(
+        b_lease.handle().token(),
+        2,
+        "fencing token must have advanced on takeover"
+    );
+    let b_db = Database::open(
+        b_local.path(),
+        b_store,
+        b_lease.handle(),
+        NodeRole::Writer,
+        Default::default(),
+    )
+    .unwrap();
     b_db.write("t", b"2", b"v2").unwrap();
     b_db.flush().unwrap();
 
@@ -104,5 +172,8 @@ fn stale_writer_is_fenced_off_after_lease_takeover() {
     // never notices its own lease expired.
     a_db.write("t", b"3", b"v3").unwrap();
     let err = a_db.flush().unwrap_err();
-    assert!(err.to_string().contains("another writer may be active") || err.to_string().contains("conditional put failed"));
+    assert!(
+        err.to_string().contains("another writer may be active")
+            || err.to_string().contains("conditional put failed")
+    );
 }

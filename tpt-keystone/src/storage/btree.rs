@@ -132,11 +132,14 @@ impl BTree {
         let node = self.read_node(file, node_offset)?;
 
         match node {
-            Node::Leaf { mut keys, mut values } => {
+            Node::Leaf {
+                mut keys,
+                mut values,
+            } => {
                 // Find insertion position
                 let pos = match keys.binary_search_by(|k| k.as_slice().cmp(key)) {
-                    Ok(p) => p,   // key exists — update
-                    Err(p) => p,  // insert
+                    Ok(p) => p,  // key exists — update
+                    Err(p) => p, // insert
                 };
 
                 if pos < keys.len() && keys[pos] == key {
@@ -174,7 +177,10 @@ impl BTree {
                     Ok(None)
                 }
             }
-            Node::Internal { mut keys, mut children } => {
+            Node::Internal {
+                mut keys,
+                mut children,
+            } => {
                 // Find the child to descend into
                 let pos = match keys.binary_search_by(|k| k.as_slice().cmp(key)) {
                     Ok(p) => p + 1,
@@ -186,10 +192,11 @@ impl BTree {
 
                 if let Some((promoted_key, left_offset, right_offset)) = result {
                     // Insert promoted key into this internal node
-                    let insert_pos = match keys.binary_search_by(|k| k.as_slice().cmp(&promoted_key)) {
-                        Ok(p) => p,
-                        Err(p) => p,
-                    };
+                    let insert_pos =
+                        match keys.binary_search_by(|k| k.as_slice().cmp(&promoted_key)) {
+                            Ok(p) => p,
+                            Err(p) => p,
+                        };
 
                     keys.insert(insert_pos, promoted_key);
                     children[insert_pos] = left_offset;
@@ -212,10 +219,7 @@ impl BTree {
                         };
                         let right_offset = self.write_node(file, &right_node)?;
 
-                        let left_node = Node::Internal {
-                            keys,
-                            children,
-                        };
+                        let left_node = Node::Internal { keys, children };
                         let left_offset = self.write_node_at(file, node_offset, &left_node)?;
 
                         Ok(Some((promoted, left_offset, right_offset)))
@@ -240,12 +244,10 @@ impl BTree {
         let node = self.read_node(file, node_offset)?;
 
         match node {
-            Node::Leaf { keys, values } => {
-                match keys.binary_search_by(|k| k.as_slice().cmp(key)) {
-                    Ok(pos) => Ok(Some(values[pos].clone())),
-                    Err(_) => Ok(None),
-                }
-            }
+            Node::Leaf { keys, values } => match keys.binary_search_by(|k| k.as_slice().cmp(key)) {
+                Ok(pos) => Ok(Some(values[pos].clone())),
+                Err(_) => Ok(None),
+            },
             Node::Internal { keys, children } => {
                 let pos = match keys.binary_search_by(|k| k.as_slice().cmp(key)) {
                     Ok(p) => p + 1,

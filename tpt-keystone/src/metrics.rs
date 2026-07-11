@@ -78,7 +78,8 @@ impl Metrics {
         if is_err {
             self.query_errors_total.fetch_add(1, Ordering::Relaxed);
         }
-        self.query_duration_nanos_sum.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+        self.query_duration_nanos_sum
+            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
         self.query_duration_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -95,54 +96,91 @@ impl Metrics {
 
         out.push_str("# HELP tpt_connections_active Currently open client connections.\n");
         out.push_str("# TYPE tpt_connections_active gauge\n");
-        out.push_str(&format!("tpt_connections_active {}\n", self.connections_active.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_connections_active {}\n",
+            self.connections_active.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_connections_total Client connections accepted since start.\n");
         out.push_str("# TYPE tpt_connections_total counter\n");
-        out.push_str(&format!("tpt_connections_total {}\n", self.connections_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_connections_total {}\n",
+            self.connections_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_queries_total Queries executed since start.\n");
         out.push_str("# TYPE tpt_queries_total counter\n");
-        out.push_str(&format!("tpt_queries_total {}\n", self.queries_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_queries_total {}\n",
+            self.queries_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_query_errors_total Queries that returned an error.\n");
         out.push_str("# TYPE tpt_query_errors_total counter\n");
-        out.push_str(&format!("tpt_query_errors_total {}\n", self.query_errors_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_query_errors_total {}\n",
+            self.query_errors_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_query_duration_seconds_sum Cumulative query execution time.\n");
         out.push_str("# TYPE tpt_query_duration_seconds_sum counter\n");
-        out.push_str(&format!("tpt_query_duration_seconds_sum {dur_sum_seconds}\n"));
+        out.push_str(&format!(
+            "tpt_query_duration_seconds_sum {dur_sum_seconds}\n"
+        ));
 
-        out.push_str("# HELP tpt_query_duration_seconds_count Number of query duration observations.\n");
+        out.push_str(
+            "# HELP tpt_query_duration_seconds_count Number of query duration observations.\n",
+        );
         out.push_str("# TYPE tpt_query_duration_seconds_count counter\n");
-        out.push_str(&format!("tpt_query_duration_seconds_count {}\n", self.query_duration_count.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_query_duration_seconds_count {}\n",
+            self.query_duration_count.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_wal_fsyncs_total WAL fsync calls since start.\n");
         out.push_str("# TYPE tpt_wal_fsyncs_total counter\n");
-        out.push_str(&format!("tpt_wal_fsyncs_total {}\n", self.wal_fsyncs_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_wal_fsyncs_total {}\n",
+            self.wal_fsyncs_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_object_store_gets_total Object store GET calls (post-cache).\n");
         out.push_str("# TYPE tpt_object_store_gets_total counter\n");
-        out.push_str(&format!("tpt_object_store_gets_total {}\n", self.object_store_gets_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_object_store_gets_total {}\n",
+            self.object_store_gets_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_object_store_puts_total Object store PUT/PUT-if-match calls.\n");
         out.push_str("# TYPE tpt_object_store_puts_total counter\n");
-        out.push_str(&format!("tpt_object_store_puts_total {}\n", self.object_store_puts_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_object_store_puts_total {}\n",
+            self.object_store_puts_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP tpt_object_store_cas_conflicts_total Failed compare-and-swap PUTs (lease/manifest contention).\n");
         out.push_str("# TYPE tpt_object_store_cas_conflicts_total counter\n");
         out.push_str(&format!(
             "tpt_object_store_cas_conflicts_total {}\n",
-            self.object_store_cas_conflicts_total.load(Ordering::Relaxed)
+            self.object_store_cas_conflicts_total
+                .load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP tpt_cache_hits_total NVMe cache-aside hits for sst/wal objects.\n");
         out.push_str("# TYPE tpt_cache_hits_total counter\n");
-        out.push_str(&format!("tpt_cache_hits_total {}\n", self.cache_hits_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_cache_hits_total {}\n",
+            self.cache_hits_total.load(Ordering::Relaxed)
+        ));
 
-        out.push_str("# HELP tpt_cache_misses_total NVMe cache-aside misses for sst/wal objects.\n");
+        out.push_str(
+            "# HELP tpt_cache_misses_total NVMe cache-aside misses for sst/wal objects.\n",
+        );
         out.push_str("# TYPE tpt_cache_misses_total counter\n");
-        out.push_str(&format!("tpt_cache_misses_total {}\n", self.cache_misses_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "tpt_cache_misses_total {}\n",
+            self.cache_misses_total.load(Ordering::Relaxed)
+        ));
 
         out
     }
@@ -175,7 +213,11 @@ async fn serve_one(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 4096];
     let n = stream.read(&mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
-    let path = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/");
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
 
     let (status, body) = if path == "/metrics" {
         ("200 OK", Metrics::global().render())

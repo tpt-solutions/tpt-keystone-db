@@ -42,7 +42,10 @@ pub fn load_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<TlsAccep
 /// upgraded stream. Otherwise (no `SSLRequest`, or TLS not configured)
 /// returns the original `TcpStream` unchanged — the client falls back to
 /// sending its real `StartupMessage` in plaintext next, exactly as today.
-pub async fn negotiate(mut stream: TcpStream, acceptor: Option<&TlsAcceptor>) -> anyhow::Result<BoxedStream> {
+pub async fn negotiate(
+    mut stream: TcpStream,
+    acceptor: Option<&TlsAcceptor>,
+) -> anyhow::Result<BoxedStream> {
     let mut probe = [0u8; 8];
     let mut peeked = 0usize;
     while peeked < 8 {

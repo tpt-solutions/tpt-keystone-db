@@ -37,7 +37,12 @@ pub fn derive_credential(password: &str, salt: &[u8], iterations: u32) -> ScramC
     let stored_key: [u8; 32] = Sha256::digest(client_key).into();
     let server_key = hmac_sha256(&salted_password, b"Server Key");
 
-    ScramCredential { salt: salt.to_vec(), iterations, stored_key, server_key }
+    ScramCredential {
+        salt: salt.to_vec(),
+        iterations,
+        stored_key,
+        server_key,
+    }
 }
 
 /// Generates a fresh random salt for a new/rotated credential.
@@ -68,7 +73,9 @@ pub fn server_first(client_first: &[u8], cred: &ScramCredential) -> anyhow::Resu
     let bare = s
         .strip_prefix("n,,")
         .or_else(|| s.strip_prefix("y,,"))
-        .ok_or_else(|| anyhow::anyhow!("unsupported SCRAM gs2-header (channel binding not supported)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("unsupported SCRAM gs2-header (channel binding not supported)")
+        })?;
     let client_nonce = field(bare, 'r').ok_or_else(|| anyhow::anyhow!("missing client nonce"))?;
 
     let mut server_nonce_bytes = vec![0u8; 18];
@@ -82,7 +89,11 @@ pub fn server_first(client_first: &[u8], cred: &ScramCredential) -> anyhow::Resu
         cred.iterations
     );
 
-    Ok(ServerFirst { client_first_bare: bare.to_string(), server_first_message, combined_nonce })
+    Ok(ServerFirst {
+        client_first_bare: bare.to_string(),
+        server_first_message,
+        combined_nonce,
+    })
 }
 
 impl ServerFirst {
@@ -103,7 +114,8 @@ pub fn verify_client_final(
     cred: &ScramCredential,
 ) -> anyhow::Result<Vec<u8>> {
     let s = std::str::from_utf8(client_final)?;
-    let channel_binding = field(s, 'c').ok_or_else(|| anyhow::anyhow!("missing channel binding"))?;
+    let channel_binding =
+        field(s, 'c').ok_or_else(|| anyhow::anyhow!("missing channel binding"))?;
     let nonce = field(s, 'r').ok_or_else(|| anyhow::anyhow!("missing nonce"))?;
     if nonce != first.combined_nonce {
         anyhow::bail!("nonce mismatch");
@@ -115,7 +127,10 @@ pub fn verify_client_final(
     }
 
     let without_proof = format!("c={channel_binding},r={nonce}");
-    let auth_message = format!("{},{},{}", first.client_first_bare, first.server_first_message, without_proof);
+    let auth_message = format!(
+        "{},{},{}",
+        first.client_first_bare, first.server_first_message, without_proof
+    );
 
     let client_signature = hmac_sha256(&cred.stored_key, auth_message.as_bytes());
     let mut client_key = [0u8; 32];
@@ -158,7 +173,11 @@ mod tests {
     /// implementation to prove correct/incorrect passwords are told apart —
     /// there's no SCRAM client elsewhere in this codebase, so the client
     /// half is reimplemented here, test-only, from the same RFC 5802 spec.
-    fn client_exchange(gs2_header: &str, password_for_client: &str, cred: &ScramCredential) -> anyhow::Result<Vec<u8>> {
+    fn client_exchange(
+        gs2_header: &str,
+        password_for_client: &str,
+        cred: &ScramCredential,
+    ) -> anyhow::Result<Vec<u8>> {
         let client_nonce = "fyko+d2lbbFgONRv9qkxdawL";
         let client_first_bare = format!("n=tester,r={client_nonce}");
         let client_first = format!("{gs2_header}{client_first_bare}");
@@ -166,13 +185,21 @@ mod tests {
         let first = server_first(client_first.as_bytes(), cred)?;
 
         let mut salted_password = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<Sha256>(password_for_client.as_bytes(), &cred.salt, cred.iterations, &mut salted_password);
+        pbkdf2::pbkdf2_hmac::<Sha256>(
+            password_for_client.as_bytes(),
+            &cred.salt,
+            cred.iterations,
+            &mut salted_password,
+        );
         let client_key = hmac_sha256(&salted_password, b"Client Key");
         let stored_key: [u8; 32] = Sha256::digest(client_key).into();
 
         let channel_binding = STANDARD.encode(gs2_header.as_bytes());
         let without_proof = format!("c={channel_binding},r={}", first.combined_nonce);
-        let auth_message = format!("{},{},{}", client_first_bare, first.server_first_message, without_proof);
+        let auth_message = format!(
+            "{},{},{}",
+            client_first_bare, first.server_first_message, without_proof
+        );
         let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
         let mut proof = [0u8; 32];
         for i in 0..32 {
@@ -189,7 +216,9 @@ mod tests {
         let cred = derive_credential("hunter2", &salt, 4096);
         let result = client_exchange("n,,", "hunter2", &cred);
         assert!(result.is_ok(), "{result:?}");
-        assert!(String::from_utf8(result.unwrap()).unwrap().starts_with("v="));
+        assert!(String::from_utf8(result.unwrap())
+            .unwrap()
+            .starts_with("v="));
     }
 
     /// Real `libpq` sends `y,,` (not `n,,`) over a TLS connection — it

@@ -41,11 +41,27 @@ fn node_store(bucket_dir: &std::path::Path, cache_dir: &std::path::Path) -> Arc<
     Arc::new(CachedObjectStore::new(backend, cache_dir, 64 * 1024 * 1024).unwrap())
 }
 
-fn open_writer(bucket: &std::path::Path, local: &std::path::Path, cache: &std::path::Path) -> Database {
+fn open_writer(
+    bucket: &std::path::Path,
+    local: &std::path::Path,
+    cache: &std::path::Path,
+) -> Database {
     let store = node_store(bucket, cache);
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "chaos-writer".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "chaos-writer".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    Database::open(local, store, lease.handle(), NodeRole::Writer, Default::default()).unwrap()
+    Database::open(
+        local,
+        store,
+        lease.handle(),
+        NodeRole::Writer,
+        Default::default(),
+    )
+    .unwrap()
 }
 
 /// Runs `scenarios` seeded torn-write crashes against fresh nodes and
@@ -65,7 +81,13 @@ fn torn_write_recovers_exactly_the_last_durable_prefix() {
         let db = open_writer(bucket.path(), local.path(), cache.path());
         db.create_table(
             "t",
-            &[ColumnDef { name: "id".into(), col_type: ColumnType::Text, nullable: false, default: None, is_pk: true }],
+            &[ColumnDef {
+                name: "id".into(),
+                col_type: ColumnType::Text,
+                nullable: false,
+                default: None,
+                is_pk: true,
+            }],
         )
         .unwrap();
 
@@ -75,7 +97,12 @@ fn torn_write_recovers_exactly_the_last_durable_prefix() {
         // encoding here to compute it.
         let mut offsets = vec![std::fs::metadata(&wal_path).unwrap().len()];
         for i in 0..ROWS {
-            db.write("t", format!("k{i:02}").as_bytes(), format!("v{i:02}").as_bytes()).unwrap();
+            db.write(
+                "t",
+                format!("k{i:02}").as_bytes(),
+                format!("v{i:02}").as_bytes(),
+            )
+            .unwrap();
             offsets.push(std::fs::metadata(&wal_path).unwrap().len());
         }
         drop(db); // release the file handle before mutating the file directly (matters on Windows)
@@ -93,7 +120,10 @@ fn torn_write_recovers_exactly_the_last_durable_prefix() {
 
         {
             use std::io::{Seek, SeekFrom, Write};
-            let mut f = std::fs::OpenOptions::new().write(true).open(&wal_path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&wal_path)
+                .unwrap();
             f.set_len(truncate_len).unwrap();
             f.seek(SeekFrom::Start(truncate_len)).unwrap();
             f.flush().unwrap();
@@ -114,13 +144,26 @@ fn torn_write_recovers_exactly_the_last_durable_prefix() {
             rows.len()
         );
         for (i, row) in rows.iter().enumerate() {
-            assert_eq!(row.key, format!("k{i:02}").into_bytes(), "seed {seed}: row {i} key mismatch");
-            assert_eq!(row.value, format!("v{i:02}").into_bytes(), "seed {seed}: row {i} value corrupted");
+            assert_eq!(
+                row.key,
+                format!("k{i:02}").into_bytes(),
+                "seed {seed}: row {i} key mismatch"
+            );
+            assert_eq!(
+                row.value,
+                format!("v{i:02}").into_bytes(),
+                "seed {seed}: row {i} value corrupted"
+            );
         }
 
         // The recovered node isn't just "didn't panic" — it's fully usable:
         // a fresh write after recovery must succeed and be visible.
-        recovered.write("t", b"after-recovery", b"still-works").unwrap();
-        assert!(recovered.read("t", b"after-recovery").unwrap().is_some(), "seed {seed}: node unusable after recovery");
+        recovered
+            .write("t", b"after-recovery", b"still-works")
+            .unwrap();
+        assert!(
+            recovered.read("t", b"after-recovery").unwrap().is_some(),
+            "seed {seed}: node unusable after recovery"
+        );
     }
 }

@@ -35,7 +35,11 @@ impl Manifest {
     /// Attempt to write a new manifest revision, only if `expected_etag`
     /// still matches the store's current state (`None` = manifest must not
     /// exist yet). Returns the new ETag on success.
-    pub fn save_cas(store: &dyn ObjectStore, manifest: &Manifest, expected_etag: Option<&str>) -> Result<String, CasError> {
+    pub fn save_cas(
+        store: &dyn ObjectStore,
+        manifest: &Manifest,
+        expected_etag: Option<&str>,
+    ) -> Result<String, CasError> {
         let bytes = bincode::serialize(manifest).map_err(|e| CasError::Other(e.into()))?;
         let meta = store.put_if_match(Self::KEY, &bytes, expected_etag)?;
         Ok(meta.etag)
@@ -58,7 +62,11 @@ mod tests {
     fn save_cas_then_reload_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let store = LocalFsObjectStore::open(dir.path()).unwrap();
-        let m = Manifest { sstable_ids: vec![1, 2, 3], wal_segment_seq: 5, writer_fencing_token: 1 };
+        let m = Manifest {
+            sstable_ids: vec![1, 2, 3],
+            wal_segment_seq: 5,
+            writer_fencing_token: 1,
+        };
         let etag = Manifest::save_cas(&store, &m, None).unwrap();
 
         let (loaded, loaded_etag) = Manifest::load(&store).unwrap().unwrap();
@@ -66,7 +74,10 @@ mod tests {
         assert_eq!(loaded_etag, etag);
 
         // Stale etag is rejected.
-        let m2 = Manifest { sstable_ids: vec![1, 2, 3, 4], ..m.clone() };
+        let m2 = Manifest {
+            sstable_ids: vec![1, 2, 3, 4],
+            ..m.clone()
+        };
         let err = Manifest::save_cas(&store, &m2, None).unwrap_err();
         assert!(matches!(err, CasError::Conflict { .. }));
 

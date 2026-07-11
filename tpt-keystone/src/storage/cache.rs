@@ -83,7 +83,11 @@ impl NvmeCache {
         let tick = self.clock.fetch_add(1, Ordering::Relaxed);
         entries.insert(
             key.to_string(),
-            CacheEntry { size: meta.size, etag: meta.etag.clone(), last_access: tick },
+            CacheEntry {
+                size: meta.size,
+                etag: meta.etag.clone(),
+                last_access: tick,
+            },
         );
         self.evict_if_needed(&mut entries);
     }
@@ -125,7 +129,10 @@ pub struct CachedObjectStore<S: ObjectStore> {
 
 impl<S: ObjectStore> CachedObjectStore<S> {
     pub fn new(inner: S, cache_dir: &Path, cache_max_bytes: u64) -> Result<Self> {
-        Ok(Self { inner, cache: NvmeCache::open(cache_dir, cache_max_bytes)? })
+        Ok(Self {
+            inner,
+            cache: NvmeCache::open(cache_dir, cache_max_bytes)?,
+        })
     }
 
     pub fn cache_stats(&self) -> (usize, u64) {
@@ -147,7 +154,9 @@ fn is_cacheable(key: &str) -> bool {
 impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
     fn get(&self, key: &str) -> Result<Option<(Vec<u8>, ObjectMeta)>> {
         let metrics = crate::metrics::Metrics::global();
-        metrics.object_store_gets_total.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .object_store_gets_total
+            .fetch_add(1, Ordering::Relaxed);
         if !is_cacheable(key) {
             return self.inner.get(key);
         }
@@ -166,7 +175,9 @@ impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<ObjectMeta> {
-        crate::metrics::Metrics::global().object_store_puts_total.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::Metrics::global()
+            .object_store_puts_total
+            .fetch_add(1, Ordering::Relaxed);
         let meta = self.inner.put(key, data)?;
         if is_cacheable(key) {
             self.cache.put(key, data, &meta);
@@ -174,14 +185,26 @@ impl<S: ObjectStore> ObjectStore for CachedObjectStore<S> {
         Ok(meta)
     }
 
-    fn put_if_match(&self, key: &str, data: &[u8], expected_etag: Option<&str>) -> Result<ObjectMeta, CasError> {
-        crate::metrics::Metrics::global().object_store_puts_total.fetch_add(1, Ordering::Relaxed);
-        let meta = self.inner.put_if_match(key, data, expected_etag).map_err(|e| {
-            if matches!(e, CasError::Conflict { .. }) {
-                crate::metrics::Metrics::global().object_store_cas_conflicts_total.fetch_add(1, Ordering::Relaxed);
-            }
-            e
-        })?;
+    fn put_if_match(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected_etag: Option<&str>,
+    ) -> Result<ObjectMeta, CasError> {
+        crate::metrics::Metrics::global()
+            .object_store_puts_total
+            .fetch_add(1, Ordering::Relaxed);
+        let meta = self
+            .inner
+            .put_if_match(key, data, expected_etag)
+            .map_err(|e| {
+                if matches!(e, CasError::Conflict { .. }) {
+                    crate::metrics::Metrics::global()
+                        .object_store_cas_conflicts_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                e
+            })?;
         if is_cacheable(key) {
             self.cache.put(key, data, &meta);
         }
@@ -228,7 +251,11 @@ mod tests {
 
         store.put("manifest.bin", b"v1").unwrap();
         assert_eq!(store.get("manifest.bin").unwrap().unwrap().0, b"v1");
-        assert_eq!(store.cache_stats(), (0, 0), "manifest.bin must never be cached");
+        assert_eq!(
+            store.cache_stats(),
+            (0, 0),
+            "manifest.bin must never be cached"
+        );
 
         // A concurrent writer updates it directly on the backing store...
         store.put("manifest.bin", b"v2").unwrap();
@@ -239,13 +266,34 @@ mod tests {
     #[test]
     fn eviction_respects_byte_budget() {
         let cache = NvmeCache::open(tempfile::tempdir().unwrap().path(), 10).unwrap();
-        cache.put("a", b"12345", &ObjectMeta { etag: "a".into(), size: 5 });
-        cache.put("b", b"12345", &ObjectMeta { etag: "b".into(), size: 5 });
+        cache.put(
+            "a",
+            b"12345",
+            &ObjectMeta {
+                etag: "a".into(),
+                size: 5,
+            },
+        );
+        cache.put(
+            "b",
+            b"12345",
+            &ObjectMeta {
+                etag: "b".into(),
+                size: 5,
+            },
+        );
         assert_eq!(cache.stats(), (2, 10));
 
         // Touch "b" so "a" becomes the LRU victim.
         cache.get("b");
-        cache.put("c", b"12345", &ObjectMeta { etag: "c".into(), size: 5 });
+        cache.put(
+            "c",
+            b"12345",
+            &ObjectMeta {
+                etag: "c".into(),
+                size: 5,
+            },
+        );
 
         let (count, total) = cache.stats();
         assert_eq!(count, 2);

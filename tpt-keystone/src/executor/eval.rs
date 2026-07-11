@@ -112,7 +112,10 @@ pub struct OuterRow {
 
 impl OuterRow {
     fn find_scope(&self, qualifier: &str) -> Option<std::ops::Range<usize>> {
-        self.table_scopes.iter().find(|(name, _)| name == qualifier).map(|(_, r)| r.clone())
+        self.table_scopes
+            .iter()
+            .find(|(name, _)| name == qualifier)
+            .map(|(_, r)| r.clone())
     }
 }
 
@@ -145,21 +148,40 @@ impl RowContext {
         }
     }
 
-    pub fn with_table_scopes(mut self, table_scopes: Vec<(String, std::ops::Range<usize>)>) -> Self {
+    pub fn with_table_scopes(
+        mut self,
+        table_scopes: Vec<(String, std::ops::Range<usize>)>,
+    ) -> Self {
         self.table_scopes = table_scopes;
         self
     }
 
     fn find_scope(&self, qualifier: &str) -> Option<std::ops::Range<usize>> {
-        self.table_scopes.iter().find(|(name, _)| name == qualifier).map(|(_, r)| r.clone())
+        self.table_scopes
+            .iter()
+            .find(|(name, _)| name == qualifier)
+            .map(|(_, r)| r.clone())
     }
 
     pub fn new(values: Vec<Option<Vec<u8>>>, schema: Option<Arc<TableSchema>>) -> Self {
-        Self { values, schema, ..Self::empty() }
+        Self {
+            values,
+            schema,
+            ..Self::empty()
+        }
     }
 
-    pub fn with_db(values: Vec<Option<Vec<u8>>>, schema: Option<Arc<TableSchema>>, db: Arc<Database>) -> Self {
-        Self { values, schema, db: Some(db), ..Self::empty() }
+    pub fn with_db(
+        values: Vec<Option<Vec<u8>>>,
+        schema: Option<Arc<TableSchema>>,
+        db: Arc<Database>,
+    ) -> Self {
+        Self {
+            values,
+            schema,
+            db: Some(db),
+            ..Self::empty()
+        }
     }
 
     pub fn with_outer(mut self, outer: Vec<OuterRow>) -> Self {
@@ -180,7 +202,11 @@ impl RowContext {
     /// The (schema, values) pair for this row, usable as an outer context
     /// for a nested (correlated) subquery.
     pub fn as_outer_row(&self) -> OuterRow {
-        OuterRow { schema: self.schema.clone(), values: self.values.clone(), table_scopes: self.table_scopes.clone() }
+        OuterRow {
+            schema: self.schema.clone(),
+            values: self.values.clone(),
+            table_scopes: self.table_scopes.clone(),
+        }
     }
 
     /// The full outer chain a nested subquery should see: this row's own
@@ -206,8 +232,14 @@ impl RowContext {
             Expr::QualifiedIdent(table, col) => self.resolve_column(Some(table), col),
 
             Expr::Param(n) => {
-                let idx = (*n).checked_sub(1).ok_or_else(|| anyhow::anyhow!("invalid parameter ${n}"))? as usize;
-                self.params.get(idx).cloned().ok_or_else(|| anyhow::anyhow!("parameter ${n} not bound"))
+                let idx = (*n)
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("invalid parameter ${n}"))?
+                    as usize;
+                self.params
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("parameter ${n} not bound"))
             }
 
             Expr::UnaryOp { op, expr } => {
@@ -240,7 +272,12 @@ impl RowContext {
                 Ok(Value::Bool(if *negated { !result } else { result }))
             }
 
-            Expr::Between { expr, low, high, negated } => {
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
                 let v = self.eval(expr)?;
                 let lo = self.eval(low)?;
                 let hi = self.eval(high)?;
@@ -248,7 +285,11 @@ impl RowContext {
                 Ok(Value::Bool(if *negated { !in_range } else { in_range }))
             }
 
-            Expr::Like { expr, pattern, negated } => {
+            Expr::Like {
+                expr,
+                pattern,
+                negated,
+            } => {
                 let v = self.eval(expr)?;
                 let p = self.eval(pattern)?;
                 match (&v, &p) {
@@ -260,7 +301,11 @@ impl RowContext {
                 }
             }
 
-            Expr::In { expr, list, negated } => {
+            Expr::In {
+                expr,
+                list,
+                negated,
+            } => {
                 let found = match list {
                     InList::Exprs(items) => {
                         let v = self.eval(expr)?;
@@ -278,10 +323,12 @@ impl RowContext {
                         let v = self.eval(expr)?;
                         let rows = self.run_subquery_rows(subquery)?;
                         rows.into_iter().any(|row| {
-                            row.first().map(|cell| {
-                                let iv = Value::from_bytes(cell.as_ref().map(|b| b.as_slice()));
-                                value_compare(&v, &iv).is_ok_and(|c| c == 0)
-                            }).unwrap_or(false)
+                            row.first()
+                                .map(|cell| {
+                                    let iv = Value::from_bytes(cell.as_ref().map(|b| b.as_slice()));
+                                    value_compare(&v, &iv).is_ok_and(|c| c == 0)
+                                })
+                                .unwrap_or(false)
                         })
                     }
                 };
@@ -299,7 +346,11 @@ impl RowContext {
                 cast_value(v, ty)
             }
 
-            Expr::Function { name, args, distinct } => {
+            Expr::Function {
+                name,
+                args,
+                distinct,
+            } => {
                 let key = format!("{expr:?}");
                 if let Some(v) = self.computed.as_ref().and_then(|m| m.get(&key)) {
                     return Ok(v.clone());
@@ -310,7 +361,11 @@ impl RowContext {
                 self.eval_function(name, args, *distinct)
             }
 
-            Expr::Case { operand, branches, else_ } => {
+            Expr::Case {
+                operand,
+                branches,
+                else_,
+            } => {
                 let base = operand.as_ref().map(|e| self.eval(e)).transpose()?;
                 for (cond, result) in branches {
                     let cond_val = if let Some(ref b) = base {
@@ -353,8 +408,14 @@ impl RowContext {
     }
 
     /// Run a (possibly correlated) subquery and return its raw result rows.
-    fn run_subquery_rows(&self, subquery: &crate::sql::ast::SelectStmt) -> anyhow::Result<Vec<Vec<Option<Vec<u8>>>>> {
-        let db = self.db.clone().ok_or_else(|| anyhow::anyhow!("subqueries require a database context"))?;
+    fn run_subquery_rows(
+        &self,
+        subquery: &crate::sql::ast::SelectStmt,
+    ) -> anyhow::Result<Vec<Vec<Option<Vec<u8>>>>> {
+        let db = self
+            .db
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("subqueries require a database context"))?;
         let outer = self.outer_chain_for_subquery();
         let result = super::execute_select_with_cte(
             subquery.clone(),
@@ -378,7 +439,9 @@ impl RowContext {
             }
             for outer_row in self.outer.iter().rev() {
                 if let Some(range) = outer_row.find_scope(q) {
-                    if let Some(v) = self.lookup_in_range(&outer_row.schema, &outer_row.values, range, name) {
+                    if let Some(v) =
+                        self.lookup_in_range(&outer_row.schema, &outer_row.values, range, name)
+                    {
                         return Ok(v);
                     }
                 }
@@ -387,13 +450,17 @@ impl RowContext {
 
         if let Some(schema) = self.schema.as_ref() {
             if let Some(idx) = schema.columns.iter().position(|c| c.name == name) {
-                return Ok(Value::from_bytes(self.values.get(idx).and_then(|v| v.as_deref())));
+                return Ok(Value::from_bytes(
+                    self.values.get(idx).and_then(|v| v.as_deref()),
+                ));
             }
         }
         for outer_row in self.outer.iter().rev() {
             if let Some(schema) = outer_row.schema.as_ref() {
                 if let Some(idx) = schema.columns.iter().position(|c| c.name == name) {
-                    return Ok(Value::from_bytes(outer_row.values.get(idx).and_then(|v| v.as_deref())));
+                    return Ok(Value::from_bytes(
+                        outer_row.values.get(idx).and_then(|v| v.as_deref()),
+                    ));
                 }
             }
         }
@@ -414,7 +481,9 @@ impl RowContext {
         let schema = schema.as_ref()?;
         let cols = schema.columns.get(range.clone())?;
         let idx = cols.iter().position(|c| c.name == name)?;
-        Some(Value::from_bytes(values.get(range.start + idx).and_then(|v| v.as_deref())))
+        Some(Value::from_bytes(
+            values.get(range.start + idx).and_then(|v| v.as_deref()),
+        ))
     }
 
     fn eval_binop(&self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> anyhow::Result<Value> {
@@ -422,13 +491,17 @@ impl RowContext {
         match op {
             BinOp::And => {
                 let l = self.eval(lhs)?;
-                if !l.is_truthy() { return Ok(Value::Bool(false)); }
+                if !l.is_truthy() {
+                    return Ok(Value::Bool(false));
+                }
                 let r = self.eval(rhs)?;
                 return Ok(Value::Bool(r.is_truthy()));
             }
             BinOp::Or => {
                 let l = self.eval(lhs)?;
-                if l.is_truthy() { return Ok(Value::Bool(true)); }
+                if l.is_truthy() {
+                    return Ok(Value::Bool(true));
+                }
                 let r = self.eval(rhs)?;
                 return Ok(Value::Bool(r.is_truthy()));
             }
@@ -444,7 +517,11 @@ impl RowContext {
             }
             BinOp::Concat => match (&l, &r) {
                 (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{a}{b}"))),
-                _ => Ok(Value::Text(format!("{}{}", val_to_text(&l), val_to_text(&r)))),
+                _ => Ok(Value::Text(format!(
+                    "{}{}",
+                    val_to_text(&l),
+                    val_to_text(&r)
+                ))),
             },
             BinOp::Eq => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c == 0))),
             BinOp::NotEq => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c != 0))),
@@ -470,10 +547,15 @@ impl RowContext {
     /// `nextval('foo_seq'::regclass)`) is handled transparently by
     /// `cast_value`'s regclass pass-through — nothing special needed here.
     fn eval_sequence_name_arg(&self, args: &[Expr], fn_name: &str) -> anyhow::Result<String> {
-        let arg = args.first().ok_or_else(|| anyhow::anyhow!("{fn_name}() requires a sequence name argument"))?;
+        let arg = args
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("{fn_name}() requires a sequence name argument"))?;
         match self.eval(arg)? {
             Value::Text(s) => Ok(s),
-            other => anyhow::bail!("{fn_name}() requires a text sequence name, got {}", other.type_name()),
+            other => anyhow::bail!(
+                "{fn_name}() requires a text sequence name, got {}",
+                other.type_name()
+            ),
         }
     }
 
@@ -492,7 +574,10 @@ impl RowContext {
     fn eval_vector(&self, expr: &Expr) -> anyhow::Result<crate::vector::vector::Vector> {
         match self.eval(expr)? {
             Value::Text(s) => crate::vector::vector::Vector::from_text(&s),
-            other => anyhow::bail!("expected vector (\"[1.0,2.0,...]\" text), got {}", other.type_name()),
+            other => anyhow::bail!(
+                "expected vector (\"[1.0,2.0,...]\" text), got {}",
+                other.type_name()
+            ),
         }
     }
 
@@ -509,24 +594,36 @@ impl RowContext {
             "pg_backend_pid" => Ok(Value::Int(1)),
             "pg_postmaster_start_time" => Ok(Value::Text("2026-06-30 00:00:00+00".into())),
             "nextval" => {
-                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("nextval() requires a database context"))?;
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("nextval() requires a database context"))?;
                 let name = self.eval_sequence_name_arg(args, "nextval")?;
                 Ok(Value::Int(db.nextval(&name)?))
             }
             "currval" => {
-                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("currval() requires a database context"))?;
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("currval() requires a database context"))?;
                 let name = self.eval_sequence_name_arg(args, "currval")?;
                 Ok(Value::Int(db.currval(&name)?))
             }
             "setval" => {
-                let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("setval() requires a database context"))?;
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("setval() requires a database context"))?;
                 if args.len() < 2 || args.len() > 3 {
                     anyhow::bail!("setval() requires 2 or 3 arguments");
                 }
                 let name = self.eval_sequence_name_arg(args, "setval")?;
                 let value = match self.eval(&args[1])? {
                     Value::Int(n) => n,
-                    other => anyhow::bail!("setval() requires an integer value, got {}", other.type_name()),
+                    other => anyhow::bail!(
+                        "setval() requires an integer value, got {}",
+                        other.type_name()
+                    ),
                 };
                 let is_called = match args.get(2) {
                     Some(e) => self.eval(e)?.is_truthy(),
@@ -535,7 +632,10 @@ impl RowContext {
                 Ok(Value::Int(db.setval(&name, value, is_called)?))
             }
             "abs" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("abs() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("abs() requires 1 argument"))?,
+                )?;
                 match v {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
@@ -543,21 +643,30 @@ impl RowContext {
                 }
             }
             "upper" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("upper() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("upper() requires 1 argument"))?,
+                )?;
                 match v {
                     Value::Text(s) => Ok(Value::Text(s.to_uppercase())),
                     _ => anyhow::bail!("upper() requires text argument"),
                 }
             }
             "lower" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("lower() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("lower() requires 1 argument"))?,
+                )?;
                 match v {
                     Value::Text(s) => Ok(Value::Text(s.to_lowercase())),
                     _ => anyhow::bail!("lower() requires text argument"),
                 }
             }
             "length" | "char_length" | "character_length" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("length() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("length() requires 1 argument"))?,
+                )?;
                 match v {
                     Value::Text(s) => Ok(Value::Int(s.chars().count() as i64)),
                     _ => anyhow::bail!("length() requires text argument"),
@@ -588,7 +697,9 @@ impl RowContext {
                 let mut best: Option<Value> = None;
                 for arg in args {
                     let v = self.eval(arg)?;
-                    if matches!(v, Value::Null) { continue; }
+                    if matches!(v, Value::Null) {
+                        continue;
+                    }
                     best = Some(match best {
                         None => v,
                         Some(ref b) if value_compare(&v, b).is_ok_and(|c| c > 0) => v,
@@ -601,7 +712,9 @@ impl RowContext {
                 let mut best: Option<Value> = None;
                 for arg in args {
                     let v = self.eval(arg)?;
-                    if matches!(v, Value::Null) { continue; }
+                    if matches!(v, Value::Null) {
+                        continue;
+                    }
                     best = Some(match best {
                         None => v,
                         Some(ref b) if value_compare(&v, b).is_ok_and(|c| c < 0) => v,
@@ -618,7 +731,10 @@ impl RowContext {
                 if args.len() < 2 || args.len() > 4 {
                     anyhow::bail!("{name}() requires 2-4 arguments (x, y, [z], [t])");
                 }
-                let nums = args.iter().map(|a| self.eval(a)?.as_f64()).collect::<anyhow::Result<Vec<f64>>>()?;
+                let nums = args
+                    .iter()
+                    .map(|a| self.eval(a)?.as_f64())
+                    .collect::<anyhow::Result<Vec<f64>>>()?;
                 let coord = Coord {
                     x: nums[0],
                     y: nums[1],
@@ -628,15 +744,24 @@ impl RowContext {
                 Ok(Value::Text(Geometry::Point(coord).to_wkt()))
             }
             "st_geomfromtext" | "st_geographyfromtext" => {
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
+                )?;
                 Ok(Value::Text(geom.to_wkt()))
             }
             "st_astext" => {
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_astext() requires 1 argument"))?)?;
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_astext() requires 1 argument"))?,
+                )?;
                 Ok(Value::Text(geom.to_wkt()))
             }
             "st_x" | "st_y" | "st_z" => {
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
+                )?;
                 let c = geom.representative_point();
                 match name.to_ascii_lowercase().as_str() {
                     "st_x" => Ok(Value::Float(c.x)),
@@ -645,8 +770,15 @@ impl RowContext {
                 }
             }
             "st_t" | "st_time" => {
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
-                Ok(geom.representative_point().t.map(Value::Int).unwrap_or(Value::Null))
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
+                )?;
+                Ok(geom
+                    .representative_point()
+                    .t
+                    .map(Value::Int)
+                    .unwrap_or(Value::Null))
             }
             "st_distance" => {
                 if args.len() != 2 {
@@ -654,7 +786,9 @@ impl RowContext {
                 }
                 let a = self.eval_geom(&args[0])?.representative_point();
                 let b = self.eval_geom(&args[1])?.representative_point();
-                Ok(Value::Float(crate::geo::geometry::haversine_distance_m(a.x, a.y, b.x, b.y)))
+                Ok(Value::Float(crate::geo::geometry::haversine_distance_m(
+                    a.x, a.y, b.x, b.y,
+                )))
             }
             "st_dwithin" => {
                 if args.len() != 3 {
@@ -672,14 +806,20 @@ impl RowContext {
                 }
                 // ST_Within(point, polygon) vs ST_Contains(polygon, point) —
                 // same underlying test, arguments swapped.
-                let (point_arg, poly_arg) = if name.eq_ignore_ascii_case("st_within") { (&args[0], &args[1]) } else { (&args[1], &args[0]) };
+                let (point_arg, poly_arg) = if name.eq_ignore_ascii_case("st_within") {
+                    (&args[0], &args[1])
+                } else {
+                    (&args[1], &args[0])
+                };
                 let point = self.eval_geom(point_arg)?.representative_point();
                 let poly = self.eval_geom(poly_arg)?;
                 let Geometry::Polygon(rings) = &poly else {
                     anyhow::bail!("{name}() requires a POLYGON argument");
                 };
                 let exterior = rings.first().map(|r| r.as_slice()).unwrap_or(&[]);
-                Ok(Value::Bool(crate::geo::geometry::point_in_polygon(point.x, point.y, exterior)))
+                Ok(Value::Bool(crate::geo::geometry::point_in_polygon(
+                    point.x, point.y, exterior,
+                )))
             }
             "st_intersects" => {
                 if args.len() != 2 {
@@ -687,21 +827,35 @@ impl RowContext {
                 }
                 let a = self.eval_geom(&args[0])?;
                 let b = self.eval_geom(&args[1])?;
-                Ok(Value::Bool(crate::geo::geometry::bbox_intersects(&a.bbox(), &b.bbox())))
+                Ok(Value::Bool(crate::geo::geometry::bbox_intersects(
+                    &a.bbox(),
+                    &b.bbox(),
+                )))
             }
             "st_length" => {
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_length() requires 1 argument"))?)?;
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_length() requires 1 argument"))?,
+                )?;
                 let Geometry::LineString(pts) = &geom else {
                     anyhow::bail!("st_length() requires a LINESTRING argument");
                 };
-                let total = pts.windows(2).map(|w| crate::geo::geometry::haversine_distance_m(w[0].x, w[0].y, w[1].x, w[1].y)).sum();
+                let total = pts
+                    .windows(2)
+                    .map(|w| {
+                        crate::geo::geometry::haversine_distance_m(w[0].x, w[0].y, w[1].x, w[1].y)
+                    })
+                    .sum();
                 Ok(Value::Float(total))
             }
             "st_area" => {
                 // Planar shoelace formula in raw coordinate units (degrees^2
                 // if the geometry is lon/lat) — a documented simplification,
                 // not a geodesic ellipsoidal area calculation.
-                let geom = self.eval_geom(args.first().ok_or_else(|| anyhow::anyhow!("st_area() requires 1 argument"))?)?;
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_area() requires 1 argument"))?,
+                )?;
                 let Geometry::Polygon(rings) = &geom else {
                     anyhow::bail!("st_area() requires a POLYGON argument");
                 };
@@ -725,7 +879,9 @@ impl RowContext {
                 }
                 let a = self.eval_vector(&args[0])?;
                 let b = self.eval_vector(&args[1])?;
-                Ok(Value::Float(crate::vector::vector::l2_distance(a.as_slice(), b.as_slice())? as f64))
+                Ok(Value::Float(
+                    crate::vector::vector::l2_distance(a.as_slice(), b.as_slice())? as f64,
+                ))
             }
             "cosine_distance" | "vector_cosine_distance" => {
                 if args.len() != 2 {
@@ -733,7 +889,9 @@ impl RowContext {
                 }
                 let a = self.eval_vector(&args[0])?;
                 let b = self.eval_vector(&args[1])?;
-                Ok(Value::Float(crate::vector::vector::cosine_distance(a.as_slice(), b.as_slice())? as f64))
+                Ok(Value::Float(
+                    crate::vector::vector::cosine_distance(a.as_slice(), b.as_slice())? as f64,
+                ))
             }
             "cosine_similarity" | "vector_cosine_similarity" => {
                 if args.len() != 2 {
@@ -741,7 +899,10 @@ impl RowContext {
                 }
                 let a = self.eval_vector(&args[0])?;
                 let b = self.eval_vector(&args[1])?;
-                Ok(Value::Float(crate::vector::vector::cosine_similarity(a.as_slice(), b.as_slice())? as f64))
+                Ok(Value::Float(crate::vector::vector::cosine_similarity(
+                    a.as_slice(),
+                    b.as_slice(),
+                )? as f64))
             }
             "dot_product" | "vector_dot_product" | "inner_product" => {
                 if args.len() != 2 {
@@ -749,10 +910,15 @@ impl RowContext {
                 }
                 let a = self.eval_vector(&args[0])?;
                 let b = self.eval_vector(&args[1])?;
-                Ok(Value::Float(crate::vector::vector::dot_product(a.as_slice(), b.as_slice())? as f64))
+                Ok(Value::Float(
+                    crate::vector::vector::dot_product(a.as_slice(), b.as_slice())? as f64,
+                ))
             }
             "vector_dims" => {
-                let v = self.eval_vector(args.first().ok_or_else(|| anyhow::anyhow!("vector_dims() requires 1 argument"))?)?;
+                let v = self.eval_vector(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("vector_dims() requires 1 argument"))?,
+                )?;
                 Ok(Value::Int(v.dim() as i64))
             }
             // Chronos: SQL time extensions (`8chronos` phase). Timestamps
@@ -773,18 +939,29 @@ impl RowContext {
             // separate binary-jsonb-vs-text-json distinction at the `Value`
             // layer (see the module note above `json_of`).
             "json_typeof" | "jsonb_typeof" => {
-                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_typeof() requires 1 argument"))?)?)?;
-                Ok(Value::Text(match doc {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "boolean",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::Object(_) => "object",
-                }.to_string()))
+                let doc = json_of(
+                    &self
+                        .eval(args.first().ok_or_else(|| {
+                            anyhow::anyhow!("json_typeof() requires 1 argument")
+                        })?)?,
+                )?;
+                Ok(Value::Text(
+                    match doc {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                    }
+                    .to_string(),
+                ))
             }
             "json_valid" | "jsonb_valid" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_valid() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("json_valid() requires 1 argument"))?,
+                )?;
                 Ok(Value::Bool(match v {
                     Value::Text(s) => serde_json::from_str::<serde_json::Value>(&s).is_ok(),
                     Value::Null => true,
@@ -792,20 +969,31 @@ impl RowContext {
                 }))
             }
             "json_array_length" | "jsonb_array_length" => {
-                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("json_array_length() requires 1 argument"))?)?)?;
+                let doc = json_of(&self.eval(args.first().ok_or_else(|| {
+                    anyhow::anyhow!("json_array_length() requires 1 argument")
+                })?)?)?;
                 match doc {
                     serde_json::Value::Array(a) => Ok(Value::Int(a.len() as i64)),
                     _ => anyhow::bail!("json_array_length() requires a JSON array"),
                 }
             }
-            "json_extract_path" | "jsonb_extract_path" | "json_extract_path_text" | "jsonb_extract_path_text" => {
+            "json_extract_path"
+            | "jsonb_extract_path"
+            | "json_extract_path_text"
+            | "jsonb_extract_path_text" => {
                 let as_text = name.to_lowercase().ends_with("_text");
-                let doc = json_of(&self.eval(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires at least 1 argument"))?)?)?;
+                let doc =
+                    json_of(&self.eval(args.first().ok_or_else(|| {
+                        anyhow::anyhow!("{name}() requires at least 1 argument")
+                    })?)?)?;
                 let mut path = Vec::with_capacity(args.len().saturating_sub(1));
                 for a in &args[1..] {
                     match self.eval(a)? {
                         Value::Text(s) => path.push(s),
-                        other => anyhow::bail!("{name}(): expected a text path segment, got {}", other.type_name()),
+                        other => anyhow::bail!(
+                            "{name}(): expected a text path segment, got {}",
+                            other.type_name()
+                        ),
                     }
                 }
                 Ok(json_to_value(json_at_path(&doc, &path), as_text))
@@ -817,14 +1005,22 @@ impl RowContext {
                 let mut doc = json_of(&self.eval(&args[0])?)?;
                 let path_text = match self.eval(&args[1])? {
                     Value::Text(s) => s,
-                    other => anyhow::bail!("jsonb_set(): expected a '{{a,b,c}}' path literal, got {}", other.type_name()),
+                    other => anyhow::bail!(
+                        "jsonb_set(): expected a '{{a,b,c}}' path literal, got {}",
+                        other.type_name()
+                    ),
                 };
                 let new_value = json_of(&self.eval(&args[2])?)?;
                 let create_missing = match args.get(3) {
                     Some(e) => self.eval(e)?.is_truthy(),
                     None => true,
                 };
-                json_set_path(&mut doc, &parse_path_literal(&path_text), new_value, create_missing);
+                json_set_path(
+                    &mut doc,
+                    &parse_path_literal(&path_text),
+                    new_value,
+                    create_missing,
+                );
                 Ok(Value::Text(doc.to_string()))
             }
             "jsonb_contains" | "json_contains" => {
@@ -837,24 +1033,35 @@ impl RowContext {
             }
             "jsonb_build_object" | "json_build_object" => {
                 if args.len() % 2 != 0 {
-                    anyhow::bail!("{name}() requires an even number of arguments (key, value, ...)");
+                    anyhow::bail!(
+                        "{name}() requires an even number of arguments (key, value, ...)"
+                    );
                 }
                 let mut map = serde_json::Map::new();
                 for pair in args.chunks(2) {
                     let key = match self.eval(&pair[0])? {
                         Value::Text(s) => s,
-                        other => anyhow::bail!("{name}(): expected a text key, got {}", other.type_name()),
+                        other => anyhow::bail!(
+                            "{name}(): expected a text key, got {}",
+                            other.type_name()
+                        ),
                     };
                     map.insert(key, value_to_json(&self.eval(&pair[1])?));
                 }
                 Ok(Value::Text(serde_json::Value::Object(map).to_string()))
             }
             "jsonb_build_array" | "json_build_array" => {
-                let items: Vec<serde_json::Value> = args.iter().map(|a| Ok(value_to_json(&self.eval(a)?))).collect::<anyhow::Result<_>>()?;
+                let items: Vec<serde_json::Value> = args
+                    .iter()
+                    .map(|a| Ok(value_to_json(&self.eval(a)?)))
+                    .collect::<anyhow::Result<_>>()?;
                 Ok(Value::Text(serde_json::Value::Array(items).to_string()))
             }
             "to_json" | "to_jsonb" => {
-                let v = self.eval(args.first().ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?)?;
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
+                )?;
                 Ok(Value::Text(value_to_json(&v).to_string()))
             }
             other => {
@@ -864,7 +1071,10 @@ impl RowContext {
                 let Some(uf) = db.get_function(other) else {
                     anyhow::bail!("function \"{other}\" does not exist")
                 };
-                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<anyhow::Result<_>>()?;
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<anyhow::Result<_>>()?;
                 super::udf::call(db.udf_config(), &uf, &arg_vals)
             }
         }
@@ -872,8 +1082,12 @@ impl RowContext {
 
     fn eval_interval_arg(&self, expr: &Expr, fname: &str) -> anyhow::Result<i64> {
         match self.eval(expr)? {
-            Value::Text(s) => parse_interval(&s).ok_or_else(|| anyhow::anyhow!("{fname}(): invalid interval literal {s:?}")),
-            other => anyhow::bail!("{fname}(): expected an interval string literal, got {}", other.type_name()),
+            Value::Text(s) => parse_interval(&s)
+                .ok_or_else(|| anyhow::anyhow!("{fname}(): invalid interval literal {s:?}")),
+            other => anyhow::bail!(
+                "{fname}(): expected an interval string literal, got {}",
+                other.type_name()
+            ),
         }
     }
 
@@ -881,7 +1095,10 @@ impl RowContext {
         match self.eval(expr)? {
             Value::Int(n) => Ok(n),
             Value::Float(f) => Ok(f as i64),
-            other => anyhow::bail!("{fname}(): expected a timestamp (unix-ms integer), got {}", other.type_name()),
+            other => anyhow::bail!(
+                "{fname}(): expected a timestamp (unix-ms integer), got {}",
+                other.type_name()
+            ),
         }
     }
 }
@@ -923,14 +1140,21 @@ pub fn eval_expr(expr: &Expr, params: &[Value]) -> anyhow::Result<Value> {
 /// Like `eval_expr`, but with `db` available — needed for a column DEFAULT
 /// like `nextval('seq')`, which is the one row-independent expression that
 /// still needs write access to the database.
-pub fn eval_expr_with_db(expr: &Expr, db: Arc<Database>, params: &[Value]) -> anyhow::Result<Value> {
+pub fn eval_expr_with_db(
+    expr: &Expr,
+    db: Arc<Database>,
+    params: &[Value],
+) -> anyhow::Result<Value> {
     let mut ctx = RowContext::empty().with_params(params.to_vec());
     ctx.db = Some(db);
     ctx.eval(expr)
 }
 
 pub fn is_aggregate_name(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "count" | "sum" | "avg" | "min" | "max")
+    matches!(
+        name.to_lowercase().as_str(),
+        "count" | "sum" | "avg" | "min" | "max"
+    )
 }
 
 /// Reduce an aggregate function call over a group of rows.
@@ -1003,12 +1227,22 @@ pub fn eval_aggregate(
             let mut float_sum = 0f64;
             for v in &values {
                 match v {
-                    Value::Int(n) => { int_sum += n; float_sum += *n as f64; }
-                    Value::Float(f) => { is_float = true; float_sum += f; }
+                    Value::Int(n) => {
+                        int_sum += n;
+                        float_sum += *n as f64;
+                    }
+                    Value::Float(f) => {
+                        is_float = true;
+                        float_sum += f;
+                    }
                     _ => anyhow::bail!("sum() requires numeric argument"),
                 }
             }
-            Ok(if is_float { Value::Float(float_sum) } else { Value::Int(int_sum) })
+            Ok(if is_float {
+                Value::Float(float_sum)
+            } else {
+                Value::Int(int_sum)
+            })
         }
         "avg" => {
             if values.is_empty() {
@@ -1029,7 +1263,13 @@ pub fn eval_aggregate(
             for v in values {
                 best = Some(match best {
                     None => v,
-                    Some(b) => if value_compare(&v, &b).is_ok_and(|c| c < 0) { v } else { b },
+                    Some(b) => {
+                        if value_compare(&v, &b).is_ok_and(|c| c < 0) {
+                            v
+                        } else {
+                            b
+                        }
+                    }
                 });
             }
             Ok(best.unwrap_or(Value::Null))
@@ -1039,7 +1279,13 @@ pub fn eval_aggregate(
             for v in values {
                 best = Some(match best {
                     None => v,
-                    Some(b) => if value_compare(&v, &b).is_ok_and(|c| c > 0) { v } else { b },
+                    Some(b) => {
+                        if value_compare(&v, &b).is_ok_and(|c| c > 0) {
+                            v
+                        } else {
+                            b
+                        }
+                    }
                 });
             }
             Ok(best.unwrap_or(Value::Null))
@@ -1053,15 +1299,25 @@ fn eval_arithmetic(l: &Value, r: &Value, op: &BinOp) -> anyhow::Result<Value> {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => {
             let result = match op {
-                BinOp::Add => a.checked_add(*b).ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
-                BinOp::Sub => a.checked_sub(*b).ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
-                BinOp::Mul => a.checked_mul(*b).ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
+                BinOp::Add => a
+                    .checked_add(*b)
+                    .ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
+                BinOp::Sub => a
+                    .checked_sub(*b)
+                    .ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
+                BinOp::Mul => a
+                    .checked_mul(*b)
+                    .ok_or_else(|| anyhow::anyhow!("integer overflow"))?,
                 BinOp::Div => {
-                    if *b == 0 { anyhow::bail!("division by zero"); }
+                    if *b == 0 {
+                        anyhow::bail!("division by zero");
+                    }
                     a / b
                 }
                 BinOp::Mod => {
-                    if *b == 0 { anyhow::bail!("division by zero"); }
+                    if *b == 0 {
+                        anyhow::bail!("division by zero");
+                    }
                     a % b
                 }
                 _ => unreachable!(),
@@ -1076,7 +1332,9 @@ fn eval_arithmetic(l: &Value, r: &Value, op: &BinOp) -> anyhow::Result<Value> {
                 BinOp::Sub => a - b,
                 BinOp::Mul => a * b,
                 BinOp::Div => {
-                    if b == 0.0 { anyhow::bail!("division by zero"); }
+                    if b == 0.0 {
+                        anyhow::bail!("division by zero");
+                    }
                     a / b
                 }
                 BinOp::Mod => a % b,
@@ -1091,7 +1349,9 @@ fn coerce_float(v: &Value) -> anyhow::Result<f64> {
     match v {
         Value::Int(n) => Ok(*n as f64),
         Value::Float(f) => Ok(*f),
-        Value::Text(s) => s.parse::<f64>().map_err(|_| anyhow::anyhow!("cannot cast text to float")),
+        Value::Text(s) => s
+            .parse::<f64>()
+            .map_err(|_| anyhow::anyhow!("cannot cast text to float")),
         _ => anyhow::bail!("cannot cast {} to float", v.type_name()),
     }
 }
@@ -1102,11 +1362,19 @@ pub fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
         (Value::Null, _) | (_, Value::Null) => anyhow::bail!("null comparison"),
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y) as i32),
         (Value::Float(x), Value::Float(y)) => Ok(x.partial_cmp(y).map(|o| o as i32).unwrap_or(0)),
-        (Value::Int(x), Value::Float(y)) => Ok((*x as f64).partial_cmp(y).map(|o| o as i32).unwrap_or(0)),
-        (Value::Float(x), Value::Int(y)) => Ok(x.partial_cmp(&(*y as f64)).map(|o| o as i32).unwrap_or(0)),
+        (Value::Int(x), Value::Float(y)) => {
+            Ok((*x as f64).partial_cmp(y).map(|o| o as i32).unwrap_or(0))
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            Ok(x.partial_cmp(&(*y as f64)).map(|o| o as i32).unwrap_or(0))
+        }
         (Value::Text(x), Value::Text(y)) => Ok(x.cmp(y) as i32),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y) as i32),
-        _ => anyhow::bail!("incompatible types for comparison: {} vs {}", a.type_name(), b.type_name()),
+        _ => anyhow::bail!(
+            "incompatible types for comparison: {} vs {}",
+            a.type_name(),
+            b.type_name()
+        ),
     }
 }
 
@@ -1152,7 +1420,9 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(n) => serde_json::json!(n),
-        Value::Float(f) => serde_json::Number::from_f64(*f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         Value::Text(s) => serde_json::Value::String(s.clone()),
     }
 }
@@ -1165,14 +1435,19 @@ fn json_arrow(l: &Value, r: &Value, as_text: bool) -> anyhow::Result<Value> {
         Value::Int(idx) => doc.as_array().and_then(|a| a.get(*idx as usize)).cloned(),
         other => anyhow::bail!("invalid JSON key/index: {}", other.type_name()),
     };
-    Ok(sub.map(|j| json_to_value(&j, as_text)).unwrap_or(Value::Null))
+    Ok(sub
+        .map(|j| json_to_value(&j, as_text))
+        .unwrap_or(Value::Null))
 }
 
 /// Parses a Postgres-style path literal (`'{a,b,c}'`) into its segments.
 /// Also tolerates a bare comma list without braces.
 fn parse_path_literal(s: &str) -> Vec<String> {
     let s = s.trim();
-    let inner = s.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(s);
+    let inner = s
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(s);
     if inner.is_empty() {
         Vec::new()
     } else {
@@ -1185,7 +1460,11 @@ fn json_at_path<'a>(mut current: &'a serde_json::Value, path: &[String]) -> &'a 
     for seg in path {
         current = match current {
             serde_json::Value::Object(o) => o.get(seg).unwrap_or(&NULL),
-            serde_json::Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)).unwrap_or(&NULL),
+            serde_json::Value::Array(a) => seg
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| a.get(i))
+                .unwrap_or(&NULL),
             _ => &NULL,
         };
     }
@@ -1198,7 +1477,10 @@ fn json_path_arrow(l: &Value, r: &Value, as_text: bool) -> anyhow::Result<Value>
     let doc = json_of(l)?;
     let path_text = match r {
         Value::Text(s) => s.clone(),
-        other => anyhow::bail!("expected a '{{a,b,c}}' path literal, got {}", other.type_name()),
+        other => anyhow::bail!(
+            "expected a '{{a,b,c}}' path literal, got {}",
+            other.type_name()
+        ),
     };
     let path = parse_path_literal(&path_text);
     Ok(json_to_value(json_at_path(&doc, &path), as_text))
@@ -1210,7 +1492,9 @@ fn json_path_arrow(l: &Value, r: &Value, as_text: bool) -> anyhow::Result<Value>
 fn json_contains(container: &serde_json::Value, contained: &serde_json::Value) -> bool {
     use serde_json::Value::{Array, Object};
     match (container, contained) {
-        (Object(a), Object(b)) => b.iter().all(|(k, bv)| a.get(k).is_some_and(|av| json_contains(av, bv))),
+        (Object(a), Object(b)) => b
+            .iter()
+            .all(|(k, bv)| a.get(k).is_some_and(|av| json_contains(av, bv))),
         (Array(a), Array(b)) => b.iter().all(|bv| a.iter().any(|av| json_contains(av, bv))),
         (a, b) => a == b,
     }
@@ -1220,7 +1504,12 @@ fn json_contains(container: &serde_json::Value, contained: &serde_json::Value) -
 /// document with the value at `path` replaced (or inserted, if
 /// `create_missing` — default `true` — and every ancestor along the path
 /// exists as an object/array).
-fn json_set_path(doc: &mut serde_json::Value, path: &[String], new_value: serde_json::Value, create_missing: bool) {
+fn json_set_path(
+    doc: &mut serde_json::Value,
+    path: &[String],
+    new_value: serde_json::Value,
+    create_missing: bool,
+) {
     let Some((head, rest)) = path.split_first() else {
         *doc = new_value;
         return;

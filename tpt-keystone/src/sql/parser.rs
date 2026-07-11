@@ -57,25 +57,77 @@ impl Parser {
                 Ok(Stmt::Select(select))
             }
             Token::Select | Token::Distinct => Ok(Stmt::Select(self.parse_select()?)),
-            Token::Insert => { self.advance(); self.parse_insert() }
-            Token::Delete => { self.advance(); self.parse_delete() }
-            Token::Update => { self.advance(); self.parse_update() }
-            Token::Create => { self.advance(); self.parse_create() }
-            Token::Drop => { self.advance(); self.parse_drop() }
-            Token::Alter => { self.advance(); self.parse_alter_table() }
-            Token::Set => { self.advance(); self.parse_set() }
-            Token::Show => { self.advance(); self.parse_show() }
-            Token::Begin => { self.advance(); Ok(Stmt::Begin) }
-            Token::Commit => { self.advance(); Ok(Stmt::Commit) }
-            Token::Rollback => { self.advance(); Ok(Stmt::Rollback) }
-            Token::Declare => { self.advance(); self.parse_declare_cursor() }
-            Token::Fetch => { self.advance(); Ok(Stmt::Fetch(self.parse_fetch_stmt()?)) }
-            Token::Move => { self.advance(); Ok(Stmt::MoveCursor(self.parse_fetch_stmt()?)) }
-            Token::Close => { self.advance(); Ok(Stmt::CloseCursor(self.parse_ident_string()?)) }
-            Token::Listen => { self.advance(); Ok(Stmt::Listen(self.parse_ident_string()?)) }
+            Token::Insert => {
+                self.advance();
+                self.parse_insert()
+            }
+            Token::Delete => {
+                self.advance();
+                self.parse_delete()
+            }
+            Token::Update => {
+                self.advance();
+                self.parse_update()
+            }
+            Token::Create => {
+                self.advance();
+                self.parse_create()
+            }
+            Token::Drop => {
+                self.advance();
+                self.parse_drop()
+            }
+            Token::Alter => {
+                self.advance();
+                self.parse_alter_table()
+            }
+            Token::Set => {
+                self.advance();
+                self.parse_set()
+            }
+            Token::Show => {
+                self.advance();
+                self.parse_show()
+            }
+            Token::Begin => {
+                self.advance();
+                Ok(Stmt::Begin)
+            }
+            Token::Commit => {
+                self.advance();
+                Ok(Stmt::Commit)
+            }
+            Token::Rollback => {
+                self.advance();
+                Ok(Stmt::Rollback)
+            }
+            Token::Declare => {
+                self.advance();
+                self.parse_declare_cursor()
+            }
+            Token::Fetch => {
+                self.advance();
+                Ok(Stmt::Fetch(self.parse_fetch_stmt()?))
+            }
+            Token::Move => {
+                self.advance();
+                Ok(Stmt::MoveCursor(self.parse_fetch_stmt()?))
+            }
+            Token::Close => {
+                self.advance();
+                Ok(Stmt::CloseCursor(self.parse_ident_string()?))
+            }
+            Token::Listen => {
+                self.advance();
+                Ok(Stmt::Listen(self.parse_ident_string()?))
+            }
             Token::Unlisten => {
                 self.advance();
-                let channel = if self.eat(&Token::Star) { "*".to_string() } else { self.parse_ident_string()? };
+                let channel = if self.eat(&Token::Star) {
+                    "*".to_string()
+                } else {
+                    self.parse_ident_string()?
+                };
                 Ok(Stmt::Unlisten(channel))
             }
             Token::Notify => {
@@ -91,7 +143,18 @@ impl Parser {
                 };
                 Ok(Stmt::Notify(channel, payload))
             }
-            Token::Copy => { self.advance(); self.parse_copy() }
+            Token::Copy => {
+                self.advance();
+                self.parse_copy()
+            }
+            Token::Analyze => {
+                self.advance();
+                if matches!(self.peek(), Token::Eof | Token::Semicolon) {
+                    Ok(Stmt::Analyze(None))
+                } else {
+                    Ok(Stmt::Analyze(Some(self.parse_object_name()?)))
+                }
+            }
             Token::Eof => anyhow::bail!("empty statement"),
             other => anyhow::bail!("unexpected token: {:?}", other),
         }?;
@@ -124,7 +187,12 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let subquery = self.parse_select()?;
         self.expect(&Token::RParen)?;
-        Ok(Cte { name, columns, subquery, recursive })
+        Ok(Cte {
+            name,
+            columns,
+            subquery,
+            recursive,
+        })
     }
 
     fn parse_insert(&mut self) -> anyhow::Result<Stmt> {
@@ -162,7 +230,11 @@ impl Parser {
             values.push(row);
         }
 
-        Ok(Stmt::Insert(InsertStmt { table, columns, values }))
+        Ok(Stmt::Insert(InsertStmt {
+            table,
+            columns,
+            values,
+        }))
     }
 
     fn parse_delete(&mut self) -> anyhow::Result<Stmt> {
@@ -196,17 +268,39 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::Update(UpdateStmt { table, assignments, where_ }))
+        Ok(Stmt::Update(UpdateStmt {
+            table,
+            assignments,
+            where_,
+        }))
     }
 
     fn parse_create(&mut self) -> anyhow::Result<Stmt> {
         match self.peek().clone() {
-            Token::Table => { self.advance(); self.parse_create_table() }
-            Token::Index => { self.advance(); self.parse_create_index() }
-            Token::Function => { self.advance(); self.parse_create_function() }
-            Token::Sequence => { self.advance(); self.parse_create_sequence() }
-            Token::Topic => { self.advance(); self.parse_create_topic() }
-            other => anyhow::bail!("expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}", other),
+            Token::Table => {
+                self.advance();
+                self.parse_create_table()
+            }
+            Token::Index => {
+                self.advance();
+                self.parse_create_index()
+            }
+            Token::Function => {
+                self.advance();
+                self.parse_create_function()
+            }
+            Token::Sequence => {
+                self.advance();
+                self.parse_create_sequence()
+            }
+            Token::Topic => {
+                self.advance();
+                self.parse_create_topic()
+            }
+            other => anyhow::bail!(
+                "expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}",
+                other
+            ),
         }
     }
 
@@ -220,7 +314,9 @@ impl Parser {
                 let arg_name = self.parse_ident_string()?;
                 let arg_type = self.parse_ident_string()?;
                 args.push((arg_name, arg_type));
-                if !self.eat(&Token::Comma) { break; }
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
             }
         }
         self.expect(&Token::RParen)?;
@@ -233,12 +329,19 @@ impl Parser {
             Token::StringLiteral(s) => s,
             other => anyhow::bail!("expected string literal function body, got {:?}", other),
         };
-        Ok(Stmt::CreateFunction(CreateFunctionStmt { name, args, return_type, language, body_base64 }))
+        Ok(Stmt::CreateFunction(CreateFunctionStmt {
+            name,
+            args,
+            return_type,
+            language,
+            body_base64,
+        }))
     }
 
     fn parse_create_table(&mut self) -> anyhow::Result<Stmt> {
         let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
-            self.advance(); self.advance();
+            self.advance();
+            self.advance();
             self.expect(&Token::Exists)?;
             true
         } else {
@@ -267,7 +370,10 @@ impl Parser {
             let mut references = None;
             let mut default = None;
 
-            let is_serial = matches!(col_type.to_lowercase().as_str(), "serial" | "bigserial" | "smallserial");
+            let is_serial = matches!(
+                col_type.to_lowercase().as_str(),
+                "serial" | "bigserial" | "smallserial"
+            );
             if is_serial {
                 col_type = match col_type.to_lowercase().as_str() {
                     "smallserial" => "int2".to_string(),
@@ -287,14 +393,22 @@ impl Parser {
                     }
                     Token::Not => {
                         self.advance();
-                        if self.eat(&Token::Null) { nullable = false; }
+                        if self.eat(&Token::Null) {
+                            nullable = false;
+                        }
                     }
-                    Token::Null => { self.advance(); nullable = true; }
+                    Token::Null => {
+                        self.advance();
+                        nullable = true;
+                    }
                     Token::Default => {
                         self.advance();
                         default = Some(self.parse_expr(0)?);
                     }
-                    Token::Unique => { self.advance(); is_unique = true; }
+                    Token::Unique => {
+                        self.advance();
+                        is_unique = true;
+                    }
                     Token::References => {
                         self.advance();
                         let ref_table = self.parse_object_name()?;
@@ -345,18 +459,27 @@ impl Parser {
                     self.advance();
                     self.expect(&Token::Key)?;
                     let cols = self.parse_paren_ident_list()?;
-                    let column = cols.into_iter().next()
-                        .ok_or_else(|| anyhow::anyhow!("FOREIGN KEY requires at least one column"))?;
+                    let column = cols.into_iter().next().ok_or_else(|| {
+                        anyhow::anyhow!("FOREIGN KEY requires at least one column")
+                    })?;
                     self.expect(&Token::References)?;
                     let ref_table = self.parse_object_name()?;
                     self.expect(&Token::LParen)?;
                     let ref_column = self.parse_ident_string()?;
                     self.expect(&Token::RParen)?;
                     self.skip_referential_actions();
-                    table_constraints.push(TableConstraint::ForeignKey { column, ref_table, ref_column });
+                    table_constraints.push(TableConstraint::ForeignKey {
+                        column,
+                        ref_table,
+                        ref_column,
+                    });
                 }
-                Token::Comma => { self.advance(); }
-                Token::RParen => { break; }
+                Token::Comma => {
+                    self.advance();
+                }
+                Token::RParen => {
+                    break;
+                }
                 // CHECK (...) and anything else unrecognized: skip a
                 // balanced-paren group if present, else one token at a time.
                 _ => {
@@ -388,7 +511,13 @@ impl Parser {
             Vec::new()
         };
 
-        Ok(Stmt::CreateTable(CreateTableStmt { table, if_not_exists, columns, table_constraints, options }))
+        Ok(Stmt::CreateTable(CreateTableStmt {
+            table,
+            if_not_exists,
+            columns,
+            table_constraints,
+            options,
+        }))
     }
 
     /// `ALTER TABLE [ONLY] table ALTER [COLUMN] col SET DEFAULT expr |
@@ -412,8 +541,14 @@ impl Parser {
                 let name = self.parse_ident_string()?;
                 let col_type = self.parse_ident_string()?;
                 AlterTableAction::AddColumn(ColumnDef {
-                    name, col_type, nullable: true, default: None, is_pk: false,
-                    is_unique: false, references: None, is_serial: false,
+                    name,
+                    col_type,
+                    nullable: true,
+                    default: None,
+                    is_pk: false,
+                    is_unique: false,
+                    references: None,
+                    is_serial: false,
                 })
             }
             Token::Drop => {
@@ -448,7 +583,10 @@ impl Parser {
                 };
                 AlterTableAction::AlterColumn { name, action }
             }
-            other => anyhow::bail!("expected ADD, DROP, or ALTER after ALTER TABLE {table}, got {:?}", other),
+            other => anyhow::bail!(
+                "expected ADD, DROP, or ALTER after ALTER TABLE {table}, got {:?}",
+                other
+            ),
         };
 
         Ok(Stmt::AlterTable(AlterTableStmt { table, action }))
@@ -472,7 +610,7 @@ impl Parser {
         while self.peek() == &Token::On {
             self.advance(); // ON
             self.advance(); // DELETE | UPDATE
-            // Action: CASCADE | RESTRICT | (SET NULL | SET DEFAULT) | (NO ACTION)
+                            // Action: CASCADE | RESTRICT | (SET NULL | SET DEFAULT) | (NO ACTION)
             self.advance();
             if matches!(self.peek(), Token::Null | Token::Default) {
                 self.advance();
@@ -486,7 +624,8 @@ impl Parser {
     /// statement terminator.
     fn parse_create_sequence(&mut self) -> anyhow::Result<Stmt> {
         if self.peek() == &Token::If && self.peek2() == &Token::Not {
-            self.advance(); self.advance();
+            self.advance();
+            self.advance();
             self.expect(&Token::Exists)?;
         }
         let name = self.parse_object_name()?;
@@ -506,11 +645,17 @@ impl Parser {
                     increment = self.parse_signed_int()?;
                 }
                 Token::Semicolon | Token::Eof => break,
-                _ => { self.advance(); }
+                _ => {
+                    self.advance();
+                }
             }
         }
 
-        Ok(Stmt::CreateSequence(CreateSequenceStmt { name, start, increment }))
+        Ok(Stmt::CreateSequence(CreateSequenceStmt {
+            name,
+            start,
+            increment,
+        }))
     }
 
     /// `CREATE TOPIC [IF NOT EXISTS] name [WITH (key = 'value', ...)]`,
@@ -518,7 +663,8 @@ impl Parser {
     /// `parse_create_index`'s generic `WITH (...)` options grammar.
     fn parse_create_topic(&mut self) -> anyhow::Result<Stmt> {
         let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
-            self.advance(); self.advance();
+            self.advance();
+            self.advance();
             self.expect(&Token::Exists)?;
             true
         } else {
@@ -536,7 +682,11 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(Stmt::CreateTopic(CreateTopicStmt { name, if_not_exists, options }))
+        Ok(Stmt::CreateTopic(CreateTopicStmt {
+            name,
+            if_not_exists,
+            options,
+        }))
     }
 
     fn parse_signed_int(&mut self) -> anyhow::Result<i64> {
@@ -552,7 +702,10 @@ impl Parser {
             Token::Table => {
                 self.advance();
                 let if_exists = self.peek() == &Token::If && self.peek2() == &Token::Exists;
-                if if_exists { self.advance(); self.advance(); }
+                if if_exists {
+                    self.advance();
+                    self.advance();
+                }
                 let table = self.parse_object_name()?;
                 Ok(Stmt::DropTable(DropTableStmt { table, if_exists }))
             }
@@ -593,7 +746,13 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(Stmt::CreateIndex(CreateIndexStmt { table, column, name: _name, using, options }))
+        Ok(Stmt::CreateIndex(CreateIndexStmt {
+            table,
+            column,
+            name: _name,
+            using,
+            options,
+        }))
     }
 
     /// One `key = 'value'` pair inside a `CREATE INDEX ... WITH (...)` or
@@ -612,7 +771,10 @@ impl Parser {
         let value = match self.advance().clone() {
             Token::StringLiteral(s) => s,
             Token::Ident(s) => s,
-            other => anyhow::bail!("expected a string literal for index option value, got {:?}", other),
+            other => anyhow::bail!(
+                "expected a string literal for index option value, got {:?}",
+                other
+            ),
         };
         Ok((key, value))
     }
@@ -620,33 +782,81 @@ impl Parser {
     fn parse_select(&mut self) -> anyhow::Result<SelectStmt> {
         self.expect(&Token::Select)?;
         let distinct = self.eat(&Token::Distinct);
-        if !distinct { self.eat(&Token::All); }
+        if !distinct {
+            self.eat(&Token::All);
+        }
         let projections = self.parse_projection_list()?;
-        let from = if self.eat(&Token::From) { Some(self.parse_table_with_joins()?) } else { None };
-        let where_ = if self.eat(&Token::Where) { Some(self.parse_expr(0)?) } else { None };
+        let from = if self.eat(&Token::From) {
+            Some(self.parse_table_with_joins()?)
+        } else {
+            None
+        };
+        let where_ = if self.eat(&Token::Where) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
         let group_by = if self.peek() == &Token::Group && self.peek2() == &Token::By {
-            self.advance(); self.advance(); self.parse_expr_list()?
-        } else { vec![] };
-        let having = if self.eat(&Token::Having) { Some(self.parse_expr(0)?) } else { None };
+            self.advance();
+            self.advance();
+            self.parse_expr_list()?
+        } else {
+            vec![]
+        };
+        let having = if self.eat(&Token::Having) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
         let order_by = if self.peek() == &Token::Order && self.peek2() == &Token::By {
-            self.advance(); self.advance(); self.parse_order_by_list()?
-        } else { vec![] };
-        let limit = if self.eat(&Token::Limit) { Some(self.parse_expr(0)?) } else { None };
-        let offset = if self.eat(&Token::Offset) { Some(self.parse_expr(0)?) } else { None };
+            self.advance();
+            self.advance();
+            self.parse_order_by_list()?
+        } else {
+            vec![]
+        };
+        let limit = if self.eat(&Token::Limit) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+        let offset = if self.eat(&Token::Offset) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
         let union = if self.peek() == &Token::Union {
             self.advance();
-            let op = if self.eat(&Token::All) { UnionOp::UnionAll } else { UnionOp::Union };
+            let op = if self.eat(&Token::All) {
+                UnionOp::UnionAll
+            } else {
+                UnionOp::Union
+            };
             let rhs = self.parse_select()?;
             Some((op, Box::new(rhs)))
         } else {
             None
         };
-        Ok(SelectStmt { ctes: vec![], distinct, projections, from, where_, group_by, having, order_by, limit, offset, union })
+        Ok(SelectStmt {
+            ctes: vec![],
+            distinct,
+            projections,
+            from,
+            where_,
+            group_by,
+            having,
+            order_by,
+            limit,
+            offset,
+            union,
+        })
     }
 
     fn parse_projection_list(&mut self) -> anyhow::Result<Vec<Projection>> {
         let mut list = vec![self.parse_projection()?];
-        while self.eat(&Token::Comma) { list.push(self.parse_projection()?); }
+        while self.eat(&Token::Comma) {
+            list.push(self.parse_projection()?);
+        }
         Ok(list)
     }
 
@@ -661,9 +871,13 @@ impl Parser {
             }
         } else {
             let expr = self.parse_expr(0)?;
-            let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
-            else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
-            else { None };
+            let alias = if self.eat(&Token::As) {
+                Some(self.parse_ident_string()?)
+            } else if let Token::Ident(_) = self.peek() {
+                Some(self.parse_ident_string()?)
+            } else {
+                None
+            };
             Ok(Projection::Expr { expr, alias })
         }
     }
@@ -672,7 +886,11 @@ impl Parser {
         let primary = self.parse_table_ref()?;
         let mut joins = Vec::new();
 
-        while self.peek() == &Token::Join || self.peek() == &Token::Left || self.peek() == &Token::Right || self.peek() == &Token::Full {
+        while self.peek() == &Token::Join
+            || self.peek() == &Token::Left
+            || self.peek() == &Token::Right
+            || self.peek() == &Token::Full
+        {
             let join_type = match self.peek().clone() {
                 Token::Join => {
                     self.advance();
@@ -706,7 +924,11 @@ impl Parser {
                 None
             };
 
-            joins.push(Join { join_type, table, on });
+            joins.push(Join {
+                join_type,
+                table,
+                on,
+            });
         }
 
         Ok(TableWithJoins { primary, joins })
@@ -717,9 +939,17 @@ impl Parser {
             self.advance();
             let subquery = self.parse_select()?;
             self.expect(&Token::RParen)?;
-            let alias = if self.eat(&Token::As) { self.parse_ident_string()? }
-            else { self.parse_ident_string()? };
-            return Ok(TableRef { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(subquery)), func_args: None });
+            let alias = if self.eat(&Token::As) {
+                self.parse_ident_string()?
+            } else {
+                self.parse_ident_string()?
+            };
+            return Ok(TableRef {
+                name: alias.clone(),
+                alias: Some(alias),
+                subquery: Some(Box::new(subquery)),
+                func_args: None,
+            });
         }
         let first = self.parse_ident_string()?;
         // A table-valued function call (e.g. `graph_bfs('edges', 'from_id',
@@ -737,10 +967,19 @@ impl Parser {
                 }
             }
             self.expect(&Token::RParen)?;
-            let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
-            else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
-            else { None };
-            return Ok(TableRef { name: first, alias, subquery: None, func_args: Some(args) });
+            let alias = if self.eat(&Token::As) {
+                Some(self.parse_ident_string()?)
+            } else if let Token::Ident(_) = self.peek() {
+                Some(self.parse_ident_string()?)
+            } else {
+                None
+            };
+            return Ok(TableRef {
+                name: first,
+                alias,
+                subquery: None,
+                func_args: Some(args),
+            });
         }
         // Keep the dotted form only for the virtual catalog schemas
         // (`executor::catalog` matches on it directly); a real table's
@@ -748,7 +987,9 @@ impl Parser {
         // carries no information here — this engine has one implicit schema.
         let name = if self.eat(&Token::Dot) {
             let second = self.parse_ident_string()?;
-            if first.eq_ignore_ascii_case("pg_catalog") || first.eq_ignore_ascii_case("information_schema") {
+            if first.eq_ignore_ascii_case("pg_catalog")
+                || first.eq_ignore_ascii_case("information_schema")
+            {
                 format!("{first}.{second}")
             } else {
                 second
@@ -756,21 +997,37 @@ impl Parser {
         } else {
             first
         };
-        let alias = if self.eat(&Token::As) { Some(self.parse_ident_string()?) }
-        else if let Token::Ident(_) = self.peek() { Some(self.parse_ident_string()?) }
-        else { None };
-        Ok(TableRef { name, alias, subquery: None, func_args: None })
+        let alias = if self.eat(&Token::As) {
+            Some(self.parse_ident_string()?)
+        } else if let Token::Ident(_) = self.peek() {
+            Some(self.parse_ident_string()?)
+        } else {
+            None
+        };
+        Ok(TableRef {
+            name,
+            alias,
+            subquery: None,
+            func_args: None,
+        })
     }
 
     fn parse_order_by_list(&mut self) -> anyhow::Result<Vec<OrderBy>> {
         let mut list = vec![self.parse_order_by()?];
-        while self.eat(&Token::Comma) { list.push(self.parse_order_by()?); }
+        while self.eat(&Token::Comma) {
+            list.push(self.parse_order_by()?);
+        }
         Ok(list)
     }
 
     fn parse_order_by(&mut self) -> anyhow::Result<OrderBy> {
         let expr = self.parse_expr(0)?;
-        let asc = if self.eat(&Token::Desc) { false } else { self.eat(&Token::Asc); true };
+        let asc = if self.eat(&Token::Desc) {
+            false
+        } else {
+            self.eat(&Token::Asc);
+            true
+        };
         Ok(OrderBy { expr, asc })
     }
 
@@ -783,10 +1040,16 @@ impl Parser {
         loop {
             match self.peek().clone() {
                 Token::Semicolon | Token::Eof => break,
-                t => { parts.push(format!("{:?}", t)); self.advance(); }
+                t => {
+                    parts.push(format!("{:?}", t));
+                    self.advance();
+                }
             }
         }
-        Ok(Stmt::Set(SetStmt { name, value: parts.join(" ") }))
+        Ok(Stmt::Set(SetStmt {
+            name,
+            value: parts.join(" "),
+        }))
     }
 
     fn parse_show(&mut self) -> anyhow::Result<Stmt> {
@@ -831,9 +1094,18 @@ impl Parser {
     /// `FETCH|MOVE [ NEXT | ALL | count ] [ FROM | IN ] cursor`
     fn parse_fetch_stmt(&mut self) -> anyhow::Result<FetchStmt> {
         let count = match self.peek().clone() {
-            Token::Next => { self.advance(); FetchCount::Next }
-            Token::All => { self.advance(); FetchCount::All }
-            Token::IntLiteral(n) => { self.advance(); FetchCount::Count(n) }
+            Token::Next => {
+                self.advance();
+                FetchCount::Next
+            }
+            Token::All => {
+                self.advance();
+                FetchCount::All
+            }
+            Token::IntLiteral(n) => {
+                self.advance();
+                FetchCount::Count(n)
+            }
             _ => FetchCount::Next,
         };
         self.eat(&Token::From);
@@ -864,46 +1136,91 @@ impl Parser {
 
     fn parse_expr_list(&mut self) -> anyhow::Result<Vec<Expr>> {
         let mut list = vec![self.parse_expr(0)?];
-        while self.eat(&Token::Comma) { list.push(self.parse_expr(0)?); }
+        while self.eat(&Token::Comma) {
+            list.push(self.parse_expr(0)?);
+        }
         Ok(list)
     }
 
     pub fn parse_expr(&mut self, min_bp: u8) -> anyhow::Result<Expr> {
         let mut lhs = self.parse_unary()?;
         loop {
-            let (l_bp, r_bp, op) = match infix_bp(self.peek()) { Some(x) => x, None => break };
-            if l_bp < min_bp { break; }
+            let (l_bp, r_bp, op) = match infix_bp(self.peek()) {
+                Some(x) => x,
+                None => break,
+            };
+            if l_bp < min_bp {
+                break;
+            }
 
             if self.peek() == &Token::Is {
                 self.advance();
                 let negated = self.eat(&Token::Not);
                 match self.peek().clone() {
-                    Token::Null => { self.advance(); lhs = Expr::IsNull { expr: Box::new(lhs), negated }; continue; }
-                    Token::True => { self.advance(); lhs = Expr::IsTrue { expr: Box::new(lhs), negated }; continue; }
-                    Token::False => { self.advance(); lhs = Expr::IsFalse { expr: Box::new(lhs), negated }; continue; }
+                    Token::Null => {
+                        self.advance();
+                        lhs = Expr::IsNull {
+                            expr: Box::new(lhs),
+                            negated,
+                        };
+                        continue;
+                    }
+                    Token::True => {
+                        self.advance();
+                        lhs = Expr::IsTrue {
+                            expr: Box::new(lhs),
+                            negated,
+                        };
+                        continue;
+                    }
+                    Token::False => {
+                        self.advance();
+                        lhs = Expr::IsFalse {
+                            expr: Box::new(lhs),
+                            negated,
+                        };
+                        continue;
+                    }
                     _ => anyhow::bail!("expected NULL, TRUE, or FALSE after IS"),
                 }
             }
 
-            if self.peek() == &Token::Between || (self.peek() == &Token::Not && self.peek2() == &Token::Between) {
+            if self.peek() == &Token::Between
+                || (self.peek() == &Token::Not && self.peek2() == &Token::Between)
+            {
                 let negated = self.eat(&Token::Not);
                 self.expect(&Token::Between)?;
                 let low = self.parse_expr(r_bp)?;
-                if self.peek() == &Token::And { self.advance(); }
+                if self.peek() == &Token::And {
+                    self.advance();
+                }
                 let high = self.parse_expr(r_bp)?;
-                lhs = Expr::Between { expr: Box::new(lhs), low: Box::new(low), high: Box::new(high), negated };
+                lhs = Expr::Between {
+                    expr: Box::new(lhs),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated,
+                };
                 continue;
             }
 
-            if self.peek() == &Token::Like || (self.peek() == &Token::Not && self.peek2() == &Token::Like) {
+            if self.peek() == &Token::Like
+                || (self.peek() == &Token::Not && self.peek2() == &Token::Like)
+            {
                 let negated = self.eat(&Token::Not);
                 self.expect(&Token::Like)?;
                 let pattern = self.parse_expr(r_bp)?;
-                lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pattern), negated };
+                lhs = Expr::Like {
+                    expr: Box::new(lhs),
+                    pattern: Box::new(pattern),
+                    negated,
+                };
                 continue;
             }
 
-            if self.peek() == &Token::In || (self.peek() == &Token::Not && self.peek2() == &Token::In) {
+            if self.peek() == &Token::In
+                || (self.peek() == &Token::Not && self.peek2() == &Token::In)
+            {
                 let negated = self.eat(&Token::Not);
                 self.expect(&Token::In)?;
                 self.expect(&Token::LParen)?;
@@ -914,26 +1231,51 @@ impl Parser {
                     InList::Exprs(self.parse_expr_list()?)
                 };
                 self.expect(&Token::RParen)?;
-                lhs = Expr::In { expr: Box::new(lhs), list, negated };
+                lhs = Expr::In {
+                    expr: Box::new(lhs),
+                    list,
+                    negated,
+                };
                 continue;
             }
 
             self.advance();
             let rhs = self.parse_expr(r_bp)?;
-            lhs = Expr::BinaryOp { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::BinaryOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
 
     fn parse_unary(&mut self) -> anyhow::Result<Expr> {
         match self.peek().clone() {
-            Token::Minus => { self.advance(); let expr = self.parse_unary()?; Ok(Expr::UnaryOp { op: UnOp::Neg, expr: Box::new(expr) }) }
-            Token::Plus => { self.advance(); self.parse_unary() }
+            Token::Minus => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnOp::Neg,
+                    expr: Box::new(expr),
+                })
+            }
+            Token::Plus => {
+                self.advance();
+                self.parse_unary()
+            }
             Token::Not if self.peek2() == &Token::Exists => {
                 self.advance();
                 self.parse_exists(true)
             }
-            Token::Not => { self.advance(); let expr = self.parse_unary()?; Ok(Expr::UnaryOp { op: UnOp::Not, expr: Box::new(expr) }) }
+            Token::Not => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnOp::Not,
+                    expr: Box::new(expr),
+                })
+            }
             Token::Exists => self.parse_exists(false),
             _ => self.parse_postfix(),
         }
@@ -944,14 +1286,24 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let subquery = self.parse_select()?;
         self.expect(&Token::RParen)?;
-        Ok(Expr::Exists { subquery: Box::new(subquery), negated })
+        Ok(Expr::Exists {
+            subquery: Box::new(subquery),
+            negated,
+        })
     }
 
     fn parse_postfix(&mut self) -> anyhow::Result<Expr> {
         let mut expr = self.parse_atom()?;
         loop {
             match self.peek().clone() {
-                Token::DoubleColon => { self.advance(); let ty = self.parse_ident_string()?; expr = Expr::Cast { expr: Box::new(expr), ty }; }
+                Token::DoubleColon => {
+                    self.advance();
+                    let ty = self.parse_ident_string()?;
+                    expr = Expr::Cast {
+                        expr: Box::new(expr),
+                        ty,
+                    };
+                }
                 _ => break,
             }
         }
@@ -960,42 +1312,86 @@ impl Parser {
 
     fn parse_atom(&mut self) -> anyhow::Result<Expr> {
         match self.peek().clone() {
-            Token::IntLiteral(n) => { self.advance(); Ok(Expr::Literal(Literal::Int(n))) }
-            Token::FloatLiteral(f) => { self.advance(); Ok(Expr::Literal(Literal::Float(f))) }
-            Token::StringLiteral(s) => { self.advance(); Ok(Expr::Literal(Literal::Text(s))) }
-            Token::True => { self.advance(); Ok(Expr::Literal(Literal::Bool(true))) }
-            Token::False => { self.advance(); Ok(Expr::Literal(Literal::Bool(false))) }
-            Token::Null => { self.advance(); Ok(Expr::Literal(Literal::Null)) }
-            Token::Dollar(n) => { self.advance(); Ok(Expr::Param(n)) }
+            Token::IntLiteral(n) => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Int(n)))
+            }
+            Token::FloatLiteral(f) => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Float(f)))
+            }
+            Token::StringLiteral(s) => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Text(s)))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Bool(true)))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Bool(false)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Null))
+            }
+            Token::Dollar(n) => {
+                self.advance();
+                Ok(Expr::Param(n))
+            }
             Token::LParen if self.peek2() == &Token::Select => {
                 self.advance();
                 let subquery = self.parse_select()?;
                 self.expect(&Token::RParen)?;
                 Ok(Expr::Subquery(Box::new(subquery)))
             }
-            Token::LParen => { self.advance(); let expr = self.parse_expr(0)?; self.expect(&Token::RParen)?; Ok(expr) }
-            Token::Case => { self.advance(); self.parse_case() }
+            Token::LParen => {
+                self.advance();
+                let expr = self.parse_expr(0)?;
+                self.expect(&Token::RParen)?;
+                Ok(expr)
+            }
+            Token::Case => {
+                self.advance();
+                self.parse_case()
+            }
             Token::Cast => {
-                self.advance(); self.expect(&Token::LParen)?;
+                self.advance();
+                self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
-                if let Token::As = self.peek() { self.advance(); }
+                if let Token::As = self.peek() {
+                    self.advance();
+                }
                 let ty = self.parse_ident_string()?;
                 self.expect(&Token::RParen)?;
-                Ok(Expr::Cast { expr: Box::new(inner), ty })
+                Ok(Expr::Cast {
+                    expr: Box::new(inner),
+                    ty,
+                })
             }
             Token::Ident(name) => {
                 self.advance();
                 let name = name.clone();
                 if self.eat(&Token::LParen) {
                     let distinct = self.eat(&Token::Distinct);
-                    let args = if self.peek() == &Token::Star { self.advance(); vec![] }
-                    else if self.peek() == &Token::RParen { vec![] }
-                    else { self.parse_expr_list()? };
+                    let args = if self.peek() == &Token::Star {
+                        self.advance();
+                        vec![]
+                    } else if self.peek() == &Token::RParen {
+                        vec![]
+                    } else {
+                        self.parse_expr_list()?
+                    };
                     self.expect(&Token::RParen)?;
                     if self.peek() == &Token::Over {
                         return self.parse_over_clause(name, args);
                     }
-                    return Ok(Expr::Function { name, args, distinct });
+                    return Ok(Expr::Function {
+                        name,
+                        args,
+                        distinct,
+                    });
                 }
                 if self.eat(&Token::Dot) {
                     let col = self.parse_ident_string()?;
@@ -1030,7 +1426,13 @@ impl Parser {
             None
         };
         self.expect(&Token::RParen)?;
-        Ok(Expr::Window { func, args, partition_by, order_by, frame })
+        Ok(Expr::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            frame,
+        })
     }
 
     fn parse_window_frame(&mut self) -> anyhow::Result<WindowFrame> {
@@ -1043,10 +1445,18 @@ impl Parser {
             let start = self.parse_frame_bound()?;
             self.expect(&Token::And)?;
             let end = self.parse_frame_bound()?;
-            Ok(WindowFrame { frame_type, start, end: Some(end) })
+            Ok(WindowFrame {
+                frame_type,
+                start,
+                end: Some(end),
+            })
         } else {
             let start = self.parse_frame_bound()?;
-            Ok(WindowFrame { frame_type, start, end: None })
+            Ok(WindowFrame {
+                frame_type,
+                start,
+                end: None,
+            })
         }
     }
 
@@ -1055,21 +1465,36 @@ impl Parser {
             Token::Unbounded => {
                 self.advance();
                 match self.advance().clone() {
-                    Token::Preceding => Ok(FrameBound { bound_type: FrameBoundType::UnboundedPreceding, offset: None }),
-                    Token::Following => Ok(FrameBound { bound_type: FrameBoundType::UnboundedFollowing, offset: None }),
+                    Token::Preceding => Ok(FrameBound {
+                        bound_type: FrameBoundType::UnboundedPreceding,
+                        offset: None,
+                    }),
+                    Token::Following => Ok(FrameBound {
+                        bound_type: FrameBoundType::UnboundedFollowing,
+                        offset: None,
+                    }),
                     other => anyhow::bail!("expected PRECEDING or FOLLOWING, got {:?}", other),
                 }
             }
             Token::Current => {
                 self.advance();
                 self.expect(&Token::Row)?;
-                Ok(FrameBound { bound_type: FrameBoundType::CurrentRow, offset: None })
+                Ok(FrameBound {
+                    bound_type: FrameBoundType::CurrentRow,
+                    offset: None,
+                })
             }
             _ => {
                 let offset = self.parse_expr(0)?;
                 match self.advance().clone() {
-                    Token::Preceding => Ok(FrameBound { bound_type: FrameBoundType::Preceding, offset: Some(Box::new(offset)) }),
-                    Token::Following => Ok(FrameBound { bound_type: FrameBoundType::Following, offset: Some(Box::new(offset)) }),
+                    Token::Preceding => Ok(FrameBound {
+                        bound_type: FrameBoundType::Preceding,
+                        offset: Some(Box::new(offset)),
+                    }),
+                    Token::Following => Ok(FrameBound {
+                        bound_type: FrameBoundType::Following,
+                        offset: Some(Box::new(offset)),
+                    }),
                     other => anyhow::bail!("expected PRECEDING or FOLLOWING, got {:?}", other),
                 }
             }
@@ -1077,7 +1502,11 @@ impl Parser {
     }
 
     fn parse_case(&mut self) -> anyhow::Result<Expr> {
-        let operand = if self.peek() != &Token::When { Some(Box::new(self.parse_expr(0)?)) } else { None };
+        let operand = if self.peek() != &Token::When {
+            Some(Box::new(self.parse_expr(0)?))
+        } else {
+            None
+        };
         let mut branches = Vec::new();
         while self.eat(&Token::When) {
             let cond = self.parse_expr(0)?;
@@ -1085,9 +1514,17 @@ impl Parser {
             let result = self.parse_expr(0)?;
             branches.push((cond, result));
         }
-        let else_ = if self.eat(&Token::Else) { Some(Box::new(self.parse_expr(0)?)) } else { None };
+        let else_ = if self.eat(&Token::Else) {
+            Some(Box::new(self.parse_expr(0)?))
+        } else {
+            None
+        };
         self.expect(&Token::End)?;
-        Ok(Expr::Case { operand, branches, else_ })
+        Ok(Expr::Case {
+            operand,
+            branches,
+            else_,
+        })
     }
 }
 

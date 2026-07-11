@@ -15,7 +15,8 @@
 use tpt_keystone::geo::gpu::{gpu_bbox_overlap_pairs, GpuBBox};
 
 fn main() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     std::panic::set_hook(Box::new(|info| {
@@ -42,13 +43,38 @@ fn run() -> anyhow::Result<()> {
     // A hand-computed known-answer case: overlap, no-overlap, and an
     // edge-touching (closed-interval boundary) pair.
     let left = [
-        GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 },
-        GpuBBox { min_x: 100.0, min_y: 100.0, max_x: 110.0, max_y: 110.0 },
-        GpuBBox { min_x: 0.0, min_y: 0.0, max_x: 5.0, max_y: 5.0 },
+        GpuBBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 10.0,
+            max_y: 10.0,
+        },
+        GpuBBox {
+            min_x: 100.0,
+            min_y: 100.0,
+            max_x: 110.0,
+            max_y: 110.0,
+        },
+        GpuBBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 5.0,
+            max_y: 5.0,
+        },
     ];
     let right = [
-        GpuBBox { min_x: 5.0, min_y: 5.0, max_x: 15.0, max_y: 15.0 }, // overlaps left[0], touches left[2] at (5,5)
-        GpuBBox { min_x: 200.0, min_y: 200.0, max_x: 210.0, max_y: 210.0 }, // overlaps nothing
+        GpuBBox {
+            min_x: 5.0,
+            min_y: 5.0,
+            max_x: 15.0,
+            max_y: 15.0,
+        }, // overlaps left[0], touches left[2] at (5,5)
+        GpuBBox {
+            min_x: 200.0,
+            min_y: 200.0,
+            max_x: 210.0,
+            max_y: 210.0,
+        }, // overlaps nothing
     ];
     let expected: Vec<(u32, u32)> = vec![(0, 0), (2, 0)];
 

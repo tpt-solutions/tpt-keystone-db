@@ -19,7 +19,9 @@ use sha2::{Digest, Sha256};
 
 use crate::storage::database::Database;
 use crate::storage::{ColumnType, StorageEngine};
-use crate::synapse::{cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell};
+use crate::synapse::{
+    cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell,
+};
 
 const TABLE: &str = "_mirror_audit";
 const COL_ID: usize = 0;
@@ -65,7 +67,14 @@ fn decode_entry(value: &[u8]) -> Option<AuditEntry> {
     })
 }
 
-fn compute_hash(prev_hash: &str, seq: i64, ts: i64, actor: &str, action: &str, details: &str) -> String {
+fn compute_hash(
+    prev_hash: &str,
+    seq: i64,
+    ts: i64,
+    actor: &str,
+    action: &str,
+    details: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(prev_hash.as_bytes());
     hasher.update(b"|");
@@ -119,7 +128,10 @@ impl AuditLog {
     }
 
     fn entries_for(&self, session_id: &str) -> Result<Vec<AuditEntry>> {
-        let mut entries: Vec<AuditEntry> = self.db.scan(TABLE)?.into_iter()
+        let mut entries: Vec<AuditEntry> = self
+            .db
+            .scan(TABLE)?
+            .into_iter()
             .filter_map(|kv| decode_entry(&kv.value))
             .filter(|e| e.session_id == session_id)
             .collect();
@@ -130,8 +142,18 @@ impl AuditLog {
     /// Appends one audit entry, chained onto `session_id`'s last entry (or
     /// `GENESIS` if this is the first).
     #[tracing::instrument(skip(self, details), fields(session_id = %session_id, actor = %actor, action = %action))]
-    pub fn record(&self, session_id: &str, actor: &str, action: &str, details: &str) -> Result<String> {
-        let prev_hash = self.entries_for(session_id)?.last().map(|e| e.hash.clone()).unwrap_or_else(|| GENESIS.to_string());
+    pub fn record(
+        &self,
+        session_id: &str,
+        actor: &str,
+        action: &str,
+        details: &str,
+    ) -> Result<String> {
+        let prev_hash = self
+            .entries_for(session_id)?
+            .last()
+            .map(|e| e.hash.clone())
+            .unwrap_or_else(|| GENESIS.to_string());
         let seq = crate::mirror::next_seq() as i64;
         let ts = now_ms();
         let hash = compute_hash(&prev_hash, seq, ts, actor, action, details);
@@ -163,7 +185,14 @@ impl AuditLog {
             if entry.prev_hash != expected_prev {
                 return Ok(false);
             }
-            let recomputed = compute_hash(&entry.prev_hash, entry.seq, entry.ts, &entry.actor, &entry.action, &entry.details);
+            let recomputed = compute_hash(
+                &entry.prev_hash,
+                entry.seq,
+                entry.ts,
+                &entry.actor,
+                &entry.action,
+                &entry.details,
+            );
             if recomputed != entry.hash {
                 return Ok(false);
             }
@@ -175,7 +204,11 @@ impl AuditLog {
     pub fn generate_report(&self, session_id: &str) -> Result<AuditReport> {
         let entries = self.entries_for(session_id)?;
         let tamper_evident = self.verify_chain(session_id)?;
-        Ok(AuditReport { session_id: session_id.to_string(), entries, tamper_evident })
+        Ok(AuditReport {
+            session_id: session_id.to_string(),
+            entries,
+            tamper_evident,
+        })
     }
 }
 
@@ -190,10 +223,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -201,9 +249,12 @@ mod tests {
     fn chain_is_verified_intact_for_untouched_entries() {
         let (db, _b, _l) = test_db();
         let log = AuditLog::new(db).unwrap();
-        log.record("sess1", "agent1", "tool_call", "called get_weather").unwrap();
-        log.record("sess1", "agent1", "policy_check", "passed PII filter").unwrap();
-        log.record("sess1", "system", "cutover", "workflow completed").unwrap();
+        log.record("sess1", "agent1", "tool_call", "called get_weather")
+            .unwrap();
+        log.record("sess1", "agent1", "policy_check", "passed PII filter")
+            .unwrap();
+        log.record("sess1", "system", "cutover", "workflow completed")
+            .unwrap();
         assert!(log.verify_chain("sess1").unwrap());
         let report = log.generate_report("sess1").unwrap();
         assert!(report.tamper_evident);
@@ -214,8 +265,11 @@ mod tests {
     fn tampering_with_a_stored_entry_breaks_the_chain() {
         let (db, _b, _l) = test_db();
         let log = AuditLog::new(db.clone()).unwrap();
-        log.record("sess1", "agent1", "tool_call", "called get_weather").unwrap();
-        let id = log.record("sess1", "agent1", "policy_check", "passed PII filter").unwrap();
+        log.record("sess1", "agent1", "tool_call", "called get_weather")
+            .unwrap();
+        let id = log
+            .record("sess1", "agent1", "policy_check", "passed PII filter")
+            .unwrap();
 
         // Directly rewrite one entry's `details` in storage, bypassing
         // `AuditLog::record` entirely — simulates someone editing the
@@ -224,9 +278,15 @@ mod tests {
         let mut entry = decode_entry(&row).unwrap();
         entry.details = "TAMPERED".to_string();
         let cells = vec![
-            text_cell(&entry.id), text_cell(&entry.session_id), int_cell(entry.seq), int_cell(entry.ts),
-            text_cell(&entry.actor), text_cell(&entry.action), text_cell(&entry.details),
-            text_cell(&entry.prev_hash), text_cell(&entry.hash), // hash NOT recomputed — that's the tamper
+            text_cell(&entry.id),
+            text_cell(&entry.session_id),
+            int_cell(entry.seq),
+            int_cell(entry.ts),
+            text_cell(&entry.actor),
+            text_cell(&entry.action),
+            text_cell(&entry.details),
+            text_cell(&entry.prev_hash),
+            text_cell(&entry.hash), // hash NOT recomputed — that's the tamper
         ];
         row = encode_cells(&cells);
         db.write(TABLE, id.as_bytes(), &row).unwrap();

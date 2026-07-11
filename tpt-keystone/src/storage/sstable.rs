@@ -54,7 +54,11 @@ impl SSTable {
             let offset = data_buf.len() as u64;
 
             if *record_type == 2 {
-                index.push(IndexEntry { key: key.clone(), offset, value_len: 0 });
+                index.push(IndexEntry {
+                    key: key.clone(),
+                    offset,
+                    value_len: 0,
+                });
                 continue;
             }
 
@@ -63,7 +67,11 @@ impl SSTable {
             data_buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
             data_buf.extend_from_slice(value);
 
-            index.push(IndexEntry { key: key.clone(), offset, value_len: value.len() as u32 });
+            index.push(IndexEntry {
+                key: key.clone(),
+                offset,
+                value_len: value.len() as u32,
+            });
         }
 
         let mut buf = data_buf;
@@ -128,7 +136,11 @@ impl SSTable {
             let value_len = read_u32(buf, pos)?;
             pos += 4;
 
-            index.push(IndexEntry { key: entry_key, offset, value_len });
+            index.push(IndexEntry {
+                key: entry_key,
+                offset,
+                value_len,
+            });
         }
 
         // Bloom filter: bitmap, bit count, hash-function count, then exactly
@@ -159,12 +171,23 @@ impl SSTable {
 
         let bloom = Bloom::from_existing(&bits, num_bits, num_hashes, sip_keys);
 
-        Ok(Self { key, id, index, bloom, data })
+        Ok(Self {
+            key,
+            id,
+            index,
+            bloom,
+            data,
+        })
     }
 
     /// Build a new SSTable from sorted entries and persist it to `store`
     /// under `key`.
-    pub fn create_in_store(store: &dyn ObjectStore, key: &str, id: u64, entries: &[(Vec<u8>, Vec<u8>, u8)]) -> Result<Self> {
+    pub fn create_in_store(
+        store: &dyn ObjectStore,
+        key: &str,
+        id: u64,
+        entries: &[(Vec<u8>, Vec<u8>, u8)],
+    ) -> Result<Self> {
         let bytes = Self::build_bytes(entries);
         store.put(key, &bytes)?;
         Self::decode(key.to_string(), id, Arc::new(bytes))
@@ -235,9 +258,15 @@ impl SSTable {
         Ok(results)
     }
 
-    pub fn id(&self) -> u64 { self.id }
-    pub fn object_key(&self) -> &str { &self.key }
-    pub fn blob_size(&self) -> u64 { self.data.len() as u64 }
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn object_key(&self) -> &str {
+        &self.key
+    }
+    pub fn blob_size(&self) -> u64 {
+        self.data.len() as u64
+    }
 }
 
 #[cfg(test)]

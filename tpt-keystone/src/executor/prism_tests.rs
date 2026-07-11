@@ -17,9 +17,23 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
     let local = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
     lease.try_acquire().unwrap();
-    let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
     (db, bucket, local)
 }
 
@@ -62,7 +76,11 @@ fn dot_product_known_case() {
 }
 
 fn make_doc_table(db: &Arc<Database>) {
-    execute_query("CREATE TABLE docs (id INT4, label TEXT, embedding VECTOR)", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE docs (id INT4, label TEXT, embedding VECTOR)",
+        db.clone(),
+    )
+    .unwrap();
     let rows = [
         (1, "near-x", "[1.0,0.0,0.0]"),
         (2, "near-y", "[0.0,1.0,0.0]"),
@@ -70,9 +88,17 @@ fn make_doc_table(db: &Arc<Database>) {
         (4, "far", "[-1.0,-1.0,-1.0]"),
     ];
     for (id, label, emb) in rows {
-        execute_query(&format!("INSERT INTO docs VALUES ({id}, '{label}', '{emb}')"), db.clone()).unwrap();
+        execute_query(
+            &format!("INSERT INTO docs VALUES ({id}, '{label}', '{emb}')"),
+            db.clone(),
+        )
+        .unwrap();
     }
-    execute_query("CREATE INDEX ON docs USING VECTOR (embedding) WITH (metric = 'l2')", db.clone()).unwrap();
+    execute_query(
+        "CREATE INDEX ON docs USING VECTOR (embedding) WITH (metric = 'l2')",
+        db.clone(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -80,7 +106,10 @@ fn vector_index_created_and_visible() {
     let (db, _b, _l) = test_db();
     make_doc_table(&db);
     assert!(db.indexed_column_vector("docs", "embedding"));
-    assert_eq!(db.list_vector_indexes(), vec![("docs".to_string(), "embedding".to_string())]);
+    assert_eq!(
+        db.list_vector_indexes(),
+        vec![("docs".to_string(), "embedding".to_string())]
+    );
 }
 
 /// The Phase 7 milestone shape: a k-NN query answered by the HNSW index
@@ -97,23 +126,44 @@ fn vector_search_knn_returns_nearest_neighbors() {
     let result = execute_query(
         "SELECT label FROM vector_search('docs', 'embedding', '[1.0,0.0,0.0]', 2) ORDER BY label",
         db.clone(),
-    ).unwrap();
+    )
+    .unwrap();
     let labels: Vec<String> = result.rows.iter().map(|r| cell_text(&r[0])).collect();
-    assert_eq!(labels, vec!["also-near-x".to_string(), "near-x".to_string()]);
+    assert_eq!(
+        labels,
+        vec!["also-near-x".to_string(), "near-x".to_string()]
+    );
 }
 
 fn make_hybrid_table(db: &Arc<Database>) {
-    execute_query("CREATE TABLE hdocs (id INT4, label TEXT, body TEXT, embedding VECTOR)", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE hdocs (id INT4, label TEXT, body TEXT, embedding VECTOR)",
+        db.clone(),
+    )
+    .unwrap();
     let rows = [
-        (1, "a", "rust systems programming rust rust", "[1.0,0.0,0.0]"),
+        (
+            1,
+            "a",
+            "rust systems programming rust rust",
+            "[1.0,0.0,0.0]",
+        ),
         (2, "b", "python scripting language", "[0.95,0.05,0.0]"),
         (3, "c", "rust programming language", "[-1.0,-1.0,-1.0]"),
         (4, "d", "cooking recipes and food", "[-0.9,-0.9,-1.0]"),
     ];
     for (id, label, body, emb) in rows {
-        execute_query(&format!("INSERT INTO hdocs VALUES ({id}, '{label}', '{body}', '{emb}')"), db.clone()).unwrap();
+        execute_query(
+            &format!("INSERT INTO hdocs VALUES ({id}, '{label}', '{body}', '{emb}')"),
+            db.clone(),
+        )
+        .unwrap();
     }
-    execute_query("CREATE INDEX ON hdocs USING VECTOR (embedding) WITH (metric = 'l2')", db.clone()).unwrap();
+    execute_query(
+        "CREATE INDEX ON hdocs USING VECTOR (embedding) WITH (metric = 'l2')",
+        db.clone(),
+    )
+    .unwrap();
     execute_query("CREATE INDEX ON hdocs USING GIN (body)", db.clone()).unwrap();
 }
 
@@ -131,11 +181,24 @@ fn hybrid_search_fuses_vector_and_bm25_rankings() {
         "SELECT label, vec_distance, bm25_score, fused_score FROM hybrid_search('hdocs', 'embedding', '[1.0,0.0,0.0]', 'body', 'rust', 3)",
         db.clone(),
     ).unwrap();
-    assert_eq!(result.rows.len(), 3, "'cooking' doc (no vector-near, no bm25 match) must be excluded");
+    assert_eq!(
+        result.rows.len(),
+        3,
+        "'cooking' doc (no vector-near, no bm25 match) must be excluded"
+    );
     let labels: Vec<String> = result.rows.iter().map(|r| cell_text(&r[0])).collect();
-    assert_eq!(labels[0], "a", "wins on both vector-nearness and BM25 relevance");
-    assert!(labels.contains(&"b".to_string()), "vector-near-only row still surfaces via RRF");
-    assert!(labels.contains(&"c".to_string()), "bm25-relevant-only row still surfaces via RRF");
+    assert_eq!(
+        labels[0], "a",
+        "wins on both vector-nearness and BM25 relevance"
+    );
+    assert!(
+        labels.contains(&"b".to_string()),
+        "vector-near-only row still surfaces via RRF"
+    );
+    assert!(
+        labels.contains(&"c".to_string()),
+        "bm25-relevant-only row still surfaces via RRF"
+    );
     assert!(!labels.contains(&"d".to_string()));
 }
 
@@ -144,8 +207,16 @@ fn hybrid_search_fuses_vector_and_bm25_rankings() {
 #[test]
 fn hybrid_search_requires_both_indexes() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE nodex (id INT4, label TEXT, body TEXT, embedding VECTOR)", db.clone()).unwrap();
-    execute_query("INSERT INTO nodex VALUES (1, 'a', 'rust', '[1.0,0.0,0.0]')", db.clone()).unwrap();
+    execute_query(
+        "CREATE TABLE nodex (id INT4, label TEXT, body TEXT, embedding VECTOR)",
+        db.clone(),
+    )
+    .unwrap();
+    execute_query(
+        "INSERT INTO nodex VALUES (1, 'a', 'rust', '[1.0,0.0,0.0]')",
+        db.clone(),
+    )
+    .unwrap();
     let result = execute_query(
         "SELECT * FROM hybrid_search('nodex', 'embedding', '[1.0,0.0,0.0]', 'body', 'rust', 3)",
         db.clone(),
@@ -166,5 +237,12 @@ fn vector_search_hybrid_sql_filter() {
         db.clone(),
     ).unwrap();
     let labels: Vec<String> = result.rows.iter().map(|r| cell_text(&r[0])).collect();
-    assert_eq!(labels, vec!["also-near-x".to_string(), "near-x".to_string(), "near-y".to_string()]);
+    assert_eq!(
+        labels,
+        vec![
+            "also-near-x".to_string(),
+            "near-x".to_string(),
+            "near-y".to_string()
+        ]
+    );
 }

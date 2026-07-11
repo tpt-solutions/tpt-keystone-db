@@ -73,11 +73,16 @@ fn type_matches(declared: &str, instance: &Value) -> bool {
 }
 
 fn validate_at(schema: &Value, instance: &Value, path: &str, mode: Mode, errors: &mut Vec<String>) {
-    let Value::Object(schema) = schema else { return };
+    let Value::Object(schema) = schema else {
+        return;
+    };
 
     if let Some(Value::String(t)) = schema.get("type") {
         if !type_matches(t, instance) {
-            errors.push(format!("{path}: expected type \"{t}\", got \"{}\"", json_type_name(instance)));
+            errors.push(format!(
+                "{path}: expected type \"{t}\", got \"{}\"",
+                json_type_name(instance)
+            ));
             return; // further checks on a type-mismatched value aren't meaningful
         }
     }
@@ -88,7 +93,9 @@ fn validate_at(schema: &Value, instance: &Value, path: &str, mode: Mode, errors:
 
     if let Some(Value::Array(allowed)) = schema.get("enum") {
         if !allowed.iter().any(|v| v == instance) {
-            errors.push(format!("{path}: value is not one of the allowed enum values"));
+            errors.push(format!(
+                "{path}: value is not one of the allowed enum values"
+            ));
         }
     }
 
@@ -105,7 +112,13 @@ fn validate_at(schema: &Value, instance: &Value, path: &str, mode: Mode, errors:
         if let Some(Value::Object(props)) = schema.get("properties") {
             for (key, sub_schema) in props {
                 if let Some(sub_instance) = obj.get(key) {
-                    validate_at(sub_schema, sub_instance, &format!("{path}.{key}"), mode, errors);
+                    validate_at(
+                        sub_schema,
+                        sub_instance,
+                        &format!("{path}.{key}"),
+                        mode,
+                        errors,
+                    );
                 }
             }
         }

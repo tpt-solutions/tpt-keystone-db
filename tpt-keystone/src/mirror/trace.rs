@@ -87,24 +87,61 @@ impl Tracer {
             "output": output,
             "error": error,
         });
-        let (_partition, offset) = self.db.flux_publish(&topic, Some(0), None, serde_json::to_vec(&event)?)?;
+        let (_partition, offset) =
+            self.db
+                .flux_publish(&topic, Some(0), None, serde_json::to_vec(&event)?)?;
         Ok(offset)
     }
 
     pub fn record_decision(&self, agent_id: &str, session_id: &str, detail: &str) -> Result<u64> {
-        self.record(agent_id, session_id, "decision", detail, None, None, None, None)
+        self.record(
+            agent_id, session_id, "decision", detail, None, None, None, None,
+        )
     }
 
-    pub fn record_tool_call(&self, agent_id: &str, session_id: &str, tool_name: &str, input: &str, output: &str) -> Result<u64> {
-        self.record(agent_id, session_id, "tool_call", &format!("called {tool_name}"), Some(tool_name), Some(input), Some(output), None)
+    pub fn record_tool_call(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+    ) -> Result<u64> {
+        self.record(
+            agent_id,
+            session_id,
+            "tool_call",
+            &format!("called {tool_name}"),
+            Some(tool_name),
+            Some(input),
+            Some(output),
+            None,
+        )
     }
 
-    pub fn record_error(&self, agent_id: &str, session_id: &str, tool_name: Option<&str>, error: &str) -> Result<u64> {
-        self.record(agent_id, session_id, "error", error, tool_name, None, None, Some(error))
+    pub fn record_error(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        tool_name: Option<&str>,
+        error: &str,
+    ) -> Result<u64> {
+        self.record(
+            agent_id,
+            session_id,
+            "error",
+            error,
+            tool_name,
+            None,
+            None,
+            Some(error),
+        )
     }
 
     pub fn record_outcome(&self, agent_id: &str, session_id: &str, detail: &str) -> Result<u64> {
-        self.record(agent_id, session_id, "outcome", detail, None, None, None, None)
+        self.record(
+            agent_id, session_id, "outcome", detail, None, None, None, None,
+        )
     }
 }
 
@@ -129,10 +166,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -140,8 +192,12 @@ mod tests {
     fn records_are_ordered_by_offset() {
         let (db, _b, _l) = test_db();
         let tracer = Tracer::new(db.clone());
-        let o1 = tracer.record_decision("agent1", "sess1", "decided to search").unwrap();
-        let o2 = tracer.record_tool_call("agent1", "sess1", "web_search", "cats", "[results]").unwrap();
+        let o1 = tracer
+            .record_decision("agent1", "sess1", "decided to search")
+            .unwrap();
+        let o2 = tracer
+            .record_tool_call("agent1", "sess1", "web_search", "cats", "[results]")
+            .unwrap();
         let o3 = tracer.record_outcome("agent1", "sess1", "done").unwrap();
         assert_eq!((o1, o2, o3), (0, 1, 2));
     }

@@ -26,6 +26,8 @@ pub enum Stmt {
     CreateFunction(CreateFunctionStmt),
     CreateSequence(CreateSequenceStmt),
     CreateTopic(CreateTopicStmt),
+    /// `ANALYZE [table]` — `None` means every table in `public`.
+    Analyze(Option<String>),
 }
 
 /// `CREATE TOPIC [IF NOT EXISTS] name [WITH (partitions = n, retention =
@@ -133,7 +135,11 @@ pub struct CreateTableStmt {
 #[derive(Debug, Clone)]
 pub enum TableConstraint {
     Unique(Vec<String>),
-    ForeignKey { column: String, ref_table: String, ref_column: String },
+    ForeignKey {
+        column: String,
+        ref_table: String,
+        ref_column: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -297,18 +303,61 @@ pub enum Expr {
     Literal(Literal),
     Ident(String),
     QualifiedIdent(String, String), // table.column
-    BinaryOp { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
-    UnaryOp { op: UnOp, expr: Box<Expr> },
-    IsNull { expr: Box<Expr>, negated: bool },
-    IsTrue { expr: Box<Expr>, negated: bool },
-    IsFalse { expr: Box<Expr>, negated: bool },
-    Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool },
-    Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool },
-    In { expr: Box<Expr>, list: InList, negated: bool },
-    Exists { subquery: Box<SelectStmt>, negated: bool },
-    Cast { expr: Box<Expr>, ty: String },
-    Function { name: String, args: Vec<Expr>, distinct: bool },
-    Case { operand: Option<Box<Expr>>, branches: Vec<(Expr, Expr)>, else_: Option<Box<Expr>> },
+    BinaryOp {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    UnaryOp {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    IsTrue {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    IsFalse {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
+    Like {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        negated: bool,
+    },
+    In {
+        expr: Box<Expr>,
+        list: InList,
+        negated: bool,
+    },
+    Exists {
+        subquery: Box<SelectStmt>,
+        negated: bool,
+    },
+    Cast {
+        expr: Box<Expr>,
+        ty: String,
+    },
+    Function {
+        name: String,
+        args: Vec<Expr>,
+        distinct: bool,
+    },
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<(Expr, Expr)>,
+        else_: Option<Box<Expr>>,
+    },
     Param(u32), // $1
     Subquery(Box<SelectStmt>),
     Window {
@@ -366,12 +415,22 @@ pub enum Literal {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, NotEq, Lt, Lte, Gt, Gte,
-    And, Or,
-    Concat,    // ||
-    Arrow,     // ->
-    LongArrow, // ->>
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    And,
+    Or,
+    Concat,        // ||
+    Arrow,         // ->
+    LongArrow,     // ->>
     Contains,      // @> (JSON/JSONB containment)
     HashArrow,     // #> (JSON path extraction, array-literal path)
     HashLongArrow, // #>> (JSON path extraction as text)

@@ -34,7 +34,9 @@ impl ReplayEngine {
     /// (not an error) if the session never recorded anything.
     pub fn replay_session(&self, session_id: &str) -> Result<Vec<TraceEvent>> {
         let topic = topic_name(session_id);
-        let Some(records) = self.db.flux_all(&topic, 0) else { return Ok(Vec::new()) };
+        let Some(records) = self.db.flux_all(&topic, 0) else {
+            return Ok(Vec::new());
+        };
         let mut events: Vec<TraceEvent> = records.iter().filter_map(decode_event).collect();
         events.sort_by_key(|e| e.offset);
         Ok(events)
@@ -43,7 +45,11 @@ impl ReplayEngine {
     /// Same as `replay_session`, truncated to events at or before `offset`
     /// — "replay up to the point things went wrong."
     pub fn replay_up_to(&self, session_id: &str, offset: u64) -> Result<Vec<TraceEvent>> {
-        Ok(self.replay_session(session_id)?.into_iter().filter(|e| e.offset <= offset).collect())
+        Ok(self
+            .replay_session(session_id)?
+            .into_iter()
+            .filter(|e| e.offset <= offset)
+            .collect())
     }
 
     /// The first event that represents a failure — either `kind == "error"`
@@ -51,7 +57,10 @@ impl ReplayEngine {
     /// cause to the exact tool call" milestone helper. `None` if the
     /// session has no recorded failure.
     pub fn find_first_error(&self, session_id: &str) -> Result<Option<TraceEvent>> {
-        Ok(self.replay_session(session_id)?.into_iter().find(|e| e.kind == "error" || e.error.is_some()))
+        Ok(self
+            .replay_session(session_id)?
+            .into_iter()
+            .find(|e| e.kind == "error" || e.error.is_some()))
     }
 }
 
@@ -66,7 +75,10 @@ pub struct SessionCursor {
 
 impl SessionCursor {
     pub fn open(engine: &ReplayEngine, session_id: &str) -> Result<Self> {
-        Ok(Self { events: engine.replay_session(session_id)?, pos: 0 })
+        Ok(Self {
+            events: engine.replay_session(session_id)?,
+            pos: 0,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -113,18 +125,50 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
     fn seed_failed_session(db: &Arc<Database>) {
         let tracer = Tracer::new(db.clone());
-        tracer.record_decision("agent1", "sess1", "decided to look up the forecast").unwrap();
-        tracer.record_tool_call("agent1", "sess1", "get_weather", "\"Paris\"", "{\"temp\":18}").unwrap();
-        tracer.record_error("agent1", "sess1", Some("send_email"), "SMTP connection refused").unwrap();
+        tracer
+            .record_decision("agent1", "sess1", "decided to look up the forecast")
+            .unwrap();
+        tracer
+            .record_tool_call(
+                "agent1",
+                "sess1",
+                "get_weather",
+                "\"Paris\"",
+                "{\"temp\":18}",
+            )
+            .unwrap();
+        tracer
+            .record_error(
+                "agent1",
+                "sess1",
+                Some("send_email"),
+                "SMTP connection refused",
+            )
+            .unwrap();
     }
 
     #[test]

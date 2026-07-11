@@ -13,7 +13,9 @@ use anyhow::Result;
 use crate::storage::database::Database;
 use crate::storage::ts_index::{Rollup, TimeBucketPolicy};
 use crate::storage::{ColumnType, StorageEngine};
-use crate::synapse::{cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell};
+use crate::synapse::{
+    cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell,
+};
 
 const TABLE: &str = "_mirror_metrics";
 const COL_ID: usize = 0;
@@ -68,12 +70,27 @@ impl MetricsStore {
             )?;
         }
         if !db.indexed_column_time(TABLE, "ts") {
-            db.create_time_index(TABLE, "ts", "latency_ms", TimeBucketPolicy { granularity_ms: 3_600_000, retention_ms: None })?;
+            db.create_time_index(
+                TABLE,
+                "ts",
+                "latency_ms",
+                TimeBucketPolicy {
+                    granularity_ms: 3_600_000,
+                    retention_ms: None,
+                },
+            )?;
         }
         Ok(Self { db })
     }
 
-    pub fn record(&self, agent_id: &str, session_id: &str, latency_ms: f64, tokens: i64, success: bool) -> Result<String> {
+    pub fn record(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        latency_ms: f64,
+        tokens: i64,
+        success: bool,
+    ) -> Result<String> {
         let id = new_id("metric");
         let cells = vec![
             text_cell(&id),
@@ -93,8 +110,11 @@ impl MetricsStore {
     /// "shared table, column-scoped index" tradeoff `synapse::memory`
     /// documents for its own per-agent recall).
     pub fn range(&self, agent_id: &str, t0: i64, t1: i64) -> Result<Vec<MetricEntry>> {
-        let Some(rows) = self.db.time_range_query(TABLE, "ts", t0, t1) else { return Ok(Vec::new()) };
-        let mut out: Vec<MetricEntry> = rows.into_iter()
+        let Some(rows) = self.db.time_range_query(TABLE, "ts", t0, t1) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<MetricEntry> = rows
+            .into_iter()
             .filter_map(|kv| decode_entry(&kv.value))
             .filter(|e| e.agent_id == agent_id)
             .collect();
@@ -117,7 +137,10 @@ impl MetricsStore {
     /// across every agent — the continuous-aggregate path Chronos already
     /// built (`Database::rollup_query`), reused rather than reimplemented.
     pub fn latency_rollup(&self, t0: i64, t1: i64) -> Result<Vec<(i64, Rollup)>> {
-        Ok(self.db.rollup_query(TABLE, "ts", t0, t1).unwrap_or_default())
+        Ok(self
+            .db
+            .rollup_query(TABLE, "ts", t0, t1)
+            .unwrap_or_default())
     }
 }
 
@@ -132,10 +155,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -157,7 +195,10 @@ mod tests {
         m.record("agent1", "sess1", 100.0, 10, true).unwrap();
         m.record("agent1", "sess1", 100.0, 10, true).unwrap();
         m.record("agent1", "sess1", 100.0, 10, false).unwrap();
-        let rate = m.success_rate("agent1", 0, now_ms() + 60_000).unwrap().unwrap();
+        let rate = m
+            .success_rate("agent1", 0, now_ms() + 60_000)
+            .unwrap()
+            .unwrap();
         assert!((rate - (2.0 / 3.0)).abs() < 1e-9);
     }
 

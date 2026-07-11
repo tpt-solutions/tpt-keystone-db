@@ -121,7 +121,11 @@ impl TimeIndex {
     /// Opens (replaying any existing records) or creates a fresh time index
     /// file. `default_policy`/`default_value_column` are only used when
     /// creating a new file — on reopen, both are read back from the header.
-    pub fn open(path: &Path, default_policy: TimeBucketPolicy, default_value_column: &str) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        default_policy: TimeBucketPolicy,
+        default_value_column: &str,
+    ) -> Result<Self> {
         if !path.exists() {
             let idx = Self {
                 path: path.to_path_buf(),
@@ -140,7 +144,11 @@ impl TimeIndex {
         let retention_raw = i64::from_be_bytes(header[8..16].try_into().unwrap());
         let policy = TimeBucketPolicy {
             granularity_ms,
-            retention_ms: if retention_raw < 0 { None } else { Some(retention_raw) },
+            retention_ms: if retention_raw < 0 {
+                None
+            } else {
+                Some(retention_raw)
+            },
         };
         let mut col_len_buf = [0u8; 2];
         file.read_exact(&mut col_len_buf)?;
@@ -172,7 +180,11 @@ impl TimeIndex {
     }
 
     fn write_header(&self) -> Result<()> {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
         file.write_all(&self.policy.granularity_ms.to_be_bytes())?;
         file.write_all(&self.policy.retention_ms.unwrap_or(-1).to_be_bytes())?;
         let col_bytes = self.value_column.as_bytes();
@@ -193,7 +205,11 @@ impl TimeIndex {
     /// log, updates the in-memory bucket, seals any bucket that's no longer
     /// the newest, and applies retention.
     pub fn insert(&mut self, row_key: &[u8], ts: i64, value: f64) -> Result<()> {
-        let entry = TsEntry { row_key: row_key.to_vec(), ts, value };
+        let entry = TsEntry {
+            row_key: row_key.to_vec(),
+            ts,
+            value,
+        };
         let encoded = bincode::serialize(&entry)?;
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;
@@ -208,8 +224,15 @@ impl TimeIndex {
             self.newest_ts = entry.ts;
         }
         let bucket = self.buckets.entry(start).or_insert_with(|| Bucket {
-            rollup: Rollup { count: 0, sum: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY },
-            state: BucketState::Open { entries: Vec::new() },
+            rollup: Rollup {
+                count: 0,
+                sum: 0.0,
+                min: f64::INFINITY,
+                max: f64::NEG_INFINITY,
+            },
+            state: BucketState::Open {
+                entries: Vec::new(),
+            },
         });
         bucket.rollup.add(entry.value);
         match &mut bucket.state {
@@ -217,7 +240,9 @@ impl TimeIndex {
             // A row landed in an already-sealed/downsampled bucket (can
             // happen with out-of-order inserts): re-open it so it isn't lost.
             BucketState::Sealed(_) | BucketState::Downsampled => {
-                bucket.state = BucketState::Open { entries: vec![entry] };
+                bucket.state = BucketState::Open {
+                    entries: vec![entry],
+                };
             }
         }
         self.seal_non_newest_buckets();
@@ -254,7 +279,9 @@ impl TimeIndex {
     /// + automatic downsampling" behavior. Runs synchronously on every
     /// insert rather than on a background schedule (see module docs / plan).
     fn apply_retention(&mut self) {
-        let Some(retention_ms) = self.policy.retention_ms else { return };
+        let Some(retention_ms) = self.policy.retention_ms else {
+            return;
+        };
         let cutoff = self.newest_ts - retention_ms;
         for (&start, bucket) in self.buckets.iter_mut() {
             let bucket_end = start + self.policy.granularity_ms;
@@ -326,7 +353,10 @@ mod tests {
     use super::*;
 
     fn policy(granularity_ms: i64, retention_ms: Option<i64>) -> TimeBucketPolicy {
-        TimeBucketPolicy { granularity_ms, retention_ms }
+        TimeBucketPolicy {
+            granularity_ms,
+            retention_ms,
+        }
     }
 
     #[test]
@@ -381,14 +411,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("idx.ts");
         // 1-hour buckets, 2-hour retention.
-        let mut idx = TimeIndex::open(&path, policy(3_600_000, Some(2 * 3_600_000)), "value").unwrap();
+        let mut idx =
+            TimeIndex::open(&path, policy(3_600_000, Some(2 * 3_600_000)), "value").unwrap();
         idx.insert(b"old_row", 0, 5.0).unwrap();
         // Push the "newest" timestamp far enough ahead that the old bucket
         // falls outside the retention window.
         idx.insert(b"new_row", 10 * 3_600_000, 50.0).unwrap();
 
         let hits = idx.query_range(0, 3_600_000);
-        assert!(!hits.contains(&b"old_row".to_vec()), "raw row should be evicted past retention");
+        assert!(
+            !hits.contains(&b"old_row".to_vec()),
+            "raw row should be evicted past retention"
+        );
 
         let rollups = idx.query_rollups(0, 3_600_000);
         assert_eq!(rollups.len(), 1);
@@ -402,7 +436,8 @@ mod tests {
         let path = dir.path().join("idx.ts");
         let mut idx = TimeIndex::open(&path, policy(3_600_000, None), "value").unwrap();
         for i in 0..50 {
-            idx.insert(format!("row{i}").as_bytes(), i * 1000, i as f64).unwrap();
+            idx.insert(format!("row{i}").as_bytes(), i * 1000, i as f64)
+                .unwrap();
         }
         // Advance into a new bucket so the first bucket seals & compresses.
         idx.insert(b"trigger", 10_000_000, 999.0).unwrap();

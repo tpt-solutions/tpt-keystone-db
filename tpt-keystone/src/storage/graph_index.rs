@@ -39,7 +39,11 @@ impl GraphIndex {
     /// stored in the file header so a later open (via `read_dir` in
     /// `Database::open`, which doesn't otherwise know this DDL-time config)
     /// recovers the same wiring.
-    pub fn open(path: &Path, default_to_column: &str, default_type_column: Option<&str>) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        default_to_column: &str,
+        default_type_column: Option<&str>,
+    ) -> Result<Self> {
         if !path.exists() {
             let idx = Self {
                 path: path.to_path_buf(),
@@ -53,7 +57,11 @@ impl GraphIndex {
         let mut file = BufReader::new(File::open(path)?);
         let to_column = read_string(&mut file)?;
         let has_type = read_u8(&mut file)? != 0;
-        let type_column = if has_type { Some(read_string(&mut file)?) } else { None };
+        let type_column = if has_type {
+            Some(read_string(&mut file)?)
+        } else {
+            None
+        };
 
         let mut graph = AdjacencyGraph::new();
         let mut len_buf = [0u8; 4];
@@ -69,11 +77,20 @@ impl GraphIndex {
             let rec: EdgeRecord = bincode::deserialize(&buf)?;
             graph.add_edge(&rec.from, &rec.to, rec.rel_type);
         }
-        Ok(Self { path: path.to_path_buf(), to_column, type_column, graph })
+        Ok(Self {
+            path: path.to_path_buf(),
+            to_column,
+            type_column,
+            graph,
+        })
     }
 
     fn write_header(&self) -> Result<()> {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
         write_string(&mut file, &self.to_column)?;
         match &self.type_column {
             Some(t) => {
@@ -100,7 +117,11 @@ impl GraphIndex {
     /// Records one edge. Appends to the on-disk log and updates the
     /// in-memory adjacency graph.
     pub fn insert(&mut self, from: &[u8], to: &[u8], rel_type: Option<String>) -> Result<()> {
-        let rec = EdgeRecord { from: from.to_vec(), to: to.to_vec(), rel_type: rel_type.clone() };
+        let rec = EdgeRecord {
+            from: from.to_vec(),
+            to: to.to_vec(),
+            rel_type: rel_type.clone(),
+        };
         let encoded = bincode::serialize(&rec)?;
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&(encoded.len() as u32).to_be_bytes())?;

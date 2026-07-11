@@ -17,7 +17,9 @@ use anyhow::Result;
 
 use crate::storage::database::Database;
 use crate::storage::{ColumnType, StorageEngine};
-use crate::synapse::{cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell};
+use crate::synapse::{
+    cell_i64, cell_text, col, decode_cell, encode_cells, int_cell, new_id, now_ms, text_cell,
+};
 
 const TABLE: &str = "_mirror_provenance";
 const COL_ID: usize = 0;
@@ -89,10 +91,15 @@ impl ProvenanceLog {
 
     /// Every assertion ever recorded for `fact_ref`, oldest first.
     pub fn history(&self, fact_ref: &str) -> Result<Vec<ProvenanceRecord>> {
-        let mut records: Vec<(i64, ProvenanceRecord)> = self.db.scan(TABLE)?.into_iter()
+        let mut records: Vec<(i64, ProvenanceRecord)> = self
+            .db
+            .scan(TABLE)?
+            .into_iter()
             .filter_map(|kv| {
                 let seq = cell_i64(&decode_cell(&kv.value, COL_SEQ))?;
-                decode_record(&kv.value).filter(|r| r.fact_ref == fact_ref).map(|r| (seq, r))
+                decode_record(&kv.value)
+                    .filter(|r| r.fact_ref == fact_ref)
+                    .map(|r| (seq, r))
             })
             .collect();
         records.sort_by_key(|(seq, _)| *seq);
@@ -115,10 +122,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 

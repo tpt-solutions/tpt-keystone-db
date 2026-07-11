@@ -29,11 +29,15 @@ pub fn call(db: &Arc<Database>, name: &str, args: &Json) -> Result<Json> {
 }
 
 fn arg_sql(args: &Json) -> Result<&str> {
-    args.get("sql").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing required argument: sql"))
+    args.get("sql")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing required argument: sql"))
 }
 
 fn arg_table(args: &Json) -> Result<&str> {
-    args.get("table").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing required argument: table"))
+    args.get("table")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing required argument: table"))
 }
 
 fn tables(db: &Arc<Database>) -> Result<Json> {
@@ -42,7 +46,9 @@ fn tables(db: &Arc<Database>) -> Result<Json> {
 
 fn columns(db: &Arc<Database>, args: &Json) -> Result<Json> {
     let table = arg_table(args)?;
-    let schema = db.get_table(table)?.ok_or_else(|| anyhow!("no such table: {table}"))?;
+    let schema = db
+        .get_table(table)?
+        .ok_or_else(|| anyhow!("no such table: {table}"))?;
     Ok(json!(schema.columns))
 }
 
@@ -61,8 +67,11 @@ fn schema(db: &Arc<Database>) -> Result<Json> {
     let mut graph_edges = Vec::new();
     for name in db.list_tables()? {
         if let Some(t) = db.get_table(&name)? {
-            let indexed_columns: Vec<&String> =
-                indexes.iter().filter(|(tbl, _)| tbl == &name).map(|(_, col)| col).collect();
+            let indexed_columns: Vec<&String> = indexes
+                .iter()
+                .filter(|(tbl, _)| tbl == &name)
+                .map(|(_, col)| col)
+                .collect();
             let row_count = table_row_count(db, &name)?;
             let histograms = column_histograms(db, &name, &t, row_count);
             for fk in &t.foreign_keys {
@@ -105,7 +114,12 @@ fn table_row_count(db: &Arc<Database>, table: &str) -> Result<i64> {
 /// Per-column top-N value/count histograms via `GROUP BY ... ORDER BY COUNT(*)
 /// DESC LIMIT N` — skipped for `bytea`/`json` columns (not meaningfully
 /// bucketable) and for tables over `HISTOGRAM_ROW_CAP` rows.
-fn column_histograms(db: &Arc<Database>, table: &str, schema: &TableSchema, row_count: i64) -> Json {
+fn column_histograms(
+    db: &Arc<Database>,
+    table: &str,
+    schema: &TableSchema,
+    row_count: i64,
+) -> Json {
     if row_count == 0 {
         return json!({});
     }
@@ -147,7 +161,9 @@ fn query(db: &Arc<Database>, args: &Json) -> Result<Json> {
     let sql = arg_sql(args)?;
     let stmt = db.parse_cached(sql)?;
     if !matches!(stmt, Stmt::Select(_) | Stmt::Show(_)) {
-        bail!("query() only accepts read-only statements (SELECT/SHOW) — use mutate() for writes/DDL");
+        bail!(
+            "query() only accepts read-only statements (SELECT/SHOW) — use mutate() for writes/DDL"
+        );
     }
     let result = executor::execute_parsed(stmt, db.clone(), &[])?;
     Ok(rows_to_json(&result))
@@ -158,7 +174,11 @@ fn mutate(db: &Arc<Database>, args: &Json) -> Result<Json> {
     let result = executor::execute_query(sql, db.clone())?;
     // DML tags are "INSERT 0 <n>" / "UPDATE <n>" / "DELETE <n>"; DDL tags
     // (e.g. "CREATE TABLE") have no trailing count.
-    let rows_affected = result.tag.rsplit(' ').next().and_then(|n| n.parse::<u64>().ok());
+    let rows_affected = result
+        .tag
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse::<u64>().ok());
     Ok(json!({"tag": result.tag, "rows_affected": rows_affected}))
 }
 
@@ -187,8 +207,16 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
         Some(n @ Json::Number(_)) => n.to_string(),
         _ => bail!("missing required argument: id"),
     };
-    let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(1).min(2);
-    let per_hop_limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 100);
+    let max_depth = args
+        .get("max_depth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .min(2);
+    let per_hop_limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .clamp(1, 100);
 
     let mut visited: HashSet<(String, String)> = HashSet::new();
     let mut frontier: Vec<(String, String)> = vec![(table, id)];
@@ -204,11 +232,17 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
             if !visited.insert((tbl.clone(), id_val.clone())) {
                 continue;
             }
-            let Some(schema) = db.get_table(&tbl)? else { continue };
+            let Some(schema) = db.get_table(&tbl)? else {
+                continue;
+            };
             let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
-            let Some(pk_col) = schema.columns.get(pk_idx) else { continue };
+            let Some(pk_col) = schema.columns.get(pk_idx) else {
+                continue;
+            };
             let pk_value = typed_value(&pk_col.col_type, &id_val);
-            let Some(row) = select_one_by_column(db, &tbl, &pk_col.name, pk_value)? else { continue };
+            let Some(row) = select_one_by_column(db, &tbl, &pk_col.name, pk_value)? else {
+                continue;
+            };
             let subject_label = label_for_row(&schema, &row);
             let subject = format!("{tbl}:{id_val}");
 
@@ -217,16 +251,28 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
                     truncated = true;
                     break;
                 }
-                let Some(fk_val) = row.get(fk.column).and_then(cell_text) else { continue };
-                let Some(ref_schema) = db.get_table(&fk.ref_table)? else { continue };
+                let Some(fk_val) = row.get(fk.column).and_then(cell_text) else {
+                    continue;
+                };
+                let Some(ref_schema) = db.get_table(&fk.ref_table)? else {
+                    continue;
+                };
                 let ref_col_type = ref_schema
                     .columns
                     .iter()
                     .find(|c| c.name == fk.ref_column)
                     .map(|c| c.col_type.clone())
                     .unwrap_or(ColumnType::Text);
-                let ref_row = select_one_by_column(db, &fk.ref_table, &fk.ref_column, typed_value(&ref_col_type, &fk_val))?;
-                let object_label = ref_row.as_ref().map(|r| label_for_row(&ref_schema, r)).unwrap_or_else(|| fk_val.clone());
+                let ref_row = select_one_by_column(
+                    db,
+                    &fk.ref_table,
+                    &fk.ref_column,
+                    typed_value(&ref_col_type, &fk_val),
+                )?;
+                let object_label = ref_row
+                    .as_ref()
+                    .map(|r| label_for_row(&ref_schema, r))
+                    .unwrap_or_else(|| fk_val.clone());
                 facts.push(json!({
                     "subject": subject, "subject_label": subject_label,
                     "relation": schema.columns[fk.column].name,
@@ -237,7 +283,9 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
             }
 
             'incoming: for other_name in db.list_tables()? {
-                let Some(other_schema) = db.get_table(&other_name)? else { continue };
+                let Some(other_schema) = db.get_table(&other_name)? else {
+                    continue;
+                };
                 for fk in &other_schema.foreign_keys {
                     if fk.ref_table != tbl {
                         continue;
@@ -247,14 +295,21 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
                         break 'incoming;
                     }
                     let fk_col_name = other_schema.columns[fk.column].name.clone();
-                    let rows = select_many_by_column(db, &other_name, &fk_col_name, typed_value(&pk_col.col_type, &id_val), per_hop_limit)?;
+                    let rows = select_many_by_column(
+                        db,
+                        &other_name,
+                        &fk_col_name,
+                        typed_value(&pk_col.col_type, &id_val),
+                        per_hop_limit,
+                    )?;
                     let other_pk_idx = other_schema.pk_columns.first().copied().unwrap_or(0);
                     for r in rows {
                         if facts.len() >= RELATED_FACT_CAP {
                             truncated = true;
                             break;
                         }
-                        let other_pk_text = r.get(other_pk_idx).and_then(cell_text).unwrap_or_default();
+                        let other_pk_text =
+                            r.get(other_pk_idx).and_then(cell_text).unwrap_or_default();
                         let other_label = label_for_row(&other_schema, &r);
                         facts.push(json!({
                             "subject": format!("{other_name}:{other_pk_text}"), "subject_label": other_label,
@@ -275,12 +330,14 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
 
 fn typed_value(col_type: &ColumnType, text: &str) -> Value {
     match col_type {
-        ColumnType::Int8 | ColumnType::Int4 | ColumnType::Int2 => {
-            text.parse::<i64>().map(Value::Int).unwrap_or_else(|_| Value::Text(text.to_string()))
-        }
-        ColumnType::Float8 | ColumnType::Float4 => {
-            text.parse::<f64>().map(Value::Float).unwrap_or_else(|_| Value::Text(text.to_string()))
-        }
+        ColumnType::Int8 | ColumnType::Int4 | ColumnType::Int2 => text
+            .parse::<i64>()
+            .map(Value::Int)
+            .unwrap_or_else(|_| Value::Text(text.to_string())),
+        ColumnType::Float8 | ColumnType::Float4 => text
+            .parse::<f64>()
+            .map(Value::Float)
+            .unwrap_or_else(|_| Value::Text(text.to_string())),
         ColumnType::Bool => match text {
             "t" | "true" => Value::Bool(true),
             "f" | "false" => Value::Bool(false),
@@ -291,7 +348,8 @@ fn typed_value(col_type: &ColumnType, text: &str) -> Value {
 }
 
 fn cell_text(cell: &Option<Vec<u8>>) -> Option<String> {
-    cell.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
+    cell.as_ref()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 /// Picks a human-readable label for a row: the first non-null `text` column
@@ -308,12 +366,21 @@ fn label_for_row(schema: &TableSchema, row: &[Option<Vec<u8>>]) -> String {
             }
         }
     }
-    let pk_name = schema.columns.get(pk_idx).map(|c| c.name.as_str()).unwrap_or("id");
+    let pk_name = schema
+        .columns
+        .get(pk_idx)
+        .map(|c| c.name.as_str())
+        .unwrap_or("id");
     let pk_text = row.get(pk_idx).and_then(cell_text).unwrap_or_default();
     format!("{pk_name}={pk_text}")
 }
 
-fn select_one_by_column(db: &Arc<Database>, table: &str, column: &str, value: Value) -> Result<Option<Vec<Option<Vec<u8>>>>> {
+fn select_one_by_column(
+    db: &Arc<Database>,
+    table: &str,
+    column: &str,
+    value: Value,
+) -> Result<Option<Vec<Option<Vec<u8>>>>> {
     let sql = format!("SELECT * FROM {table} WHERE {column} = $1 LIMIT 1");
     let stmt = db.parse_cached(&sql)?;
     let result = executor::execute_parsed(stmt, db.clone(), &[value])?;
@@ -366,11 +433,17 @@ fn describe_stmt(stmt: &Stmt) -> Json {
             "join_count": s.from.as_ref().map(|f| f.joins.len()).unwrap_or(0),
         }),
         Stmt::Insert(i) => json!({"statement": "insert", "table": i.table}),
-        Stmt::Update(u) => json!({"statement": "update", "table": u.table, "has_where": u.where_.is_some()}),
-        Stmt::Delete(d) => json!({"statement": "delete", "table": d.table, "has_where": d.where_.is_some()}),
+        Stmt::Update(u) => {
+            json!({"statement": "update", "table": u.table, "has_where": u.where_.is_some()})
+        }
+        Stmt::Delete(d) => {
+            json!({"statement": "delete", "table": d.table, "has_where": d.where_.is_some()})
+        }
         Stmt::CreateTable(c) => json!({"statement": "create_table", "table": c.table}),
         Stmt::DropTable(d) => json!({"statement": "drop_table", "table": d.table}),
-        Stmt::CreateIndex(c) => json!({"statement": "create_index", "table": c.table, "column": c.column}),
+        Stmt::CreateIndex(c) => {
+            json!({"statement": "create_index", "table": c.table, "column": c.column})
+        }
         other => json!({"statement": format!("{other:?}")
             .split('(')
             .next()

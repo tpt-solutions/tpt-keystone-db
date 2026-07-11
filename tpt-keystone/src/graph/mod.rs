@@ -119,16 +119,28 @@ impl AdjacencyGraph {
     pub fn add_edge(&mut self, from: &[u8], to: &[u8], rel_type: Option<String>) {
         let from_id = self.intern(from);
         let to_id = self.intern(to);
-        self.out_adj[from_id as usize].push(Edge { to: to_id, rel_type: rel_type.clone() });
-        self.in_adj[to_id as usize].push(Edge { to: from_id, rel_type });
+        self.out_adj[from_id as usize].push(Edge {
+            to: to_id,
+            rel_type: rel_type.clone(),
+        });
+        self.in_adj[to_id as usize].push(Edge {
+            to: from_id,
+            rel_type,
+        });
     }
 
     pub fn out_edges(&self, id: VertexId) -> &[Edge] {
-        self.out_adj.get(id as usize).map(|v| v.as_slice()).unwrap_or(&[])
+        self.out_adj
+            .get(id as usize)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn in_edges(&self, id: VertexId) -> &[Edge] {
-        self.in_adj.get(id as usize).map(|v| v.as_slice()).unwrap_or(&[])
+        self.in_adj
+            .get(id as usize)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Neighbours of `id` in the given direction, each as `(neighbour_id,
@@ -137,10 +149,22 @@ impl AdjacencyGraph {
     /// neighbour is two distinct relationships, not one).
     pub fn neighbors(&self, id: VertexId, dir: Direction) -> Vec<(VertexId, Option<String>)> {
         match dir {
-            Direction::Out => self.out_edges(id).iter().map(|e| (e.to, e.rel_type.clone())).collect(),
-            Direction::In => self.in_edges(id).iter().map(|e| (e.to, e.rel_type.clone())).collect(),
+            Direction::Out => self
+                .out_edges(id)
+                .iter()
+                .map(|e| (e.to, e.rel_type.clone()))
+                .collect(),
+            Direction::In => self
+                .in_edges(id)
+                .iter()
+                .map(|e| (e.to, e.rel_type.clone()))
+                .collect(),
             Direction::Both => {
-                let mut v: Vec<_> = self.out_edges(id).iter().map(|e| (e.to, e.rel_type.clone())).collect();
+                let mut v: Vec<_> = self
+                    .out_edges(id)
+                    .iter()
+                    .map(|e| (e.to, e.rel_type.clone()))
+                    .collect();
                 v.extend(self.in_edges(id).iter().map(|e| (e.to, e.rel_type.clone())));
                 v
             }
@@ -158,8 +182,14 @@ mod tests {
         g.add_edge(b"a", b"b", Some("FOLLOWS".into()));
         let a = g.id_of(b"a").unwrap();
         let b = g.id_of(b"b").unwrap();
-        assert_eq!(g.neighbors(a, Direction::Out), vec![(b, Some("FOLLOWS".into()))]);
-        assert_eq!(g.neighbors(b, Direction::In), vec![(a, Some("FOLLOWS".into()))]);
+        assert_eq!(
+            g.neighbors(a, Direction::Out),
+            vec![(b, Some("FOLLOWS".into()))]
+        );
+        assert_eq!(
+            g.neighbors(b, Direction::In),
+            vec![(a, Some("FOLLOWS".into()))]
+        );
         assert!(g.neighbors(a, Direction::In).is_empty());
     }
 

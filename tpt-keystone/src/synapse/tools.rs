@@ -76,23 +76,39 @@ impl ToolRegistry {
     /// Registers (or replaces, keyed by `name`) a tool definition. `Database`
     /// row storage is keyed by primary key, so re-registering the same
     /// `name` naturally overwrites the previous definition/embedding.
-    pub fn register(&self, name: &str, description: &str, schema_json: &str, embedding: Option<&[f32]>) -> Result<()> {
+    pub fn register(
+        &self,
+        name: &str,
+        description: &str,
+        schema_json: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<()> {
         let cells = vec![
             text_cell(name),
             text_cell(description),
             text_cell(schema_json),
-            embedding.map(|v| text_cell(Vector(v.to_vec()).to_text())).unwrap_or(None),
+            embedding
+                .map(|v| text_cell(Vector(v.to_vec()).to_text()))
+                .unwrap_or(None),
             Some(now_ms().to_string().into_bytes()),
         ];
         self.db.write(TABLE, name.as_bytes(), &encode_cells(&cells))
     }
 
     pub fn get(&self, name: &str) -> Result<Option<ToolDef>> {
-        Ok(self.db.read(TABLE, name.as_bytes())?.and_then(|v| decode_tool(&v)))
+        Ok(self
+            .db
+            .read(TABLE, name.as_bytes())?
+            .and_then(|v| decode_tool(&v)))
     }
 
     pub fn list(&self) -> Result<Vec<ToolDef>> {
-        Ok(self.db.scan(TABLE)?.into_iter().filter_map(|kv| decode_tool(&kv.value)).collect())
+        Ok(self
+            .db
+            .scan(TABLE)?
+            .into_iter()
+            .filter_map(|kv| decode_tool(&kv.value))
+            .collect())
     }
 
     /// Ranked semantic discovery over registered tools' embeddings,
@@ -102,8 +118,16 @@ impl ToolRegistry {
     /// module never returns `None` itself, matching `vector_knn_query`'s own
     /// "index exists but empty" vs. "no index" distinction).
     pub fn discover(&self, query_embedding: &[f32], k: usize) -> Result<Vec<(ToolDef, f32)>> {
-        let Some(hits) = self.db.vector_knn_query(TABLE, "embedding", query_embedding, k, None) else { return Ok(Vec::new()) };
-        Ok(hits.into_iter().filter_map(|(kv, dist)| decode_tool(&kv.value).map(|t| (t, dist))).collect())
+        let Some(hits) = self
+            .db
+            .vector_knn_query(TABLE, "embedding", query_embedding, k, None)
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(hits
+            .into_iter()
+            .filter_map(|(kv, dist)| decode_tool(&kv.value).map(|t| (t, dist)))
+            .collect())
     }
 }
 
@@ -118,10 +142,25 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-        let lease = Arc::new(LeaseManager::new(store.clone(), "db", "node-1".into(), Duration::from_secs(30)));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let lease = Arc::new(LeaseManager::new(
+            store.clone(),
+            "db",
+            "node-1".into(),
+            Duration::from_secs(30),
+        ));
         lease.try_acquire().unwrap();
-        let db = Arc::new(Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default()).unwrap());
+        let db = Arc::new(
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
+        );
         (db, bucket, local)
     }
 
@@ -129,7 +168,13 @@ mod tests {
     fn register_and_get_by_name() {
         let (db, _b, _l) = test_db();
         let reg = ToolRegistry::new(db).unwrap();
-        reg.register("get_weather", "Fetches current weather for a city", r#"{"type":"object"}"#, None).unwrap();
+        reg.register(
+            "get_weather",
+            "Fetches current weather for a city",
+            r#"{"type":"object"}"#,
+            None,
+        )
+        .unwrap();
         let tool = reg.get("get_weather").unwrap().unwrap();
         assert_eq!(tool.description, "Fetches current weather for a city");
     }
@@ -148,9 +193,27 @@ mod tests {
     fn discover_ranks_nearest_first() {
         let (db, _b, _l) = test_db();
         let reg = ToolRegistry::new(db).unwrap();
-        reg.register("weather", "weather lookup tool", "{}", Some(&[1.0, 0.0, 0.0])).unwrap();
-        reg.register("calendar", "calendar scheduling tool", "{}", Some(&[0.0, 1.0, 0.0])).unwrap();
-        reg.register("forecast", "weather forecast tool", "{}", Some(&[0.9, 0.1, 0.0])).unwrap();
+        reg.register(
+            "weather",
+            "weather lookup tool",
+            "{}",
+            Some(&[1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        reg.register(
+            "calendar",
+            "calendar scheduling tool",
+            "{}",
+            Some(&[0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        reg.register(
+            "forecast",
+            "weather forecast tool",
+            "{}",
+            Some(&[0.9, 0.1, 0.0]),
+        )
+        .unwrap();
 
         let hits = reg.discover(&[1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(hits.len(), 2);

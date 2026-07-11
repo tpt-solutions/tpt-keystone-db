@@ -1,6 +1,8 @@
 pub mod btree;
 pub mod cache;
 pub mod canopy_index;
+#[cfg(test)]
+mod chaos_tests;
 pub mod compress;
 pub mod config;
 pub mod database;
@@ -15,12 +17,10 @@ pub mod manifest;
 pub mod mvcc;
 pub mod objectstore;
 #[cfg(test)]
-mod chaos_tests;
-#[cfg(test)]
 mod phase3_tests;
 pub mod sstable;
-pub mod tx;
 pub mod ts_index;
+pub mod tx;
 pub mod vector_index;
 pub mod wal;
 

@@ -57,7 +57,9 @@ impl MemTable {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], u8)> {
-        self.data.iter().map(|(k, (v, t))| (k.as_slice(), v.as_slice(), *t))
+        self.data
+            .iter()
+            .map(|(k, (v, t))| (k.as_slice(), v.as_slice(), *t))
     }
 }
 
@@ -110,7 +112,11 @@ impl LsmEngine {
     /// cache/staging area); `store` is the shared durable backend. `lease`
     /// is consulted before every flush — a node without a valid lease cannot
     /// advance the manifest (see `storage::lease`).
-    pub fn open(local_dir: &Path, store: Arc<dyn ObjectStore>, lease: Arc<LeaseHandle>) -> Result<Self> {
+    pub fn open(
+        local_dir: &Path,
+        store: Arc<dyn ObjectStore>,
+        lease: Arc<LeaseHandle>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(local_dir)?;
 
         let wal = Wal::open(local_dir)?;
@@ -140,11 +146,19 @@ impl LsmEngine {
         }
         sstables.sort_by_key(|s| s.id());
 
-        let sstable_id = manifest.sstable_ids.iter().max().map(|m| m + 1).unwrap_or(1);
+        let sstable_id = manifest
+            .sstable_ids
+            .iter()
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1);
         let wal_seg_id = manifest.wal_segment_seq + 1;
         let committed_wal_segment_seq = manifest.wal_segment_seq;
 
-        info!(sstable_count = sstables.len(), "SSTables loaded from manifest");
+        info!(
+            sstable_count = sstables.len(),
+            "SSTables loaded from manifest"
+        );
 
         Ok(Self {
             memtable,
@@ -195,7 +209,9 @@ impl LsmEngine {
         }
         for sst in self.sstables.iter().rev() {
             if let Some(value) = sst.read(key)? {
-                if value.is_empty() { return Ok(None); }
+                if value.is_empty() {
+                    return Ok(None);
+                }
                 return Ok(Some(value));
             }
         }
@@ -207,20 +223,30 @@ impl LsmEngine {
         for sst in &self.sstables {
             for (k, v) in sst.scan()? {
                 match v {
-                    Some(val) => { merged.insert(k, val); }
-                    None => { merged.remove(&k); }
+                    Some(val) => {
+                        merged.insert(k, val);
+                    }
+                    None => {
+                        merged.remove(&k);
+                    }
                 }
             }
         }
         if let Some(ref imm) = self.immutable {
             for (k, v, t) in imm.iter() {
-                if t != 2 { merged.insert(k.to_vec(), v.to_vec()); }
-                else { merged.remove(k); }
+                if t != 2 {
+                    merged.insert(k.to_vec(), v.to_vec());
+                } else {
+                    merged.remove(k);
+                }
             }
         }
         for (k, v, t) in self.memtable.iter() {
-            if t != 2 { merged.insert(k.to_vec(), v.to_vec()); }
-            else { merged.remove(k); }
+            if t != 2 {
+                merged.insert(k.to_vec(), v.to_vec());
+            } else {
+                merged.remove(k);
+            }
         }
         Ok(merged.into_iter().collect())
     }
@@ -235,7 +261,9 @@ impl LsmEngine {
 
         if let Some(mut imm) = self.immutable.take() {
             let entries: Vec<_> = imm.drain();
-            if entries.is_empty() { return Ok(()); }
+            if entries.is_empty() {
+                return Ok(());
+            }
 
             let sst_key = sstable_key(self.sstable_id);
             let sst = SSTable::create_in_store(&*self.store, &sst_key, self.sstable_id, &entries)?;
@@ -245,7 +273,8 @@ impl LsmEngine {
             // depends solely on this node's local disk for durability.
             let wal_bytes = self.wal.read_all_bytes()?;
             if !wal_bytes.is_empty() {
-                self.store.put(&wal_segment_key(self.wal_seg_id), &wal_bytes)?;
+                self.store
+                    .put(&wal_segment_key(self.wal_seg_id), &wal_bytes)?;
             }
 
             let new_manifest = Manifest {
@@ -257,8 +286,12 @@ impl LsmEngine {
                 wal_segment_seq: self.wal_seg_id,
                 writer_fencing_token: self.lease.token(),
             };
-            let new_etag = Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
-                .map_err(|e| anyhow::anyhow!(e).context("updating manifest after flush — another writer may be active"))?;
+            let new_etag =
+                Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
+                    .map_err(|e| {
+                        anyhow::anyhow!(e)
+                            .context("updating manifest after flush — another writer may be active")
+                    })?;
 
             self.manifest_etag = Some(new_etag);
             self.committed_wal_segment_seq = self.wal_seg_id;
@@ -295,8 +328,12 @@ impl LsmEngine {
         for sst in &self.sstables {
             for (k, v) in sst.scan()? {
                 match v {
-                    Some(val) => { merged.insert(k, val); }
-                    None => { merged.remove(&k); }
+                    Some(val) => {
+                        merged.insert(k, val);
+                    }
+                    None => {
+                        merged.remove(&k);
+                    }
                 }
             }
         }
@@ -304,7 +341,11 @@ impl LsmEngine {
         let entries: Vec<(Vec<u8>, Vec<u8>, u8)> =
             merged.into_iter().map(|(k, v)| (k, v, 0u8)).collect();
 
-        let old_keys: Vec<String> = self.sstables.iter().map(|s| s.object_key().to_string()).collect();
+        let old_keys: Vec<String> = self
+            .sstables
+            .iter()
+            .map(|s| s.object_key().to_string())
+            .collect();
 
         let new_id = self.sstable_id;
         let new_key = sstable_key(new_id);
@@ -315,8 +356,13 @@ impl LsmEngine {
             wal_segment_seq: self.committed_wal_segment_seq,
             writer_fencing_token: self.lease.token(),
         };
-        let new_etag = Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
-            .map_err(|e| anyhow::anyhow!(e).context("updating manifest after compaction — another writer may be active"))?;
+        let new_etag =
+            Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
+                .map_err(|e| {
+                    anyhow::anyhow!(e).context(
+                        "updating manifest after compaction — another writer may be active",
+                    )
+                })?;
 
         self.manifest_etag = Some(new_etag);
         self.sstable_id += 1;
@@ -380,8 +426,12 @@ impl LsmEngine {
         Ok(fetched > 0 || dropped > 0)
     }
 
-    pub fn flush(&mut self) -> Result<()> { self.trigger_flush() }
-    pub fn wal(&self) -> &Wal { &self.wal }
+    pub fn flush(&mut self) -> Result<()> {
+        self.trigger_flush()
+    }
+    pub fn wal(&self) -> &Wal {
+        &self.wal
+    }
 
     pub fn stats(&self) -> super::StorageStats {
         super::StorageStats {
@@ -470,7 +520,12 @@ mod tests {
         force_flush(&mut writer, b"a", b"1");
         force_flush(&mut writer, b"b", b"2");
 
-        let mut reader = LsmEngine::open(reader_local.path(), store.clone(), Arc::new(LeaseHandle::default())).unwrap();
+        let mut reader = LsmEngine::open(
+            reader_local.path(),
+            store.clone(),
+            Arc::new(LeaseHandle::default()),
+        )
+        .unwrap();
         reader.refresh().unwrap();
         assert_eq!(reader.sstables.len(), 2);
 
