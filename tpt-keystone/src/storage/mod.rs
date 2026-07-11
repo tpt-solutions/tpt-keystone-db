@@ -10,6 +10,7 @@ pub mod flux;
 pub mod guard;
 pub mod geo_index;
 pub mod graph_index;
+pub mod ivf_pq_index;
 pub mod json_schema;
 pub mod jsonb;
 pub mod lease;
@@ -99,7 +100,20 @@ pub enum ColumnType {
     /// `\d table` and `pg_attribute` report it distinctly from `TEXT`) and
     /// so the planner/eval layer can tell a geometry column from a plain
     /// text one when deciding whether to build/use a spatial index.
+    /// Planar semantics: `ST_Area`/`ST_Length`-style functions treat
+    /// coordinates as flat-plane units, no implied SRID.
     Geometry,
+    /// OGC `GEOGRAPHY` type — same WKT-as-text storage and DDL/catalog
+    /// treatment as `Geometry`, kept as a separate variant purely so
+    /// `\d table`/`pg_attribute` and the parser can distinguish the two
+    /// (`GEOMETRY(...)` vs `GEOGRAPHY(...)` in DDL), per the OGC/SQL-MM
+    /// convention that `GEOGRAPHY` implies geodetic (lon/lat, SRID 4326)
+    /// coordinates while plain `GEOMETRY` is CRS-agnostic/planar. This
+    /// engine's distance/area functions already use haversine great-circle
+    /// math unconditionally (see `geo::geometry::haversine_distance_m`), so
+    /// there's no separate geodetic code path yet — the distinction is
+    /// currently catalog-only, not a different evaluation strategy.
+    Geography,
     /// Prism vector/embedding type. Stored on the wire/in cells as
     /// `[1.0,2.0,3.0]` text (`Value::Text`) — see `vector::vector::Vector`
     /// — following the exact same "no new row-encoding path" precedent as
@@ -128,6 +142,8 @@ impl ColumnType {
             // TEXT's OID so wire clients that don't know GEOMETRY still
             // render it as a plain string instead of erroring.
             Self::Geometry => oid::TEXT,
+            // Same reasoning as Geometry.
+            Self::Geography => oid::TEXT,
             // Same reasoning as Geometry: no real Postgres OID for a
             // pgvector-style VECTOR type in this from-scratch wire protocol.
             Self::Vector => oid::TEXT,
@@ -147,7 +163,8 @@ impl ColumnType {
             "date" => Some(Self::Date),
             "json" | "jsonb" => Some(Self::Json),
             "bytea" | "blob" => Some(Self::Bytea),
-            "geometry" | "geography" | "point" => Some(Self::Geometry),
+            "geometry" | "point" => Some(Self::Geometry),
+            "geography" => Some(Self::Geography),
             "vector" | "embedding" => Some(Self::Vector),
             _ => None,
         }

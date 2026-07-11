@@ -559,11 +559,19 @@ impl RowContext {
         }
     }
 
-    /// Evaluates `expr` and parses it as WKT geometry text — the common
-    /// argument shape for every `ST_*` function.
+    /// Evaluates `expr` and parses it as WKT (or SRID-prefixed EWKT)
+    /// geometry text — the common argument shape for every `ST_*` function.
+    /// Any `SRID=<n>;` prefix is stripped and discarded here; use
+    /// `eval_geom_srid` when the SRID itself is needed.
     fn eval_geom(&self, expr: &Expr) -> anyhow::Result<Geometry> {
+        self.eval_geom_srid(expr).map(|(g, _)| g)
+    }
+
+    /// Like `eval_geom`, but also returns the geometry's SRID (`None` if the
+    /// text had no `SRID=<n>;` prefix — PostGIS's SRID 0/"unspecified").
+    fn eval_geom_srid(&self, expr: &Expr) -> anyhow::Result<(Geometry, Option<i32>)> {
         match self.eval(expr)? {
-            Value::Text(s) => Geometry::from_wkt(&s),
+            Value::Text(s) => Geometry::from_ewkt(&s),
             other => anyhow::bail!("expected geometry (WKT text), got {}", other.type_name()),
         }
     }
@@ -743,12 +751,20 @@ impl RowContext {
                 };
                 Ok(Value::Text(Geometry::Point(coord).to_wkt()))
             }
-            "st_geomfromtext" | "st_geographyfromtext" => {
-                let geom = self.eval_geom(
-                    args.first()
-                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
-                )?;
-                Ok(Value::Text(geom.to_wkt()))
+            // ST_GeomFromText(wkt [, srid]) / ST_GeographyFromText(wkt [, srid])
+            // — the optional 2nd-arg SRID overrides any `SRID=`-prefix already
+            // embedded in the first argument's text (matching PostGIS). The
+            // result is EWKT (`SRID=<n>;...`) whenever a SRID is known, so it
+            // round-trips through `eval_geom_srid`/`ST_SRID` unchanged.
+            "st_geomfromtext" | "st_geographyfromtext" | "st_geomfromewkt" => {
+                if args.is_empty() || args.len() > 2 {
+                    anyhow::bail!("{name}() requires 1-2 arguments (wkt, [srid])");
+                }
+                let (geom, mut srid) = self.eval_geom_srid(&args[0])?;
+                if let Some(srid_arg) = args.get(1) {
+                    srid = Some(self.eval(srid_arg)?.as_f64()? as i32);
+                }
+                Ok(Value::Text(geom.to_ewkt(srid)))
             }
             "st_astext" => {
                 let geom = self.eval_geom(
@@ -756,6 +772,72 @@ impl RowContext {
                         .ok_or_else(|| anyhow::anyhow!("st_astext() requires 1 argument"))?,
                 )?;
                 Ok(Value::Text(geom.to_wkt()))
+            }
+            "st_asewkt" => {
+                let (geom, srid) = self.eval_geom_srid(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_asewkt() requires 1 argument"))?,
+                )?;
+                Ok(Value::Text(geom.to_ewkt(srid)))
+            }
+            "st_srid" => {
+                let (_, srid) = self.eval_geom_srid(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_srid() requires 1 argument"))?,
+                )?;
+                Ok(Value::Int(srid.unwrap_or(0) as i64))
+            }
+            "st_setsrid" => {
+                if args.len() != 2 {
+                    anyhow::bail!("st_setsrid() requires 2 arguments (geom, srid)");
+                }
+                let (geom, _) = self.eval_geom_srid(&args[0])?;
+                let srid = self.eval(&args[1])?.as_f64()? as i32;
+                Ok(Value::Text(geom.to_ewkt(Some(srid))))
+            }
+            // ST_Transform: only the EPSG:4326<->3857 pair is implemented
+            // (see `geo::geometry::transform_geometry`'s doc comment) — no
+            // general CRS reprojection library is in scope here.
+            "st_transform" => {
+                if args.len() != 2 {
+                    anyhow::bail!("st_transform() requires 2 arguments (geom, target_srid)");
+                }
+                let (geom, srid) = self.eval_geom_srid(&args[0])?;
+                let from_srid = srid.ok_or_else(|| {
+                    anyhow::anyhow!("st_transform() requires a geometry with a known SRID")
+                })?;
+                let to_srid = self.eval(&args[1])?.as_f64()? as i32;
+                let transformed =
+                    crate::geo::geometry::transform_geometry(&geom, from_srid, to_srid)?;
+                Ok(Value::Text(transformed.to_ewkt(Some(to_srid))))
+            }
+            // WKB/EWKB binary I/O, surfaced as hex text (see `geo::geometry`
+            // module doc comment: no dedicated binary `Value` variant here,
+            // same "reuse Value::Text" precedent as WKT).
+            "st_asbinary" => {
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_asbinary() requires 1 argument"))?,
+                )?;
+                Ok(Value::Text(geom.to_wkb_hex(None)))
+            }
+            "st_asewkb" => {
+                let (geom, srid) = self.eval_geom_srid(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_asewkb() requires 1 argument"))?,
+                )?;
+                Ok(Value::Text(geom.to_wkb_hex(srid)))
+            }
+            "st_geomfromwkb" | "st_geomfromewkb" => {
+                let hex = match self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{name}() requires 1 argument"))?,
+                )? {
+                    Value::Text(s) => s,
+                    other => anyhow::bail!("{name}() requires hex text, got {}", other.type_name()),
+                };
+                let (geom, srid) = Geometry::from_wkb_hex(&hex)?;
+                Ok(Value::Text(geom.to_ewkt(srid)))
             }
             "st_x" | "st_y" | "st_z" => {
                 let geom = self.eval_geom(

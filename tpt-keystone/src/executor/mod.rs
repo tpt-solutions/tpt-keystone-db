@@ -48,6 +48,7 @@ use eval::{OuterRow, Value};
 use select::execute_select_with_cte;
 
 /// The result of executing a query.
+#[derive(Debug)]
 pub struct QueryResult {
     pub fields: Vec<FieldDescription>,
     pub rows: Vec<Vec<Option<Vec<u8>>>>,

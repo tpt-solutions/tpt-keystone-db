@@ -246,3 +246,57 @@ fn vector_search_hybrid_sql_filter() {
         ]
     );
 }
+
+/// End-to-end SQL-level coverage for `CREATE INDEX ... USING IVFPQ`: unlike
+/// `storage::ivf_pq_index::tests`/`vector::ivf_pq::tests` (which exercise
+/// the Rust types directly), this drives the whole stack from parsed SQL
+/// through `executor/ddl.rs`'s DDL handler, `Database::create_ivfpq_index`'s
+/// backfill-from-existing-rows training, and `vector_search`'s
+/// `Database::vector_knn_query` routing — this table has no HNSW index, so
+/// routing falls through to the `(None, Some(ivf))` IVF-PQ-only arm.
+#[test]
+fn ivfpq_index_created_and_answers_vector_search() {
+    let (db, _b, _l) = test_db();
+    execute_query(
+        "CREATE TABLE idocs (id INT4, label TEXT, embedding VECTOR)",
+        db.clone(),
+    )
+    .unwrap();
+    let rows = [
+        (1, "near-x", "[1.0,0.0,0.0]"),
+        (2, "near-y", "[0.0,1.0,0.0]"),
+        (3, "also-near-x", "[0.9,0.1,0.0]"),
+        (4, "far", "[-1.0,-1.0,-1.0]"),
+    ];
+    for (id, label, emb) in rows {
+        execute_query(
+            &format!("INSERT INTO idocs VALUES ({id}, '{label}', '{emb}')"),
+            db.clone(),
+        )
+        .unwrap();
+    }
+    // dim=3 needs a pq_m that divides it evenly; the DDL default (8) would
+    // error on this small test table, so override it.
+    execute_query(
+        "CREATE INDEX ON idocs USING IVFPQ (embedding) WITH (metric = 'l2', lists = '2', pq_m = '1', n_probe = '2')",
+        db.clone(),
+    )
+    .unwrap();
+
+    assert!(db.indexed_column_ivfpq("idocs", "embedding"));
+    assert_eq!(
+        db.list_ivfpq_indexes(),
+        vec![("idocs".to_string(), "embedding".to_string())]
+    );
+
+    let result = execute_query(
+        "SELECT label FROM vector_search('idocs', 'embedding', '[1.0,0.0,0.0]', 2) ORDER BY label",
+        db.clone(),
+    )
+    .unwrap();
+    let labels: Vec<String> = result.rows.iter().map(|r| cell_text(&r[0])).collect();
+    assert_eq!(
+        labels,
+        vec!["also-near-x".to_string(), "near-x".to_string()]
+    );
+}

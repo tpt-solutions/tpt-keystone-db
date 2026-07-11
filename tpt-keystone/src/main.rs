@@ -13,7 +13,7 @@ mod wire;
 
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use storage::cache::CachedObjectStore;
 use storage::config::{NodeRole, StorageConfig};

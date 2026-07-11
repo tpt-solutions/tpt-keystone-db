@@ -237,6 +237,7 @@ fn pg_type() -> VirtualTable {
         ("json", ColumnType::Json),
         ("bytea", ColumnType::Bytea),
         ("geometry", ColumnType::Geometry),
+        ("geography", ColumnType::Geography),
         ("vector", ColumnType::Vector),
     ];
     let rows = types
@@ -449,6 +450,7 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Json => "json",
         ColumnType::Bytea => "bytea",
         ColumnType::Geometry => "geometry",
+        ColumnType::Geography => "geography",
         ColumnType::Vector => "vector",
     }
 }

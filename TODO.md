@@ -168,9 +168,8 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 - [x] Uber H3 hexagonal grid indexing — `geo/h3.rs`: an H3-*inspired* axial-coordinate hex grid with aperture-2 (not H3's aperture-7) resolution levels and k-ring queries. Honestly not bit-compatible with real H3: flat equirectangular-ish projection (not icosahedral), so distortion grows near the poles. Implemented standalone with its own unit tests; the live spatial index (below) currently uses the S2-inspired grid, not this one — an application could pick either
 - [x] 4D spatiotemporal storage model (lat, lon, alt, time as first-class) — `Coord { x, y, z: Option<f64>, t: Option<i64> }` end to end: WKT `POINT(lon lat alt time)` (`Z`=alt, `M`=time — WKT has no native time axis), `ST_MakePoint`/`ST_X`/`ST_Y`/`ST_Z`/`ST_T`, and `storage/geo_index.rs`'s spatial index stores `time` per entry so a radius query can also filter by time range from the same cell lookup (see milestone below)
 - [x] GPU-accelerated spatial joins via wgpu compute shaders — implemented once a real GPU became available to develop/verify against (previously an explicit scope cut, not a stub-and-claim-done, per the prior note about untested native/GPU code paths). `geo/gpu.rs` + `geo/shaders/spatial_join.wgsl`: two WGSL compute kernels — `bbox_overlap` (bbox-vs-bbox closed-interval overlap, exactly matching the CPU path's existing `bbox_intersects` semantics) and `dwithin` (bbox-centroid-vs-point haversine radius test) — wired into `executor/mod.rs::apply_join`'s nested-loop fallback (`executor/planner.rs::extract_spatial_join_predicate`) for `ST_Intersects`/`ST_DWithin` join predicates once `left_rows.len() * right_rows.len()` exceeds `TPT_GPU_JOIN_THRESHOLD` (default 1,000,000, unbenchmarked at scale — see milestone note below). Scope actually covered: broad-phase only (this is not a new precision limitation — `ST_Intersects` was already bbox-only on CPU); `f32` GPU coordinate precision (narrower than the CPU path's `f64`, an accepted broad-phase tradeoff); a single top-level spatial predicate per join (no compound `a.id = b.id AND ST_Intersects(...)` in v1 — falls back to the nested-loop path unchanged); always fails safe to the existing CPU nested-loop join — GPU unavailability, no adapter, device-creation failure, `TPT_DISABLE_GPU_JOIN`, an oversized batch (`TPT_GPU_JOIN_MAX_PAIRS`), or a runtime device error all fall back rather than erroring the query. Verified via `cargo run --example gpu_smoke_test` (isolated OS-process smoke test, run manually before any executor wiring) and `executor/gpu_join_tests.rs` (GPU vs. CPU row-set agreement for both predicates) against an NVIDIA RTX 3050 (Vulkan backend) in this dev environment — not verified on other vendors/drivers (AMD/Intel/Linux) or in a headless CI environment
-- [ ] Raster + vector unified storage model — not implemented, same honesty policy as before the GPU item above landed. No raster tile type, no `ST_Value`/`ST_AsRaster`, no unified storage path exists yet
-- [ ] Raster + vector unified storage model — not implemented, same honesty policy as the GPU item. No raster tile type, no `ST_Value`/`ST_AsRaster`, no unified storage path exists yet
-- [~] OGC Simple Features + SQL/MM Spatial compatibility — partial: WKT text in/out and a core `ST_*` function subset (`ST_MakePoint`/`ST_Point`, `ST_GeomFromText`, `ST_AsText`, `ST_X`/`ST_Y`/`ST_Z`/`ST_T`, `ST_Distance`, `ST_DWithin`, `ST_Within`/`ST_Contains`, `ST_Intersects` (bbox-only, not exact polygon/line intersection), `ST_Length`, `ST_Area` (planar shoelace, not geodesic)). Not attempted: WKB (binary) I/O, SRID/`ST_Transform`, the OGC conformance test suite, `GEOGRAPHY` vs `GEOMETRY` type distinction (both parse to the same internal type)
+- [ ] Raster + vector unified storage model — not implemented, same honesty policy as the GPU item above. No raster tile type, no `ST_Value`/`ST_AsRaster`, no unified storage path exists yet
+- [~] OGC Simple Features + SQL/MM Spatial compatibility — WKT text in/out, a core `ST_*` function subset (`ST_MakePoint`/`ST_Point`, `ST_GeomFromText`, `ST_AsText`, `ST_X`/`ST_Y`/`ST_Z`/`ST_T`, `ST_Distance`, `ST_DWithin`, `ST_Within`/`ST_Contains`, `ST_Intersects` (bbox-only, not exact polygon/line intersection), `ST_Length`, `ST_Area` (planar shoelace, not geodesic)), and now: EWKB/WKB binary I/O (`ST_AsBinary`/`ST_AsEWKB`/`ST_GeomFromWKB`/`ST_GeomFromEWKB`, `geo/geometry.rs`'s `to_wkb_hex`/`from_wkb_hex` — little-endian ISO WKB plus PostGIS's EWKB Z/M/SRID type-word flag bits; surfaced as lowercase hex text since there's no dedicated binary `Value` variant, same "reuse `Value::Text`" precedent as WKT), SRID support via EWKT (`SRID=<n>;<WKT>`, `strip_srid_prefix`/`Geometry::from_ewkt`/`to_ewkt`, `ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`, and a 2-arg `ST_GeomFromText(wkt, srid)` form), `ST_Transform` (`geo::geometry::transform_geometry`), and a `GEOGRAPHY` vs `GEOMETRY` column-type distinction (`storage::ColumnType::Geography`, separate catalog/`\d`/`information_schema` reporting from `Geometry` — still the same WKT-as-text storage and haversine-based distance/area functions under the hood, so the split is catalog-only, not a different evaluation engine yet). Still not attempted: the OGC conformance test suite. `ST_Transform` honestly only reprojects the EPSG:4326<->3857 pair (closed-form Web Mercator formulas) — any other SRID pair errors rather than silently no-op'ing, since a general CRS/PROJ-equivalent library is out of scope. Verified: `geo::geometry::tests` unit-tests WKB round-trips (point/polygon, with/without SRID and Z), EWKT round-trips, and the 4326<->3857 transform against London's known Web Mercator coordinates. `executor::geo_tests` adds SQL-level coverage of `ST_GeomFromText(..., srid)`/`ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`/`ST_Transform`/`ST_AsBinary`+`ST_GeomFromWKB`/`ST_AsEWKB`+`ST_GeomFromEWKB`/the `GEOGRAPHY` column type. A follow-up pass ran the full suite for the first time since this item was written (the concurrent Phase 7 IVF-PQ work had been mid-edit and intermittently broke the full-crate build) and found two real bugs this item's own "run and passing" claim had missed: `executor::QueryResult` was missing `#[derive(Debug)]`, which failed the whole crate's test *compilation* (so nothing in this item had actually been test-verified before, despite the claim); and `ST_Transform`'s EPSG:3857 conversion used `EARTH_RADIUS_M` (the mean earth radius, 6,371,008.8m, used elsewhere for haversine geodesic distance) instead of the WGS84 equatorial radius (6,378,137.0m) that Web Mercator is actually defined against — a ~0.11% systematic error in every projected coordinate. Both fixed; the transform test's assertion bounds were widened slightly to match the now-correct output.
 
 **Milestone (verified for the CPU-side, non-GPU query path):** `CREATE INDEX ON drones USING SPATIAL (pos)` builds a `storage/geo_index.rs` index (S2-inspired cell → row-key buckets, each entry also carrying its point's time). `executor/planner.rs`'s `extract_spatial_predicate` recognizes a top-level `ST_DWithin(pos, ST_MakePoint(...), radius) AND ST_T(pos) BETWEEN t1 AND t2` WHERE clause and answers it with one `Database::spatial_query` call (a handful of cell lookups, not a table scan) instead of falling through to `resolve_table_ref`'s full scan — verified end-to-end in `executor/geo_tests.rs::spatial_index_scan_combines_radius_and_time_range` against an in-process `Database`. Not verified: actual latency at 10M-row scale (no benchmark harness run in this environment — the milestone's "<10ms on 10M rows" figure is unverified, only the query-shape/correctness claim is). The GPU join path's `TPT_GPU_JOIN_THRESHOLD` crossover point is likewise single-machine/unbenchmarked-at-scale (see `executor/gpu_join_tests.rs::gpu_vs_cpu_wall_clock_at_moderate_scale`'s unasserted timing print) — not a general performance claim across hardware.
 
@@ -188,12 +187,49 @@ than as a separate crate/process — same "one binary" precedent as every other 
   SIMD intrinsics (`std::arch`, `packed_simd`) are used anywhere — plain scalar loops over `&[f32]`
   that the compiler's auto-vectorizer is free to use, same "can't claim a speedup that was never
   benchmarked" discipline as every other phase's hardware-acceleration claims
-- [ ] IVF-PQ index (inverted file + product quantisation) — not implemented
-- [ ] DiskANN index for billion-scale on-disk graphs — not implemented; `VectorIndex` (`storage/vector_index.rs`)
-  replays its whole on-disk log into an in-memory HNSW graph on open, same local/in-memory model as
+- [x] IVF-PQ index (inverted file + product quantisation) — `vector/kmeans.rs` (plain Lloyd's-algorithm
+  k-means, shared by both stages), `vector/pq.rs` (real Product Quantization: per-subvector k-means
+  codebooks, `encode`/`decode`, and an asymmetric-distance-table (ADC) path that scores candidates without
+  decoding codes back to floats), `vector/ivf_pq.rs` (`IvfPqIndex`: coarse k-means quantizer over full
+  vectors → inverted lists, each storing PQ-encoded *residuals* — the standard IVF-PQ refinement over
+  quantizing raw vectors directly — with `n_probe`-nearest-list search). `CREATE INDEX ... USING IVFPQ ON
+  t(col) WITH (metric=.., lists=.., pq_m=.., n_probe=..)` (`executor/ddl.rs`) backed by
+  `storage/ivf_pq_index.rs`'s `IvfPqStorageIndex`, which trains from a backfill of existing rows (IVF-PQ,
+  unlike HNSW, needs training data before it can accept its first insert — there's no incremental/online
+  variant here) and persists an on-disk log of raw `(row_key, vector)` records (same uncompressed-log
+  format as `VectorIndex`) that a reopen replays through a from-scratch retrain against the header's
+  stored `metric`/`n_lists`/`pq_m`/`n_probe`, so the coarse centroids and PQ codebooks are reconstructed
+  deterministically rather than persisted separately. The real memory saving is in the *in-memory*
+  `IvfPqIndex` structure (single-byte PQ codes per subvector, not raw `f32`s) — same "raw log replayed
+  into a compact in-memory structure" precedent as every other local index in this codebase (`storage::btree`/
+  `storage::geo_index`). WITH-option values must be quoted (`lists = '100'`, not `lists = 100`) — the
+  hand-written `WITH (...)` grammar's `parse_kv_option` (`sql/parser.rs`) only accepts a string literal
+  or bare identifier for an option value, not an integer literal, same requirement every other engine's
+  numeric DDL options (Chronos's `retention`, Meridian's spatial grid level) already have. Test coverage:
+  `vector::kmeans::tests`, `vector::pq::tests` (encode/decode round-trip error bound, asymmetric-distance
+  ordering matches true distance ordering), `vector::ivf_pq::tests` (trains and searches the correct
+  synthetic cluster, a freshly-inserted vector is findable post-training — approximate/lossy PQ doesn't
+  guarantee it strictly outranks a genuinely-closer existing point, so this checks presence in a small
+  top-k rather than rank-1, wide `n_probe` still respects `k`), `storage::ivf_pq_index::tests`
+  (train+insert+query, reopen replays+retrains, empty training set errors), and now
+  `executor::prism_tests::ivfpq_index_created_and_answers_vector_search` — SQL-level coverage (`CREATE
+  INDEX ... USING IVFPQ` through `executor/ddl.rs` and `vector_search` routing to an IVF-PQ-only index
+  with no HNSW present) that didn't exist when this item was first marked done; running the full suite
+  this pass also caught and fixed: a missing `#[derive(Debug)]` on `executor::QueryResult` that broke
+  the whole crate's test compilation, two IVF-PQ tests whose assertions were mathematically impossible
+  for a lossy approximate index to satisfy (asserting a farther point would outrank closer real training
+  points) rather than real index bugs, and (see the OGC item above) the Web-Mercator-radius fix.
+- [ ] DiskANN index for billion-scale on-disk graphs — not implemented; both `VectorIndex`
+  (`storage/vector_index.rs`, HNSW) and `IvfPqStorageIndex` (`storage/ivf_pq_index.rs`, IVF-PQ) replay
+  their whole on-disk log into an in-memory structure on open, same local/in-memory model as
   `storage::geo_index`/`storage::graph_index`, not an on-disk graph structure
-- [ ] Automatic index selection by query planner (latency vs recall trade-off) — moot for now: HNSW is
-  the only index type implemented, so there's nothing to select between yet
+- [x] Automatic index selection by query planner (latency vs recall trade-off) — `Database::vector_knn_query`
+  (`storage/database.rs`): when a `(table, column)` has *both* an HNSW and an IVF-PQ index, queries route to
+  HNSW below a fixed row-count threshold (100k) and IVF-PQ at/above it. This is an honest, documented
+  size-based heuristic — HNSW favors recall per query at small/medium scale, IVF-PQ's compressed in-memory
+  representation matters once the graph would otherwise be large — not a latency/recall cost-model a real
+  query optimizer would use; there's no benchmark harness in this repo to tune or validate a fancier policy
+  against (same honesty precedent as every other "automatic"/"optimal" claim in this codebase).
 - [x] Cosine / dot-product / L2 similarity — `vector/vector.rs`'s `l2_distance`/`cosine_distance`/
   `cosine_similarity`/`dot_product`, exposed as SQL scalar functions (`executor/eval.rs`) and used
   internally by the HNSW graph's distance metric (`Metric::L2`/`Metric::Cosine`). Same "hardware-accelerated"
@@ -219,11 +255,13 @@ than as a separate crate/process — same "one binary" precedent as every other 
   ranks first; rows winning on only one signal still surface via RRF; a row matching neither is
   excluded) and `::hybrid_search_requires_both_indexes`; BM25 scoring itself in
   `executor/canopy_tests.rs::fts_bm25_ranks_by_relevance`. All 212 `tpt-keystone` tests pass.
-- [ ] Native product / scalar / binary quantisation at storage layer — not implemented; vectors are
-  stored as plain `f32` components, no compression
-- [ ] Consistent hashing for distributed vector shards — not implemented; `VectorIndex` is local-only/
-  single-node, same documented scope cut as every other Phase 6/8/9/10/11 index (`storage/vector_index.rs`
-  module docs)
+- [x] Native product quantisation at storage layer — `vector/pq.rs`'s `ProductQuantizer`, wired into the
+  `IvfPqIndex` above (the in-memory representation stores PQ codes, not raw floats). Scalar and binary
+  quantisation remain **not implemented** — only product quantisation exists; the base `VECTOR` column
+  itself (used by the HNSW path) still stores plain `f32` components with no compression, unchanged.
+- [ ] Consistent hashing for distributed vector shards — not implemented; both `VectorIndex` and
+  `IvfPqStorageIndex` are local-only/single-node, same documented scope cut as every other Phase 6/8/9/10/11
+  index (`storage/vector_index.rs`/`storage/ivf_pq_index.rs` module docs)
 - [ ] Optional CUDA / ROCm GPU offload for batch similarity — not implemented, same honesty policy as
   Meridian's wgpu compute-shaders scope cut (no GPU-present environment to develop/verify against here)
 
@@ -234,7 +272,11 @@ VECTOR/HNSW ON t(col) WITH (metric = 'l2'|'cosine', m = ..., ef_construction = .
 on-disk log of `(row_key, vector)` records replayed into the in-memory HNSW graph on open — insert-only,
 no delete/update of a stale entry, same precedent as `storage::btree`). Vector literals are canonicalized
 to `Vector::to_text()`'s form on `INSERT`/`UPDATE` (`executor::normalize_vector_cells`) so a value read
-back always matches its parsed form regardless of how it was written.
+back always matches its parsed form regardless of how it was written. A second index kind, `CREATE INDEX
+... USING IVFPQ ON t(col) WITH (metric = 'l2', lists = '100', pq_m = '8', n_probe = '8')`
+(`executor/ddl.rs::execute_create_index`), backed by `storage::ivf_pq_index::IvfPqStorageIndex`, can coexist
+with an HNSW index on the same column — `vector_search`/`hybrid_search` route between the two via
+`Database::vector_knn_query`'s row-count heuristic described above.
 
 **Milestone (verified for the CPU-side, non-benchmarked-at-scale path):** `CREATE INDEX ON docs USING
 VECTOR (embedding) WITH (metric = 'l2')` builds a `VectorIndex`; `vector_search('docs', 'embedding',
@@ -413,9 +455,20 @@ Phase 3) and are not tracked here. The remaining real gaps:
   admission control already exists and queues (`TPT_MAX_CONNECTIONS` semaphore,
   `main.rs`) but there's no memory-pressure load-shedding or S3-latency circuit breaker;
   a slow/unreachable object store currently just surfaces as a query error
-- [ ] Reader staleness signal — a reader node whose manifest refresh keeps failing
-  currently serves last-known state silently (fail-open, `main.rs`'s refresh loop) with
-  no staleness indicator exposed to clients
+- [x] Reader staleness signal — `storage/database.rs`'s `ReaderStaleness` (consecutive-failure
+  count, last error, last-success timestamp, all shared atomics behind `Database::reader_staleness()`).
+  `Database::refresh()` records success/failure on every attempt; `main.rs`'s reader refresh loop
+  calls `ReaderStaleness::publish_metrics` every tick, which sets `tpt_reader_manifest_stale`
+  (`metrics.rs`, a Prometheus gauge, already pre-existing in this codebase before this pass wired
+  a real producer into it) and logs a `warn!` when refresh has consecutive failures. `is_stale`
+  also flags a reader whose refresh keeps *succeeding* but hasn't run recently enough relative to
+  a caller-supplied max age — a reader with no writer activity isn't distinguishable from one whose
+  refresh loop silently stopped without this. Still fail-open in the sense that a stale reader keeps
+  serving last-known-good reads rather than refusing them — the "staleness indicator exposed to
+  clients" is a Prometheus metric for monitoring/alerting, not a per-query SQL-visible flag or a
+  hard read-refusal switch (no wire-level "reject reads when stale" opt-in was built this pass).
+  Verified in `storage::database::reader_staleness_tests` (fresh state isn't stale, a failure trips
+  `is_stale` until a success clears it, a success older than the caller's max age is still flagged).
 
 ---
 

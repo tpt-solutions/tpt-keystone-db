@@ -258,7 +258,33 @@ pub(super) fn execute_create_index(
             }
             db.create_vector_index(&ci.table, &ci.column, metric, config)?
         }
-        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS, VECTOR/HNSW)"),
+        Some(m) if m.eq_ignore_ascii_case("ivfpq") || m.eq_ignore_ascii_case("ivf") => {
+            let opt = |key: &str| ci.options.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+            let metric = match opt("metric") {
+                Some(s) if s.eq_ignore_ascii_case("cosine") => crate::vector::hnsw::Metric::Cosine,
+                Some(s) if s.eq_ignore_ascii_case("l2") => crate::vector::hnsw::Metric::L2,
+                Some(other) => anyhow::bail!("unsupported vector metric \"{other}\" (supported: l2, cosine)"),
+                None => crate::vector::hnsw::Metric::L2,
+            };
+            // Defaults: 100 inverted lists (the FAISS-recommended rule of
+            // thumb is roughly sqrt(n) lists; 100 is a reasonable stand-in
+            // when the table size isn't known ahead of a WITH-clause
+            // override), 8 PQ subvectors, probe the 8 nearest lists.
+            let n_lists = match opt("lists") {
+                Some(s) => s.parse().map_err(|_| anyhow::anyhow!("invalid lists {s:?}"))?,
+                None => 100,
+            };
+            let pq_m = match opt("pq_m") {
+                Some(s) => s.parse().map_err(|_| anyhow::anyhow!("invalid pq_m {s:?}"))?,
+                None => 8,
+            };
+            let n_probe = match opt("n_probe") {
+                Some(s) => s.parse().map_err(|_| anyhow::anyhow!("invalid n_probe {s:?}"))?,
+                None => 8,
+            };
+            db.create_ivfpq_index(&ci.table, &ci.column, metric, n_lists, pq_m, n_probe)?
+        }
+        Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS, VECTOR/HNSW, IVFPQ)"),
     }
     Ok(QueryResult {
         fields: vec![],

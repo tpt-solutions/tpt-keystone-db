@@ -11,6 +11,7 @@ use super::config::{NodeRole, UdfConfig};
 use super::flux::{FluxLog, FluxRecord, RetentionPolicy};
 use super::geo_index::GeoIndex;
 use super::graph_index::GraphIndex;
+use super::ivf_pq_index::IvfPqStorageIndex;
 use super::lease::LeaseHandle;
 use super::lsm::LsmEngine;
 use super::mvcc::MvccStore;
@@ -137,6 +138,13 @@ pub struct Database {
     /// keyed by `(table, column)` — same local-only accelerator scope cut as
     /// the other index maps.
     vector_indexes: Arc<Mutex<HashMap<String, HashMap<String, VectorIndex>>>>,
+    /// Prism IVF-PQ indexes, `CREATE INDEX ... USING IVFPQ`, keyed by
+    /// `(table, column)` — same local-only accelerator scope cut as
+    /// `vector_indexes`. A `(table, column)` pair can have both a
+    /// `vector_indexes` (HNSW) and an `ivf_pq_indexes` entry at once; see
+    /// `vector_knn_query`'s automatic-selection heuristic for how a query
+    /// picks between them.
+    ivf_pq_indexes: Arc<Mutex<HashMap<String, HashMap<String, IvfPqStorageIndex>>>>,
     /// Flux topics (`CREATE TOPIC`), keyed by topic name — local-only, not
     /// object-store-replicated (see `storage::flux` module docs). Includes
     /// the implicit `__cdc_<table>` topics auto-created by
@@ -199,6 +207,7 @@ impl Database {
         let json_indexes = Arc::new(Mutex::new(HashMap::new()));
         let fts_indexes = Arc::new(Mutex::new(HashMap::new()));
         let vector_indexes = Arc::new(Mutex::new(HashMap::new()));
+        let ivf_pq_indexes = Arc::new(Mutex::new(HashMap::new()));
         let topics = Arc::new(Mutex::new(HashMap::new()));
 
         // Schemas live in the shared object store (not local disk) so every
@@ -244,6 +253,7 @@ impl Database {
                     let is_jsonpath = path.extension().is_some_and(|e| e == "jsonpath");
                     let is_fts = path.extension().is_some_and(|e| e == "fts");
                     let is_vector = path.extension().is_some_and(|e| e == "vec");
+                    let is_ivfpq = path.extension().is_some_and(|e| e == "ivfpq");
                     if let Some(name) = path.file_stem() {
                         if let Some(name_str) = name.to_str() {
                             if let Some((table, col)) = name_str.split_once('_') {
@@ -333,6 +343,18 @@ impl Database {
                                             .or_insert_with(HashMap::new)
                                             .insert(col.to_string(), vec_idx);
                                     }
+                                } else if is_ivfpq {
+                                    // Reopening retrains from the replayed
+                                    // log against the header's stored
+                                    // metric/n_lists/pq_m/n_probe — see
+                                    // `IvfPqStorageIndex::open`'s doc-comment.
+                                    if let Ok(ivf_idx) = IvfPqStorageIndex::open(&path) {
+                                        let mut idx_map = ivf_pq_indexes.lock().unwrap();
+                                        idx_map
+                                            .entry(table.to_string())
+                                            .or_insert_with(HashMap::new)
+                                            .insert(col.to_string(), ivf_idx);
+                                    }
                                 } else if let Ok(btree) = BTree::open(&path) {
                                     let mut idx_map = indexes.lock().unwrap();
                                     idx_map
@@ -391,6 +413,7 @@ impl Database {
             json_indexes,
             fts_indexes,
             vector_indexes,
+            ivf_pq_indexes,
             topics,
             flux_dir,
             flux_bus,
@@ -1565,7 +1588,7 @@ impl Database {
         Ok(())
     }
 
-    /// Whether a vector index exists for `table.column`.
+    /// Whether a vector (HNSW) index exists for `table.column`.
     pub fn indexed_column_vector(&self, table: &str, column: &str) -> bool {
         self.vector_indexes
             .lock()
@@ -1574,7 +1597,7 @@ impl Database {
             .is_some_and(|m| m.contains_key(column))
     }
 
-    /// List all `(table, column)` pairs that have a vector index, for
+    /// List all `(table, column)` pairs that have a vector (HNSW) index, for
     /// `pg_catalog.pg_indexes` introspection.
     pub fn list_vector_indexes(&self) -> Vec<(String, String)> {
         self.vector_indexes
@@ -1585,11 +1608,104 @@ impl Database {
             .collect()
     }
 
+    /// Create a Prism IVF-PQ index (`CREATE INDEX ... USING IVFPQ`) on a
+    /// `VECTOR` column, training the coarse quantizer + PQ codebooks from
+    /// existing rows (backfill-only — see `IvfPqStorageIndex`'s doc-comment
+    /// for why this can't start empty the way `create_vector_index`'s HNSW
+    /// index can).
+    pub fn create_ivfpq_index(
+        &self,
+        table: &str,
+        column: &str,
+        metric: Metric,
+        n_lists: usize,
+        pq_m: usize,
+        n_probe: usize,
+    ) -> Result<()> {
+        self.check_writable()?;
+        let index_dir = &self.local_index_dir;
+        std::fs::create_dir_all(index_dir)?;
+        let index_path = index_dir.join(format!("{}_{}.ivfpq", table, column));
+
+        let schema = self
+            .schemas
+            .lock()
+            .unwrap()
+            .get(table)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        let col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
+
+        let mut training = Vec::new();
+        for kv in self.scan(table)? {
+            if let Some(text_bytes) = decode_column(&kv.value, col_idx) {
+                if let Ok(text) = String::from_utf8(text_bytes) {
+                    if let Ok(vector) = crate::vector::vector::Vector::from_text(&text) {
+                        training.push((kv.key, vector.0));
+                    }
+                }
+            }
+        }
+
+        let ivf_idx = IvfPqStorageIndex::train_and_create(
+            &index_path,
+            metric,
+            n_lists,
+            pq_m,
+            n_probe,
+            training,
+        )?;
+
+        let mut idx_map = self.ivf_pq_indexes.lock().unwrap();
+        idx_map
+            .entry(table.to_string())
+            .or_insert_with(HashMap::new)
+            .insert(column.to_string(), ivf_idx);
+
+        info!(table, column, "IVF-PQ index created");
+        Ok(())
+    }
+
+    /// Whether an IVF-PQ index exists for `table.column`.
+    pub fn indexed_column_ivfpq(&self, table: &str, column: &str) -> bool {
+        self.ivf_pq_indexes
+            .lock()
+            .unwrap()
+            .get(table)
+            .is_some_and(|m| m.contains_key(column))
+    }
+
+    /// List all `(table, column)` pairs that have an IVF-PQ index, for
+    /// `pg_catalog.pg_indexes` introspection.
+    pub fn list_ivfpq_indexes(&self) -> Vec<(String, String)> {
+        self.ivf_pq_indexes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(table, cols)| cols.keys().map(move |col| (table.clone(), col.clone())))
+            .collect()
+    }
+
     /// Approximate k-nearest-neighbor search against `table.column`'s vector
     /// index, returning `(row, distance)` pairs sorted nearest-first. `None`
-    /// (rather than an empty vec) if no vector index exists, so callers can
-    /// distinguish "no index" from "index, zero matches" — same convention
-    /// as `spatial_query`/`time_range_query`.
+    /// (rather than an empty vec) if no vector index of either kind exists,
+    /// so callers can distinguish "no index" from "index, zero matches" —
+    /// same convention as `spatial_query`/`time_range_query`.
+    ///
+    /// **Automatic index selection** (`TODO.md` Phase 7): when a column has
+    /// *both* an HNSW and an IVF-PQ index, this picks HNSW below
+    /// `IVFPQ_PREFERRED_ROW_COUNT` rows and IVF-PQ at or above it — a
+    /// documented, honest size-based heuristic (HNSW gives better recall per
+    /// query at small/medium scale; IVF-PQ's compressed in-memory
+    /// representation matters once the graph would otherwise be large), not
+    /// a latency/recall cost-model the way a real query optimizer would do
+    /// it. There's no benchmark harness in this repo to tune or validate a
+    /// fancier policy against (same honesty precedent as every other
+    /// "automatic"/"optimal" claim in this codebase).
     pub fn vector_knn_query(
         &self,
         table: &str,
@@ -1598,10 +1714,23 @@ impl Database {
         k: usize,
         ef_search: Option<usize>,
     ) -> Option<Vec<(KeyValue, f32)>> {
-        let idx_map = self.vector_indexes.lock().unwrap();
-        let vec_idx = idx_map.get(table)?.get(column)?;
-        let hits = vec_idx.query_knn(query, k, ef_search);
-        drop(idx_map);
+        const IVFPQ_PREFERRED_ROW_COUNT: usize = 100_000;
+
+        let hits = {
+            let vec_map = self.vector_indexes.lock().unwrap();
+            let hnsw_idx = vec_map.get(table).and_then(|m| m.get(column));
+            let ivf_map = self.ivf_pq_indexes.lock().unwrap();
+            let ivf_idx = ivf_map.get(table).and_then(|m| m.get(column));
+
+            match (hnsw_idx, ivf_idx) {
+                (Some(_hnsw), Some(ivf)) if ivf.len() >= IVFPQ_PREFERRED_ROW_COUNT => {
+                    ivf.query_knn(query, k, ef_search)
+                }
+                (Some(hnsw), _) => hnsw.query_knn(query, k, ef_search),
+                (None, Some(ivf)) => ivf.query_knn(query, k, ef_search),
+                (None, None) => return None,
+            }
+        };
         Some(
             hits.into_iter()
                 .filter_map(|(k, dist)| {
@@ -2017,5 +2146,53 @@ impl Database {
         prefix.extend_from_slice(table.as_bytes());
         prefix.push(0);
         prefix
+    }
+}
+
+#[cfg(test)]
+mod reader_staleness_tests {
+    use super::ReaderStaleness;
+
+    #[test]
+    fn fresh_staleness_is_not_stale() {
+        let s = ReaderStaleness::default();
+        // Never having refreshed at all (last_success_ms == 0) is treated
+        // as "not yet stale" rather than "infinitely stale" — a brand new
+        // reader shouldn't immediately trip an alert before its first
+        // refresh has had a chance to run.
+        assert!(!s.is_stale(1_000));
+        assert_eq!(s.consecutive_failures(), 0);
+        assert_eq!(s.last_error(), None);
+    }
+
+    #[test]
+    fn failure_marks_stale_until_a_success_clears_it() {
+        let s = ReaderStaleness::default();
+        s.record_failure("object store unreachable".into());
+        assert!(s.is_stale(u64::MAX));
+        assert_eq!(s.consecutive_failures(), 1);
+        assert_eq!(s.last_error().as_deref(), Some("object store unreachable"));
+
+        s.record_failure("still unreachable".into());
+        assert_eq!(s.consecutive_failures(), 2);
+
+        s.record_success();
+        assert!(!s.is_stale(u64::MAX));
+        assert_eq!(s.consecutive_failures(), 0);
+        assert_eq!(s.last_error(), None);
+        assert!(s.last_success_ms() > 0);
+    }
+
+    #[test]
+    fn success_older_than_max_age_is_stale() {
+        let s = ReaderStaleness::default();
+        s.record_success();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // A refresh that keeps succeeding but hasn't run recently enough
+        // (relative to a caller-chosen max age) must still be flagged —
+        // "quiet because no writer activity" isn't distinguishable from
+        // "quiet because refresh stopped running" without this check.
+        assert!(s.is_stale(1));
+        assert!(!s.is_stale(u64::MAX));
     }
 }

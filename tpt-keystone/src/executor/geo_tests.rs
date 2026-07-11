@@ -149,3 +149,108 @@ fn st_within_point_in_polygon() {
     ).unwrap();
     assert_eq!(cell_text(&result.rows[0][0]), "f");
 }
+
+#[test]
+fn st_geomfromtext_with_srid_round_trips_through_st_srid_and_asewkt() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_SRID(ST_GeomFromText('POINT(1 2)', 4326))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "4326");
+
+    let result = execute_query(
+        "SELECT ST_AsEWKT(ST_GeomFromText('POINT(1 2)', 4326))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "SRID=4326;POINT(1 2)");
+}
+
+#[test]
+fn st_setsrid_overrides_srid() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_SRID(ST_SetSRID(ST_MakePoint(1, 2), 3857))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "3857");
+}
+
+#[test]
+fn st_srid_defaults_to_zero_when_unset() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query("SELECT ST_SRID(ST_MakePoint(1, 2))", db.clone()).unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "0");
+}
+
+#[test]
+fn st_transform_4326_to_3857_moves_the_point() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_X(ST_Transform(ST_SetSRID(ST_MakePoint(-0.1276, 51.5074), 4326), 3857))",
+        db.clone(),
+    )
+    .unwrap();
+    let x: f64 = cell_text(&result.rows[0][0]).parse().unwrap();
+    assert!((-14210.0..-14190.0).contains(&x), "got {x}");
+}
+
+#[test]
+fn st_transform_without_srid_errors() {
+    let (db, _b, _l) = test_db();
+    let err = execute_query(
+        "SELECT ST_Transform(ST_MakePoint(1, 2), 3857)",
+        db.clone(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("known SRID"), "{err}");
+}
+
+#[test]
+fn st_asbinary_and_st_geomfromwkb_round_trip() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_AsText(ST_GeomFromWKB(ST_AsBinary(ST_MakePoint(1.5, -2.5))))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "POINT(1.5 -2.5)");
+}
+
+#[test]
+fn st_asewkb_preserves_srid_through_st_geomfromewkb() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_SRID(ST_GeomFromEWKB(ST_AsEWKB(ST_SetSRID(ST_MakePoint(1, 2), 4326))))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "4326");
+}
+
+#[test]
+fn geography_column_type_is_distinct_from_geometry() {
+    let (db, _b, _l) = test_db();
+    execute_query(
+        "CREATE TABLE zones (id INT4, area GEOGRAPHY)",
+        db.clone(),
+    )
+    .unwrap();
+    execute_query(
+        "INSERT INTO zones VALUES (1, 'POINT(-122.4194 37.7749)')",
+        db.clone(),
+    )
+    .unwrap();
+    let result = execute_query(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = 'zones' AND column_name = 'area'",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "geography");
+
+    let result = execute_query("SELECT ST_AsText(area) FROM zones", db.clone()).unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "POINT(-122.4194 37.7749)");
+}

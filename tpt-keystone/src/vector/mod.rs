@@ -18,14 +18,25 @@
 //!   World approximate-nearest-neighbor graph index (Malkov & Yashunin),
 //!   with configurable `M`/`ef_construction`/`ef_search`, insert and k-NN
 //!   search — not a brute-force scan pretending to be HNSW.
+//! - `kmeans`/`pq`/`ivf_pq`: a real IVF-PQ index (inverted file of coarse
+//!   k-means clusters, each storing product-quantized residual codes rather
+//!   than raw floats) — the memory-constrained/larger-scale counterpart to
+//!   HNSW's graph, per `vector::ivf_pq`'s module doc-comment. This is also
+//!   where "native product quantization" lives: `pq::ProductQuantizer` is
+//!   real PQ (subvector k-means codebooks + asymmetric distance tables), not
+//!   a stub.
+//!
+//! Hybrid vector+BM25+SQL-filter search now exists (`hybrid_search` table
+//! function, `executor/graph_fn.rs`, backed by Canopy's BM25 `FtsIndex`).
 //!
 //! Explicitly NOT implemented (documented scope cuts, tracked in
-//! `TODO.md`): IVF-PQ, DiskANN, automatic latency/recall-aware index
-//! selection, hybrid vector+BM25+SQL-filter search (no full-text engine
-//! exists in this codebase), native product/scalar/binary quantization,
-//! consistent hashing for distributed shards, and CUDA/ROCm GPU offload.
-//! All are left unchecked in `TODO.md` rather than stubbed out and claimed
-//! done.
+//! `TODO.md`): DiskANN (on-disk billion-scale graphs), scalar/binary
+//! quantization (only product quantization exists), consistent hashing for
+//! distributed shards, and CUDA/ROCm GPU offload. All are left unchecked in
+//! `TODO.md` rather than stubbed out and claimed done.
 
 pub mod hnsw;
+pub mod ivf_pq;
+pub mod kmeans;
+pub mod pq;
 pub mod vector;
