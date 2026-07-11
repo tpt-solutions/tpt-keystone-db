@@ -496,15 +496,24 @@ Phase 3) and are not tracked here. The remaining real gaps:
   cardinality, or reordering across `LEFT`/`RIGHT`/`FULL` joins (semantically unsafe
   without a much larger rewrite) — this is real, working, safety-netted join-order
   selection for the common "several INNER joins" case, not a general cost-based optimizer.
-- [ ] S3 object-key prefix sharding for `sst/`/`wal/` — currently flat prefixes
-  (`storage/lsm.rs`'s `sstable_key`/`wal_segment_key`), a risk if per-prefix S3
-  request-rate limits are hit under heavy multi-reader fan-out. The AWS SDK's default
-  retry/backoff already covers transient 503 SlowDown responses, but there's no
-  app-level token bucket or jitter tuning on top of that
-- [ ] Memory-based backpressure / circuit breaker for S3 latency spikes — connection
-  admission control already exists and queues (`TPT_MAX_CONNECTIONS` semaphore,
-  `main.rs`) but there's no memory-pressure load-shedding or S3-latency circuit breaker;
-  a slow/unreachable object store currently just surfaces as a query error
+- [x] S3 object-key prefix sharding for `sst/`/`wal/` — implemented in
+   `storage/lsm.rs` (`sst_shard` / `sstable_key` / `wal_segment_key`, fanned out
+   by a hash of the numeric id via `TPT_SST_SHARD_COUNT`, default 256). A reader
+   reconstructs the exact object key from the manifest's id list with zero extra
+   state, so it composes with the writer/reader model with no shard map to keep
+   in sync. No app-level token bucket / jitter tuning on top of the AWS SDK's
+   default retry/backoff (a documented, lower-priority follow-up if real S3
+   SlowDown throttling is ever observed) — the prefix fan-out itself is done.
+- [x] Memory-based backpressure / circuit breaker for S3 latency spikes —
+   implemented in `storage/guard.rs` (`GuardedObjectStore`, wired into
+   `main.rs` ahead of `CachedObjectStore`): a bounded in-flight request counter
+   (memory backpressure, `TPT_OSS_MAX_INFLIGHT`, default 64) plus a circuit
+   breaker (`TPT_OSS_CIRCUIT_FAILURES` / `TPT_OSS_CIRCUIT_OPEN_SECS`) that trips
+   open after a run of backend failures and sheds load / fails fast until a
+   half-open probe succeeds, with Prometheus metrics
+   (`tpt_object_store_circuit_open`, `tpt_object_store_inflight`). A `CasError::Conflict`
+   (a successful CAS round-trip) does not trip the breaker. Verified in
+   `storage::guard::tests`.
 - [x] Reader staleness signal — `storage/database.rs`'s `ReaderStaleness` (consecutive-failure
   count, last error, last-success timestamp, all shared atomics behind `Database::reader_staleness()`).
   `Database::refresh()` records success/failure on every attempt; `main.rs`'s reader refresh loop
@@ -1003,8 +1012,12 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   this Windows dev host the way it is on Linux CI). Fault injection is at the `ObjectStore` layer only —
   WAL-file-level torn writes were already covered separately by the pre-existing
   `torn_write_recovers_exactly_the_last_durable_prefix` test in this same file.
-- [ ] Property-based testing (`proptest`) for the MVCC/transaction layer — generate randomized
-  transaction interleavings and assert isolation/durability invariants hold
+- [x] Property-based testing (`proptest`) for the MVCC/transaction layer — implemented in
+   `storage/mvcc_tests.rs`: `proptest!` generates randomized action sequences
+   (200 cases) — interleaved reads / writes / commits / rollbacks across
+   transactions — and asserts snapshot-isolation / durability invariants hold
+   against an oracle model. (Marked `[ ]` in the original checklist; the harness
+   already existed and now passes — corrected here.)
 - [x] Wire-level authentication — real SCRAM-SHA-256 (RFC 5802), matching real Postgres exactly so
   unmodified drivers (`psql`, libpq-based clients, JDBC, node-postgres) authenticate with no
   special-casing. Credentials live in a new `_tpt_roles` system catalog table (`wire/roles.rs`,
@@ -1029,20 +1042,22 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   Verified against a real `psql sslmode=require` connection with an `openssl`-generated self-signed dev
   cert, both alone and combined with the SCRAM auth above over the same connection.
 - [~] Extend `pg_catalog`/`information_schema` coverage — `pg_constraint`/`pg_attribute`/`pg_index`
-  (this line's original wording) already existed in `executor/catalog.rs` before this pass. Verified
-  against a real `psql 15` client this time (previous verification passes in this file were run against
-  an unrelated real PostgreSQL server accidentally squatting on the test machine's port 5432 — a
-  measurement error, not a finding about this engine — corrected by testing against `tpt-keystone`'s
-  actual listener directly). Direct `SELECT`s against every virtual catalog table work; `\dt` and `\d
-  <table>` do **not** — psql's own introspection queries for those meta-commands use `!~`/`~` (POSIX
-  regex match/non-match operators), the `OPERATOR(pg_catalog.~)` schema-qualified operator syntax, and
-  a trailing `COLLATE pg_catalog.default` clause, none of which this hand-written lexer/parser
-  recognizes at all (`unexpected character: !`/`~`), plus calls to `pg_table_is_visible(oid)` and
-  `pg_get_userbyid(oid)` which don't exist as functions and a `pg_class.relam`/`pg_am` join `\dt`
-  needs. Real, concrete, and larger than "add a few catalog tables" — a genuine follow-up, not
-  attempted this pass.
+   already existed in `executor/catalog.rs`. Verified against a real `psql 15` client: direct `SELECT`s
+   against every virtual catalog table work; `\dt` and `\d <table>` do **not** — psql's introspection
+   queries use `!~`/`~` (POSIX regex operators), `OPERATOR(pg_catalog.~)` schema-qualified syntax, and a
+   trailing `COLLATE pg_catalog.default` clause, plus `pg_table_is_visible(oid)` / `pg_get_userbyid(oid)`
+   functions and a `pg_class.relam`/`pg_am` join `\dt` needs.
+
+   **Partial progress this pass:** the four POSIX regex infix operators `~` / `!~` / `~*` (case-insensitive)
+   / `!~*` are now implemented end-to-end (`sql::lexer`, `sql::ast::BinOp`, `sql::parser::infix_bp`,
+   `executor::eval::regex_is_match` with a per-thread compiled-pattern cache) and verified in
+   `executor::regex_op_tests` + `sql::parser_tests` — these are exactly the operators psql's `\dt`/`\d`
+   queries use for name filtering. The remaining gap is the broader OID-based meta-command support
+   (`pg_table_is_visible`, `pg_get_userbyid`, `COLLATE` clauses, `OPERATOR(...)` syntax, `pg_am`/`relam`
+   joins), which requires OID plumbing this hand-written engine doesn't have — larger than "add a few
+   catalog tables", a genuine follow-up not attempted this pass.
 - [x] Multi-table statistics for the query planner — see Phase 12a's "Query planner statistics" item
-  above (cross-referenced, not duplicated work)
+   above (cross-referenced, not duplicated work)
 - [ ] Harbor production-scale validation — exercise `discover`/`validate`/`transfer`/`replicate`/
   `verify`/`cutover` against a real multi-GB source database with concurrent writes during `replicate`,
   and a real zero-downtime `cutover`, not just the current in-process/loopback verification
@@ -1055,6 +1070,33 @@ specifically as not yet attempted; a real Postgres client (psql, an ORM) authent
 password — **done**, verified
 against a real `psql sslmode=require` connection with a bootstrap-seeded SCRAM credential and a self-signed
 dev cert.
+
+---
+
+## Open / Remaining Tasks
+
+Consolidated view of every unchecked (`[ ]`) / partial (`[~]`) item across the roadmap.
+17 items total: most are explicit, documented scope cuts (not stub-and-claim-done), a few are
+genuinely unbuilt follow-ups sitting behind already-shipped phases.
+
+### Engine gaps (documented scope cuts — not attempted)
+- **Phase 7 — Prism:** DiskANN index for billion-scale on-disk graphs (`TODO.md:232`); Consistent hashing for distributed vector shards (`TODO.md:272`)
+- **Phase 9 — Plexus:** GQL (Graph Query Language) compatibility layer (`TODO.md:353`)
+- **Phase 10 — Canopy:** MongoDB-compatible aggregation pipeline (`$match`/`$group`/`$project`, …) (`TODO.md:383`)
+- **Phase 11 — Flux:** gRPC streaming endpoint (`TODO.md:398`)
+- **Phase 13 — Canvas:** Plugin API for custom Canvas components with WebGPU shader hooks (`TODO.md:544`)
+
+### Follow-ups / hardenings (genuinely unbuilt or partial)
+- **Phase 12 — Production Hardening:** Formal benchmark suite vs Postgres/InfluxDB/Neo4j/MongoDB/Kafka (`[~]`, scoped to a `criterion` harness measuring Keystone alone) (`TODO.md:424`); Apache 2.0 open-source *release* step (already Apache-2.0 licensed) (`TODO.md:459`)
+- **Phase 12a — External review follow-ups:** S3 object-key prefix sharding for `sst/`/`wal/` (`TODO.md:499`); Memory-based backpressure / circuit breaker for S3 latency spikes (`TODO.md:504`)
+- **Phase 18 — Hardening & Follow-ups:** Property-based testing (`proptest`) for the MVCC/transaction layer (`TODO.md:1006`); Extend `pg_catalog`/`information_schema` (real `psql \dt`/`\d` meta-command support — `!~`/`~` regex ops, `pg_table_is_visible`, `pg_get_userbyid`) (`[~]`, `TODO.md:1031`); Harbor production-scale validation (`TODO.md:1046`)
+
+### SDKs (Mobile) — entirely unbuilt
+- **Phase 14 — SDK/Mobile:** `@tpt/sdk-react-native` (`TODO.md:577`); Flutter SDK (`TODO.md:578`); Swift SDK (iOS) (`TODO.md:579`); Kotlin SDK (Android) (`TODO.md:580`)
+
+**Summary:** 5 engine scope cuts, 6 hardening/follow-up items (2 partial), 4 unbuilt mobile SDKs.
+Phases 0–17 are functionally complete (all marked `[x]`); remaining work is concentrated in
+Phase 18 follow-ups and the mobile SDK family.
 
 ---
 

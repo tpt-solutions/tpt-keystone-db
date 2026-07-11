@@ -27,6 +27,8 @@ mod planner;
 #[cfg(test)]
 mod plexus_tests;
 #[cfg(test)]
+mod regex_op_tests;
+#[cfg(test)]
 mod prism_gpu_tests;
 mod prism_tests;
 mod select;

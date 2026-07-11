@@ -1555,6 +1555,10 @@ fn infix_bp(tok: &Token) -> Option<(u8, u8, BinOp)> {
         Token::HashArrow => (13, 14, BinOp::HashArrow),
         Token::HashLongArrow => (13, 14, BinOp::HashLongArrow),
         Token::AtArrow => (5, 6, BinOp::Contains),
+        Token::Tilde => (5, 6, BinOp::RegexMatch),
+        Token::NotTilde => (5, 6, BinOp::RegexNotMatch),
+        Token::TildeStar => (5, 6, BinOp::RegexMatchCI),
+        Token::NotTildeStar => (5, 6, BinOp::RegexNotMatchCI),
         Token::Is | Token::Between | Token::Like | Token::In | Token::Not => (5, 6, BinOp::Eq),
         _ => return None,
     };

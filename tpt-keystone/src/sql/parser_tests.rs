@@ -339,6 +339,46 @@ fn pratt_parser_operator_precedence() {
 }
 
 #[test]
+fn parses_posix_regex_operators() {
+    assert!(matches!(
+        expr_ok("a ~ 'x'"),
+        Expr::BinaryOp {
+            op: BinOp::RegexMatch,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_ok("a !~ 'x'"),
+        Expr::BinaryOp {
+            op: BinOp::RegexNotMatch,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_ok("a ~* 'x'"),
+        Expr::BinaryOp {
+            op: BinOp::RegexMatchCI,
+            ..
+        }
+    ));
+    assert!(matches!(
+        expr_ok("a !~* 'x'"),
+        Expr::BinaryOp {
+            op: BinOp::RegexNotMatchCI,
+            ..
+        }
+    ));
+    // `~` binds tighter than AND, so `a ~ 'x' AND b ~ 'y'` groups each match.
+    assert!(matches!(
+        expr_ok("a ~ 'x' AND b ~ 'y'"),
+        Expr::BinaryOp {
+            op: BinOp::And,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn parses_between_like_in_exists() {
     assert!(matches!(expr_ok("a BETWEEN 1 AND 10"), Expr::Between { negated: false, .. }));
     assert!(matches!(

@@ -539,6 +539,23 @@ impl RowContext {
                 let b = json_of(&r)?;
                 Ok(Value::Bool(json_contains(&a, &b)))
             }
+            BinOp::RegexMatch
+            | BinOp::RegexNotMatch
+            | BinOp::RegexMatchCI
+            | BinOp::RegexNotMatchCI => {
+                match (&l, &r) {
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => {
+                        let subject = val_to_text(&l);
+                        let pattern = val_to_text(&r);
+                        let ci = matches!(op, BinOp::RegexMatchCI | BinOp::RegexNotMatchCI);
+                        let negated =
+                            matches!(op, BinOp::RegexNotMatch | BinOp::RegexNotMatchCI);
+                        let matched = regex_is_match(&subject, &pattern, ci)?;
+                        Ok(Value::Bool(if negated { !matched } else { matched }))
+                    }
+                }
+            }
             BinOp::And | BinOp::Or => unreachable!(),
         }
     }
@@ -1858,4 +1875,36 @@ fn like_recursive(s: &[char], p: &[char], si: usize, pi: usize) -> bool {
     } else {
         false
     }
+}
+
+/// POSIX regex match for the `~` / `!~` / `~*` / `!~*` infix operators. A
+/// `null` operand yields `null` (handled by the caller); an invalid pattern
+/// errors, matching Postgres (`ERROR: invalid regular expression`).
+///
+/// Compiled `Regex`es are memoised per-thread keyed by `(pattern, ci)` because
+/// a hot `WHERE col ~ '...'` filter would otherwise re-parse the same pattern
+/// on every row. `regex::Regex` is cheaply cloneable (shares an `Arc`), so the
+/// cache value is retrieved by cloning rather than re-borrowing.
+fn regex_is_match(subject: &str, pattern: &str, ci: bool) -> anyhow::Result<bool> {
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<std::collections::HashMap<(String, bool), regex::Regex>> =
+            RefCell::new(std::collections::HashMap::new());
+    }
+    let key = (pattern.to_string(), ci);
+    let compiled = CACHE.with(|c| {
+        if let Some(re) = c.borrow().get(&key) {
+            return Ok(re.clone());
+        }
+        let mut builder = regex::RegexBuilder::new(pattern);
+        builder.case_insensitive(ci);
+        match builder.build() {
+            Ok(re) => {
+                c.borrow_mut().insert(key.clone(), re.clone());
+                Ok(re)
+            }
+            Err(e) => Err(anyhow::anyhow!("invalid regular expression: {e}")),
+        }
+    })?;
+    Ok(compiled.is_match(subject))
 }

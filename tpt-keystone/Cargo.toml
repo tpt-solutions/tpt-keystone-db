@@ -43,6 +43,7 @@ tracing-opentelemetry = "0.33.0"
 wgpu = { version = "22", default-features = false, features = ["wgsl"] }
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
+regex = "1"
 
 # Linux-only: io_uring WAL backend (storage/io_backend.rs). Pulled in only when
 # building for Linux; the portable std backend is used on every other platform.

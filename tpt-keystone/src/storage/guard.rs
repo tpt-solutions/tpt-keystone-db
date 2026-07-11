@@ -240,6 +240,13 @@ mod tests {
     use anyhow::Result;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Serialize env-var mutations across the guard tests. Each test overrides
+    /// `TPT_OSS_*` process-global config; without a lock, the default
+    /// multi-threaded test runner races these set/remove calls between tests
+    /// and produces intermittent failures (same root cause as
+    /// `lsm::COMPACTION_THRESHOLD_ENV_LOCK`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A store that fails its first `fail_times` `get`s, then succeeds.
     struct FlakyStore {
         fail_times: Mutex<usize>,
@@ -288,6 +295,7 @@ mod tests {
     fn circuit_breaker_trips_and_sheds_without_hitting_backend() {
         // Trip after a single failure and stay open for a long window so the
         // "shed" assertions don't race a half-open probe.
+        let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("TPT_OSS_CIRCUIT_FAILURES", "1");
         std::env::set_var("TPT_OSS_CIRCUIT_OPEN_SECS", "60");
 
@@ -312,6 +320,7 @@ mod tests {
     #[test]
     fn circuit_breaker_recovers_on_half_open_probe() {
         // Zero open window -> the very next call after a trip is the probe.
+        let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("TPT_OSS_CIRCUIT_FAILURES", "1");
         std::env::set_var("TPT_OSS_CIRCUIT_OPEN_SECS", "0");
 
@@ -330,6 +339,7 @@ mod tests {
 
     #[test]
     fn cas_conflict_does_not_trip_breaker() {
+        let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("TPT_OSS_CIRCUIT_FAILURES", "1");
         let inner: Arc<dyn crate::storage::objectstore::ObjectStore> = Arc::new(
             crate::storage::objectstore::LocalFsObjectStore::open(tempfile::tempdir().unwrap().path())

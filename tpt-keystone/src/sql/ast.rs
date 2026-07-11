@@ -434,6 +434,10 @@ pub enum BinOp {
     Contains,      // @> (JSON/JSONB containment)
     HashArrow,     // #> (JSON path extraction, array-literal path)
     HashLongArrow, // #>> (JSON path extraction as text)
+    RegexMatch,    // ~  (POSIX regex match)
+    RegexNotMatch, // !~ (POSIX regex non-match)
+    RegexMatchCI,  // ~* (case-insensitive POSIX regex match)
+    RegexNotMatchCI, // !~* (case-insensitive POSIX regex non-match)
 }
 
 #[derive(Debug, Clone, Copy)]

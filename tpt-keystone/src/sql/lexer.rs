@@ -139,6 +139,14 @@ pub enum Token {
     /// result), the array-path-literal counterpart of `->`/`->>`.
     HashArrow,
     HashLongArrow,
+    /// `~` — POSIX regex match (pattern matching, Postgres-compatible).
+    Tilde,
+    /// `!~` — POSIX regex non-match.
+    NotTilde,
+    /// `~*` — case-insensitive POSIX regex match.
+    TildeStar,
+    /// `!~*` — case-insensitive POSIX regex non-match.
+    NotTildeStar,
 
     Eof,
 }
@@ -257,6 +265,15 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 Token::NotEq
             }
+            b'!' if self.peek() == Some(b'~') => {
+                self.pos += 1;
+                if self.peek() == Some(b'*') {
+                    self.pos += 1;
+                    Token::NotTildeStar
+                } else {
+                    Token::NotTilde
+                }
+            }
             b'<' => {
                 if self.peek() == Some(b'=') {
                     self.pos += 1;
@@ -312,6 +329,14 @@ impl<'a> Lexer<'a> {
                     Token::HashLongArrow
                 } else {
                     Token::HashArrow
+                }
+            }
+            b'~' => {
+                if self.peek() == Some(b'*') {
+                    self.pos += 1;
+                    Token::TildeStar
+                } else {
+                    Token::Tilde
                 }
             }
             other => anyhow::bail!("unexpected character: {}", other as char),
