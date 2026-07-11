@@ -7,10 +7,14 @@
 
 mod http;
 mod protocol;
+#[cfg(test)]
+mod protocol_tests;
 mod server;
 #[cfg(test)]
 mod tests;
 mod tools;
+#[cfg(test)]
+mod tools_tests;
 
 pub use server::handle;
 /// Re-exported so other in-process modules (Synapse's actor runtime) can

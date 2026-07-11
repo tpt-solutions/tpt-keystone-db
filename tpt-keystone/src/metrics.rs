@@ -35,6 +35,18 @@ pub struct Metrics {
 
     pub cache_hits_total: AtomicU64,
     pub cache_misses_total: AtomicU64,
+
+    /// Object-store circuit breaker: 1 while open (tripped), 0 otherwise.
+    pub object_store_circuit_open: AtomicU64,
+    /// Object-store in-flight operations (memory backpressure bound).
+    pub object_store_inflight: AtomicU64,
+    /// Object-store circuit-breaker trip events since start.
+    pub object_store_circuit_trips_total: AtomicU64,
+
+    /// Reader node manifest-staleness: 1 while refresh is failing/aged-out.
+    pub reader_manifest_stale: AtomicU64,
+    /// Seconds since the reader last successfully refreshed the manifest.
+    pub reader_last_refresh_age_seconds: AtomicU64,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -55,6 +67,11 @@ impl Metrics {
             object_store_cas_conflicts_total: AtomicU64::new(0),
             cache_hits_total: AtomicU64::new(0),
             cache_misses_total: AtomicU64::new(0),
+            object_store_circuit_open: AtomicU64::new(0),
+            object_store_inflight: AtomicU64::new(0),
+            object_store_circuit_trips_total: AtomicU64::new(0),
+            reader_manifest_stale: AtomicU64::new(0),
+            reader_last_refresh_age_seconds: AtomicU64::new(0),
         }
     }
 
@@ -81,6 +98,30 @@ impl Metrics {
         self.query_duration_nanos_sum
             .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
         self.query_duration_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_object_store_circuit_open(&self, open: bool) {
+        self.object_store_circuit_open
+            .store(if open { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
+    pub fn set_object_store_inflight(&self, n: u64) {
+        self.object_store_inflight.store(n, Ordering::Relaxed);
+    }
+
+    pub fn record_object_store_circuit_trip(&self) {
+        self.object_store_circuit_trips_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_reader_manifest_stale(&self, stale: bool) {
+        self.reader_manifest_stale
+            .store(if stale { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
+    pub fn set_reader_last_refresh_age_seconds(&self, age: f64) {
+        self.reader_last_refresh_age_seconds
+            .store(age as u64, Ordering::Relaxed);
     }
 
     /// Render the registry in Prometheus text exposition format
@@ -180,6 +221,51 @@ impl Metrics {
         out.push_str(&format!(
             "tpt_cache_misses_total {}\n",
             self.cache_misses_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP tpt_object_store_circuit_open 1 while the object-store circuit breaker is open (tripped).\n",
+        );
+        out.push_str("# TYPE tpt_object_store_circuit_open gauge\n");
+        out.push_str(&format!(
+            "tpt_object_store_circuit_open {}\n",
+            self.object_store_circuit_open.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP tpt_object_store_inflight Currently in-flight object-store operations (memory backpressure bound).\n",
+        );
+        out.push_str("# TYPE tpt_object_store_inflight gauge\n");
+        out.push_str(&format!(
+            "tpt_object_store_inflight {}\n",
+            self.object_store_inflight.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP tpt_object_store_circuit_trips_total Object-store circuit-breaker trip events since start.\n",
+        );
+        out.push_str("# TYPE tpt_object_store_circuit_trips_total counter\n");
+        out.push_str(&format!(
+            "tpt_object_store_circuit_trips_total {}\n",
+            self.object_store_circuit_trips_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP tpt_reader_manifest_stale 1 while a reader node's manifest refresh is failing or aged out.\n",
+        );
+        out.push_str("# TYPE tpt_reader_manifest_stale gauge\n");
+        out.push_str(&format!(
+            "tpt_reader_manifest_stale {}\n",
+            self.reader_manifest_stale.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP tpt_reader_last_refresh_age_seconds Seconds since the reader last successfully refreshed the manifest.\n",
+        );
+        out.push_str("# TYPE tpt_reader_last_refresh_age_seconds gauge\n");
+        out.push_str(&format!(
+            "tpt_reader_last_refresh_age_seconds {}\n",
+            self.reader_last_refresh_age_seconds.load(Ordering::Relaxed)
         ));
 
         out

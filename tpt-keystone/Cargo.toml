@@ -48,7 +48,11 @@ bytemuck = { version = "1", features = ["derive"] }
 tempfile = "3"
 wat = "1"
 criterion = "0.5"
+proptest = "1"
 
 [[bench]]
 name = "keystone_bench"
 harness = false
+
+[profile.dev]
+debug = "line-tables-only"

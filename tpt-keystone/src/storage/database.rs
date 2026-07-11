@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -30,6 +31,77 @@ use crate::vector::hnsw::{HnswConfig, Metric};
 struct TsIndexEntry {
     index: TimeIndex,
     value_column: String,
+}
+
+/// Current unix-ms timestamp, used for staleness bookkeeping. Local helper so
+/// `storage` doesn't depend on the (higher-level) `synapse` module for a clock.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Tracks a reader node's manifest-refresh health so staleness is observable
+/// by clients (Phase 12a follow-up: a reader whose refresh keeps failing must
+/// not silently serve last-known state). `Database::refresh` updates this on
+/// every attempt; `publish_metrics` surfaces it through the Prometheus
+/// endpoint, and `is_stale` lets the wire/session layer refuse reads if a
+/// caller opts into strict freshness.
+#[derive(Clone, Default)]
+pub struct ReaderStaleness {
+    last_success_ms: Arc<AtomicU64>,
+    consecutive_failures: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
+}
+
+impl ReaderStaleness {
+    pub fn record_success(&self) {
+        self.last_success_ms.store(now_ms(), Ordering::Relaxed);
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        *self.last_error.lock().unwrap() = None;
+    }
+
+    pub fn record_failure(&self, msg: String) {
+        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+        *self.last_error.lock().unwrap() = Some(msg);
+    }
+
+    pub fn consecutive_failures(&self) -> u64 {
+        self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn last_success_ms(&self) -> u64 {
+        self.last_success_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    /// True if refresh is currently failing, or the last success is older than
+    /// `max_age_ms` (a reader that's merely quiet — no writer activity — also
+    /// ages out and should be flagged rather than trusted blindly).
+    pub fn is_stale(&self, max_age_ms: u64) -> bool {
+        if self.consecutive_failures.load(Ordering::Relaxed) > 0 {
+            return true;
+        }
+        let last = self.last_success_ms.load(Ordering::Relaxed);
+        last != 0 && now_ms().saturating_sub(last) > max_age_ms
+    }
+
+    /// Push the current staleness state into the metrics registry so a
+    /// Prometheus scrape exposes it to clients/alerts.
+    pub fn publish_metrics(&self, max_age_ms: u64) {
+        let stale = self.is_stale(max_age_ms);
+        crate::metrics::Metrics::global().set_reader_manifest_stale(stale);
+        let age = if self.last_success_ms.load(Ordering::Relaxed) == 0 {
+            0
+        } else {
+            (now_ms().saturating_sub(self.last_success_ms.load(Ordering::Relaxed))) / 1000
+        };
+        crate::metrics::Metrics::global().set_reader_last_refresh_age_seconds(age as f64);
+    }
 }
 
 /// The main database engine that ties together LSM storage, MVCC, schemas, and indexes.
@@ -89,6 +161,8 @@ pub struct Database {
     /// shares this one `Database` — a hot query's lex/parse cost is paid
     /// once regardless of which connection asks for it next.
     stmt_cache: crate::sql::cache::StatementCache,
+    /// Reader-node manifest-refresh health (Phase 12a staleness signal).
+    reader_staleness: ReaderStaleness,
 }
 
 impl Database {
@@ -326,6 +400,7 @@ impl Database {
             udf_config,
             notify_bus,
             stmt_cache: crate::sql::cache::StatementCache::new(256),
+            reader_staleness: ReaderStaleness::default(),
         })
     }
 
@@ -354,43 +429,60 @@ impl Database {
 
     /// Poll the shared manifest and schema catalog for changes made by the
     /// writer node. Reader-role nodes call this on an interval to converge.
+    ///
+    /// Every attempt updates `reader_staleness` so a reader whose refresh keeps
+    /// failing is observable (Phase 12a staleness signal) instead of silently
+    /// serving last-known state.
     #[tracing::instrument(skip_all)]
     pub fn refresh(&self) -> Result<()> {
-        self.lsm.lock().unwrap().refresh()?;
-        for key in self.store.list("schemas/")? {
-            if let Some((data, _meta)) = self.store.get(&key)? {
-                if let Ok(schema) = TableSchema::decode(&data) {
-                    self.schemas
-                        .lock()
-                        .unwrap()
-                        .entry(schema.name.clone())
-                        .or_insert(schema);
+        let result: Result<()> = (|| {
+            self.lsm.lock().unwrap().refresh()?;
+            for key in self.store.list("schemas/")? {
+                if let Some((data, _meta)) = self.store.get(&key)? {
+                    if let Ok(schema) = TableSchema::decode(&data) {
+                        self.schemas
+                            .lock()
+                            .unwrap()
+                            .entry(schema.name.clone())
+                            .or_insert(schema);
+                    }
                 }
             }
-        }
-        for key in self.store.list("functions/")? {
-            if let Some((data, _meta)) = self.store.get(&key)? {
-                if let Ok(uf) = UserFunction::decode(&data) {
-                    self.functions
-                        .lock()
-                        .unwrap()
-                        .entry(uf.name.clone())
-                        .or_insert(uf);
+            for key in self.store.list("functions/")? {
+                if let Some((data, _meta)) = self.store.get(&key)? {
+                    if let Ok(uf) = UserFunction::decode(&data) {
+                        self.functions
+                            .lock()
+                            .unwrap()
+                            .entry(uf.name.clone())
+                            .or_insert(uf);
+                    }
                 }
             }
-        }
-        for key in self.store.list("sequences/")? {
-            if let Some((data, _meta)) = self.store.get(&key)? {
-                if let Ok(seq) = Sequence::decode(&data) {
-                    self.sequences
-                        .lock()
-                        .unwrap()
-                        .entry(seq.name.clone())
-                        .or_insert(seq);
+            for key in self.store.list("sequences/")? {
+                if let Some((data, _meta)) = self.store.get(&key)? {
+                    if let Ok(seq) = Sequence::decode(&data) {
+                        self.sequences
+                            .lock()
+                            .unwrap()
+                            .entry(seq.name.clone())
+                            .or_insert(seq);
+                    }
                 }
             }
+            Ok(())
+        })();
+        match &result {
+            Ok(()) => self.reader_staleness.record_success(),
+            Err(e) => self.reader_staleness.record_failure(format!("{e:#}")),
         }
-        Ok(())
+        result
+    }
+
+    /// Reader-node manifest-refresh health (Phase 12a staleness signal). Clone
+    /// shares the same underlying atomics with every other handle.
+    pub fn reader_staleness(&self) -> ReaderStaleness {
+        self.reader_staleness.clone()
     }
 
     fn check_writable(&self) -> Result<()> {

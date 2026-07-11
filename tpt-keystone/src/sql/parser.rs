@@ -890,6 +890,7 @@ impl Parser {
             || self.peek() == &Token::Left
             || self.peek() == &Token::Right
             || self.peek() == &Token::Full
+            || self.peek() == &Token::Cross
         {
             let join_type = match self.peek().clone() {
                 Token::Join => {
@@ -913,6 +914,11 @@ impl Parser {
                     self.advance();
                     self.eat(&Token::Join);
                     JoinType::Full
+                }
+                Token::Cross => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    JoinType::Cross
                 }
                 _ => break,
             };

@@ -1,7 +1,11 @@
 pub mod ast;
 pub mod cache;
+#[cfg(test)]
+mod cache_tests;
 pub mod lexer;
 pub mod parser;
+#[cfg(test)]
+mod parser_tests;
 
 use anyhow::Result;
 use ast::Stmt;

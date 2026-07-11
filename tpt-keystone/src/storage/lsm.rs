@@ -63,12 +63,44 @@ impl MemTable {
     }
 }
 
+/// Spread `sst/` and `wal/` objects across hash-derived sub-prefixes so they
+/// don't all land under a single S3 key prefix. S3-compatible stores throttle
+/// (HTTP 503 SlowDown) requests that exceed a per-prefix rate, so a hot writer
+/// flushing many SSTables under one flat `sst/` prefix risks exactly that;
+/// distributing by id keeps each prefix's request rate bounded.
+///
+/// The shard is a pure function of the numeric id, so a reader reconstructs the
+/// exact object key from the manifest's id list with zero extra state — there's
+/// no shard map to keep in sync between writer and reader. Override (or disable
+/// with `0`) via `TPT_SST_SHARD_COUNT`.
+const DEFAULT_SST_SHARD_COUNT: u64 = 256;
+
+fn sst_shard(id: u64) -> String {
+    let n = std::env::var("TPT_SST_SHARD_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SST_SHARD_COUNT);
+    if n <= 1 {
+        String::new()
+    } else {
+        // Pad to a fixed width so directory listing order matches numeric order
+        // and the prefix fan-out is stable regardless of how large `n` grows.
+        let width = ((n - 1).max(1) as f64).log10().floor() as usize + 1;
+        let shard = (id % n) as u32;
+        let mut s = format!("{shard:x}");
+        while s.len() < width {
+            s.insert(0, '0');
+        }
+        format!("{s}/")
+    }
+}
+
 fn sstable_key(id: u64) -> String {
-    format!("sst/{id:020}")
+    format!("sst/{}{id:020}", sst_shard(id))
 }
 
 fn wal_segment_key(id: u64) -> String {
-    format!("wal/seg_{id:020}")
+    format!("wal/{}seg_{id:020}", sst_shard(id))
 }
 
 /// The LSM engine. Local disk is used only for the active WAL segment (the

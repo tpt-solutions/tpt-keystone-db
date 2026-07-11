@@ -32,8 +32,13 @@ async fn main() -> anyhow::Result<()> {
     // a local NVMe cache-aside layer — this node's disk is otherwise
     // disposable, which is what makes it a stateless compute node.
     let backend = config.build_object_store().await?;
+    // Object-store resilience: bound in-flight requests (memory backpressure)
+    // and trip a circuit breaker on a run of backend failures so a slow /
+    // unreachable store sheds load and fails fast instead of stalling every
+    // query (Phase 12a follow-up).
+    let guarded: Arc<dyn ObjectStore> = storage::guard::GuardedObjectStore::new(backend);
     let store: Arc<dyn ObjectStore> = Arc::new(CachedObjectStore::new(
-        backend,
+        guarded,
         &config.cache_dir,
         config.cache_max_bytes,
     )?);
@@ -91,6 +96,19 @@ async fn main() -> anyhow::Result<()> {
                 ticker.tick().await;
                 if let Err(e) = db.refresh() {
                     error!(error = %e, "manifest refresh failed");
+                }
+                // Phase 12a staleness signal: surface refresh health to clients
+                // via metrics, and warn loudly when the reader is serving stale
+                // (last-known) state because its refresh can't keep up.
+                let stale = db.reader_staleness();
+                let max_age_ms = interval.as_millis() as u64 * 3;
+                stale.publish_metrics(max_age_ms);
+                if stale.consecutive_failures() > 0 {
+                    warn!(
+                        failures = stale.consecutive_failures(),
+                        last_error = ?stale.last_error(),
+                        "reader manifest refresh is failing; serving last-known state"
+                    );
                 }
             }
         });

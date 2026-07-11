@@ -7,6 +7,7 @@ pub mod compress;
 pub mod config;
 pub mod database;
 pub mod flux;
+pub mod guard;
 pub mod geo_index;
 pub mod graph_index;
 pub mod json_schema;
@@ -15,10 +16,14 @@ pub mod lease;
 pub mod lsm;
 pub mod manifest;
 pub mod mvcc;
+#[cfg(test)]
+mod mvcc_tests;
 pub mod objectstore;
 #[cfg(test)]
 mod phase3_tests;
 pub mod sstable;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod ts_index;
 pub mod tx;
 pub mod vector_index;

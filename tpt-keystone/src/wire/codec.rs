@@ -298,6 +298,8 @@ impl Conn {
 fn read_cstr(buf: &mut BytesMut) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let s = String::from_utf8_lossy(&buf[..end]).into_owned();
-    buf.advance(end + 1);
+    // No terminator found (truncated/malformed input) — consume what's left
+    // rather than advancing past the end of the buffer.
+    buf.advance((end + 1).min(buf.len()));
     s
 }
