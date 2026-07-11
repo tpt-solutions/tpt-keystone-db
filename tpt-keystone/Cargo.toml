@@ -44,6 +44,11 @@ wgpu = { version = "22", default-features = false, features = ["wgsl"] }
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 
+# Linux-only: io_uring WAL backend (storage/io_backend.rs). Pulled in only when
+# building for Linux; the portable std backend is used on every other platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 wat = "1"

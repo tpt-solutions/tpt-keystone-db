@@ -65,6 +65,14 @@ async fn main() -> anyhow::Result<()> {
     )?);
     info!(dir = %config.local_dir.display(), "Database opened");
 
+    // Phase 10: opt-in native binary jsonb storage for `Json` columns
+    // (`storage::jsonb`). Off by default (raw JSON text storage); stored cells
+    // are self-describing, so this is safe to toggle between restarts.
+    if std::env::var("TPT_JSONB_BINARY").as_deref() == Ok("1") {
+        db.set_jsonb_binary_storage(true);
+        info!("native binary jsonb storage enabled for Json columns");
+    }
+
     // Wire-level auth: opt-in via `TPT_AUTH_BOOTSTRAP_USER`/`_PASSWORD`. An
     // empty `_tpt_roles` catalog (the default) means `wire::session::run`
     // keeps sending `AuthenticationOk` unconditionally, same as before this

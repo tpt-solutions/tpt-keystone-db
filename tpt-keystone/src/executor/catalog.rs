@@ -239,6 +239,7 @@ fn pg_type() -> VirtualTable {
         ("geometry", ColumnType::Geometry),
         ("geography", ColumnType::Geography),
         ("vector", ColumnType::Vector),
+        ("raster", ColumnType::Raster),
     ];
     let rows = types
         .iter()
@@ -452,5 +453,6 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Geometry => "geometry",
         ColumnType::Geography => "geography",
         ColumnType::Vector => "vector",
+        ColumnType::Raster => "raster",
     }
 }

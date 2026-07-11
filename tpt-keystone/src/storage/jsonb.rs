@@ -6,14 +6,15 @@
 //!
 //! This is used internally by the path index (`canopy_index::JsonPathIndex`)
 //! and the inverted full-text index (`canopy_index::FtsIndex`) to build
-//! compact, canonically-ordered on-disk keys. Row storage itself keeps
-//! storing `Json` columns as text (see `ColumnType::Json` docs) — consistent
-//! with the pre-existing text-sniffing row model every other column type
-//! uses (`executor::eval::Value::from_bytes`), the same limitation
-//! `Geometry` already lives with. Object keys are sorted before encoding so
-//! two structurally-equal documents with differently-ordered keys encode to
-//! identical bytes — required for both the path index and future
-//! containment-style comparisons.
+//! compact, canonically-ordered on-disk keys, and — as of the Phase 10
+//! "native JSON/BSON binary storage format" wiring — optionally as the on-disk
+//! representation of `Json` row columns themselves, via [`encode_cell`] /
+//! [`decode_cell`] (opt-in through `Database::set_jsonb_binary_storage` /
+//! `TPT_JSONB_BINARY=1`; off by default, so raw-text storage remains the
+//! default and every stored cell is self-describing via [`CELL_MARKER`]).
+//! Object keys are sorted before encoding so two structurally-equal documents
+//! with differently-ordered keys encode to identical bytes — required for both
+//! the path index and containment-style comparisons.
 
 use anyhow::{bail, Result};
 use serde_json::{Map, Number, Value};
@@ -33,6 +34,52 @@ pub fn encode(value: &Value) -> Vec<u8> {
     encode_into(value, &mut out);
     out
 }
+
+/// Row-storage marker prefix identifying a stored cell as native binary jsonb
+/// rather than raw JSON text. Byte 0 (`0x00`) can never begin a valid
+/// wire-text cell (JSON text, Postgres text-format integers/floats/bools, or
+/// `\x`-prefixed bytea hex all start with printable ASCII), so a stored cell
+/// is self-describing: the read path (`decode_cell`) checks this prefix
+/// without needing the column's declared type. Byte 1 (`0x01`) is a format
+/// version, leaving room to evolve the encoding later.
+pub const CELL_MARKER: [u8; 2] = [0x00, 0x01];
+
+/// Encode a stored row cell holding JSON *text* into native binary jsonb,
+/// prefixed with [`CELL_MARKER`]. If the text is not valid JSON, the original
+/// bytes are returned unchanged (invalid JSON is stored verbatim rather than
+/// rejected here — schema validation, if any, already ran upstream).
+pub fn encode_cell(json_text: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<Value>(json_text) {
+        Ok(value) => {
+            let mut out = Vec::with_capacity(json_text.len());
+            out.extend_from_slice(&CELL_MARKER);
+            encode_into(&value, &mut out);
+            out
+        }
+        Err(_) => json_text.to_vec(),
+    }
+}
+
+/// True if `bytes` is a native-binary-jsonb stored cell (has [`CELL_MARKER`]).
+pub fn is_binary_cell(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == CELL_MARKER[0] && bytes[1] == CELL_MARKER[1]
+}
+
+/// Decode a stored row cell back into canonical (compact, sorted-key) JSON
+/// text if it is a native-binary-jsonb cell; returns `None` for any cell that
+/// isn't (raw-text cells, other column types) so the caller leaves it as-is.
+///
+/// Like Postgres `jsonb`, this does not preserve the original insertion
+/// whitespace or object-key order — the returned text is `serde_json`'s
+/// compact serialization of the decoded value.
+pub fn decode_cell(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !is_binary_cell(bytes) {
+        return None;
+    }
+    let value = decode(&bytes[CELL_MARKER.len()..]).ok()?;
+    serde_json::to_vec(&value).ok()
+}
+
 
 fn write_varint(out: &mut Vec<u8>, mut n: u64) {
     loop {
@@ -209,5 +256,40 @@ mod tests {
         let a = json!({"b": 1, "a": 2});
         let b = json!({"a": 2, "b": 1});
         assert_eq!(encode(&a), encode(&b));
+    }
+
+    #[test]
+    fn cell_roundtrip_through_binary_storage() {
+        let text = br#"{"user": {"name": "Ada"}, "tags": [1, 2, 3]}"#;
+        let stored = encode_cell(text);
+        assert!(is_binary_cell(&stored));
+        // Stored form is smaller than / different from the text.
+        assert_ne!(&stored[..], &text[..]);
+        let decoded = decode_cell(&stored).unwrap();
+        // Decodes to canonical (compact, sorted-key) JSON, structurally equal.
+        let orig: Value = serde_json::from_slice(text).unwrap();
+        let back: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(orig, back);
+    }
+
+    #[test]
+    fn non_binary_cell_passes_through() {
+        let text = b"just some text";
+        assert!(!is_binary_cell(text));
+        assert!(decode_cell(text).is_none());
+    }
+
+    #[test]
+    fn invalid_json_is_stored_verbatim() {
+        let text = b"{not valid json";
+        let stored = encode_cell(text);
+        assert_eq!(&stored[..], &text[..]);
+        assert!(!is_binary_cell(&stored));
+    }
+
+    #[test]
+    fn text_starting_with_brace_is_not_mistaken_for_binary() {
+        // Raw JSON text starts with '{' (0x7b), never the 0x00 marker.
+        assert!(!is_binary_cell(br#"{"a":1}"#));
     }
 }

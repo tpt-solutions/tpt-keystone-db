@@ -1,6 +1,7 @@
+use super::io_backend::{self, WalIo};
 use anyhow::Result;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -18,8 +19,12 @@ pub struct WalRecord {
 ///
 /// Every write goes through the WAL before being applied to the MemTable.
 /// On recovery, the WAL is replayed to restore the MemTable state.
+///
+/// The actual append+fsync is delegated to a pluggable [`WalIo`] backend
+/// (`storage/io_backend.rs`): the portable `std::fs` path by default, or a
+/// Linux `io_uring` backend when `TPT_IO_URING=1` is set on Linux.
 pub struct Wal {
-    file: File,
+    io: Box<dyn WalIo>,
     path: PathBuf,
     seq: u64,
     bytes_written: u64,
@@ -33,8 +38,8 @@ impl Wal {
         // Deliberately not opened with `.append(true)`: on Windows that only
         // grants FILE_APPEND_DATA, which is not sufficient for `set_len`
         // (truncate) — we need full write access and manage the write
-        // position ourselves instead (see `append`).
-        let mut file = OpenOptions::new()
+        // position ourselves instead (see the backend's `append`).
+        let file = OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
@@ -43,12 +48,12 @@ impl Wal {
         // Determine the next sequence number by scanning existing records.
         let seq = Self::scan_max_seq(&file)? + 1;
         let bytes_written = file.metadata()?.len();
-        file.seek(SeekFrom::End(0))?;
+        let io = io_backend::open_backend(file, bytes_written, &path)?;
 
         info!(path = %path.display(), seq, bytes_written, "WAL opened");
 
         Ok(Self {
-            file,
+            io,
             path,
             seq,
             bytes_written,
@@ -87,9 +92,7 @@ impl Wal {
         buf.extend_from_slice(value);
         buf.push(record_type);
 
-        self.file.seek(SeekFrom::End(0))?; // no append(true) mode; keep cursor pinned to end
-        self.file.write_all(&buf)?;
-        self.file.sync_all()?; // fsync for durability
+        self.io.append(&buf)?; // write + fsync via the active backend
         crate::metrics::Metrics::global()
             .wal_fsyncs_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -182,14 +185,7 @@ impl Wal {
 
     /// Truncate the WAL (after a successful flush to SSTable).
     pub fn truncate(&mut self) -> Result<()> {
-        use anyhow::Context;
-        self.file.set_len(0).context("truncating wal file")?;
-        self.file
-            .seek(SeekFrom::Start(0))
-            .context("seeking wal after truncate")?;
-        self.file
-            .sync_all()
-            .context("fsyncing wal after truncate")?;
+        self.io.truncate()?;
         self.bytes_written = 0;
         info!("WAL truncated");
         Ok(())

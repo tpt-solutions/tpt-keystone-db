@@ -118,11 +118,15 @@ impl Geometry {
                 tag(c.z.is_some(), c.t.is_some()),
                 coord_str(c)
             ),
+            Geometry::LineString(pts) if pts.is_empty() => "LINESTRING EMPTY".to_string(),
             Geometry::LineString(pts) => {
                 let has_z = pts.iter().any(|c| c.z.is_some());
                 let has_t = pts.iter().any(|c| c.t.is_some());
                 let body = pts.iter().map(coord_str).collect::<Vec<_>>().join(", ");
                 format!("LINESTRING{}({})", tag(has_z, has_t), body)
+            }
+            Geometry::Polygon(rings) if rings.is_empty() || rings[0].is_empty() => {
+                "POLYGON EMPTY".to_string()
             }
             Geometry::Polygon(rings) => {
                 let has_z = rings.iter().flatten().any(|c| c.z.is_some());
@@ -145,6 +149,17 @@ impl Geometry {
     pub fn from_wkt(s: &str) -> Result<Self> {
         let s = s.trim();
         let upper = s.to_uppercase();
+        // Standard OGC WKT "EMPTY" geometries. `POINT EMPTY` has no
+        // representation in this crate's `Geometry::Point(Coord)` model (a
+        // point always carries coordinates) — that case is a documented gap,
+        // not silently accepted. `LINESTRING EMPTY`/`POLYGON EMPTY` map
+        // cleanly onto an empty `Vec`, so those are supported.
+        if upper == "LINESTRING EMPTY" {
+            return Ok(Geometry::LineString(Vec::new()));
+        }
+        if upper == "POLYGON EMPTY" {
+            return Ok(Geometry::Polygon(Vec::new()));
+        }
         if let Some(rest) = strip_tag(&upper, s, "POINT") {
             let coords = parse_coord_list(rest)?;
             let c = coords
@@ -211,6 +226,9 @@ fn parse_coord_list(paren_wrapped: &str) -> Result<Vec<Coord>> {
 }
 
 fn parse_coord_list_body(inner: &str) -> Result<Vec<Coord>> {
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     inner
         .split(',')
         .map(|part| {

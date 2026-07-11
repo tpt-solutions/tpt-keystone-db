@@ -103,7 +103,7 @@ impl ObjectStore for std::sync::Arc<dyn ObjectStore> {
     }
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())

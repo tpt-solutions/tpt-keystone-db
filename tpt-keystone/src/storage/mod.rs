@@ -10,6 +10,7 @@ pub mod flux;
 pub mod guard;
 pub mod geo_index;
 pub mod graph_index;
+pub mod io_backend;
 pub mod ivf_pq_index;
 pub mod json_schema;
 pub mod jsonb;
@@ -121,6 +122,14 @@ pub enum ColumnType {
     /// so DDL/catalog introspection and the executor's vector-index
     /// backfill path can tell a `VECTOR` column apart from plain `TEXT`.
     Vector,
+    /// Meridian raster type — a single-band `f64` grid with a georeferenced
+    /// origin/pixel scale/SRID (`geo::raster::Raster`), stored as
+    /// `Value::Text` holding a hex-encoded hand-written binary encoding
+    /// (`Raster::to_hex`/`from_hex`) — the exact same "no new row-encoding
+    /// path, reuse `Value::Text`" precedent as `Geometry`'s WKB hex. Exists
+    /// as its own variant purely for DDL/catalog reporting, same reasoning
+    /// as `Geometry`/`Geography`.
+    Raster,
 }
 
 impl ColumnType {
@@ -147,6 +156,8 @@ impl ColumnType {
             // Same reasoning as Geometry: no real Postgres OID for a
             // pgvector-style VECTOR type in this from-scratch wire protocol.
             Self::Vector => oid::TEXT,
+            // Same reasoning as Geometry: no real Postgres raster OID here.
+            Self::Raster => oid::TEXT,
         }
     }
 
@@ -166,6 +177,7 @@ impl ColumnType {
             "geometry" | "point" => Some(Self::Geometry),
             "geography" => Some(Self::Geography),
             "vector" | "embedding" => Some(Self::Vector),
+            "raster" => Some(Self::Raster),
             _ => None,
         }
     }

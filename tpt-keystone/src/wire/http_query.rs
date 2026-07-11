@@ -139,6 +139,7 @@ fn column_type_name(ty: &crate::storage::ColumnType) -> &'static str {
         Geometry => "geometry",
         Geography => "geography",
         Vector => "vector",
+        Raster => "raster",
     }
 }
 

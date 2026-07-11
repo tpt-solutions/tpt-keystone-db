@@ -57,16 +57,7 @@ pub fn insert_copy_line(
     let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
     let pk_bytes = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
 
-    let mut value_buf = Vec::new();
-    for cell in &cells {
-        match cell {
-            Some(data) => {
-                value_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                value_buf.extend_from_slice(data);
-            }
-            None => value_buf.extend_from_slice(&(-1i32).to_be_bytes()),
-        }
-    }
+    let value_buf = super::dml::build_row_value(schema, &cells, db);
 
     db.write(table, &pk_bytes, &value_buf)?;
     Ok(())

@@ -254,3 +254,136 @@ fn geography_column_type_is_distinct_from_geometry() {
     let result = execute_query("SELECT ST_AsText(area) FROM zones", db.clone()).unwrap();
     assert_eq!(cell_text(&result.rows[0][0]), "POINT(-122.4194 37.7749)");
 }
+
+// --- Raster (Phase 6 "raster + vector unified storage model") ---
+
+#[test]
+fn raster_column_reports_its_own_catalog_type() {
+    let (db, _b, _l) = test_db();
+    execute_query("CREATE TABLE tiles (id INT4, tile RASTER)", db.clone()).unwrap();
+    let result = execute_query(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = 'tiles' AND column_name = 'tile'",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "raster");
+}
+
+#[test]
+fn raster_column_round_trips_through_makeemptyraster_and_value() {
+    let (db, _b, _l) = test_db();
+    execute_query("CREATE TABLE tiles (id INT4, tile RASTER)", db.clone()).unwrap();
+    execute_query(
+        "INSERT INTO tiles VALUES (1, ST_MakeEmptyRaster(3, 3, 0.0, 0.0, 1.0, 1.0, 4326))",
+        db.clone(),
+    )
+    .unwrap();
+
+    let result = execute_query(
+        "SELECT ST_Width(tile), ST_Height(tile), ST_Value(tile, 1, 1) FROM tiles WHERE id = 1",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "3");
+    assert_eq!(cell_text(&result.rows[0][1]), "3");
+    assert_eq!(cell_text(&result.rows[0][2]), "0");
+}
+
+#[test]
+fn st_setvalue_updates_a_single_cell() {
+    let (db, _b, _l) = test_db();
+    let made = execute_query(
+        "SELECT ST_SetValue(ST_MakeEmptyRaster(2, 2, 0.0, 0.0, 1.0, 1.0, 0), 0, 0, 99.5)",
+        db.clone(),
+    )
+    .unwrap();
+    let hex = cell_text(&made.rows[0][0]);
+
+    execute_query("CREATE TABLE tiles (id INT4, tile RASTER)", db.clone()).unwrap();
+    execute_query(
+        &format!("INSERT INTO tiles VALUES (1, '{hex}')"),
+        db.clone(),
+    )
+    .unwrap();
+
+    let result = execute_query(
+        "SELECT ST_Value(tile, 0, 0), ST_Value(tile, 1, 1) FROM tiles",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "99.5");
+    assert_eq!(cell_text(&result.rows[0][1]), "0");
+}
+
+#[test]
+fn st_asraster_rasterizes_a_polygon_into_filled_cells() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_Width(r), ST_Height(r), ST_Value(r, 0, 0) FROM (SELECT ST_AsRaster(ST_GeomFromText('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))'), 1.0, 1.0, 7.0) AS r) t",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "4");
+    assert_eq!(cell_text(&result.rows[0][1]), "4");
+    assert_eq!(cell_text(&result.rows[0][2]), "7");
+}
+
+// --- OGC Simple Features scalar functions added alongside the conformance
+// suite (`executor/ogc_conformance_tests.rs`) ---
+
+#[test]
+fn st_geometrytype_and_dimension_report_per_geometry_kind() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_GeometryType(ST_GeomFromText('POINT(1 2)')), ST_Dimension(ST_GeomFromText('POINT(1 2)')), \
+         ST_GeometryType(ST_GeomFromText('LINESTRING(0 0, 1 1)')), ST_Dimension(ST_GeomFromText('LINESTRING(0 0, 1 1)')), \
+         ST_GeometryType(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 0))')), ST_Dimension(ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 0))'))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "ST_Point");
+    assert_eq!(cell_text(&result.rows[0][1]), "0");
+    assert_eq!(cell_text(&result.rows[0][2]), "ST_LineString");
+    assert_eq!(cell_text(&result.rows[0][3]), "1");
+    assert_eq!(cell_text(&result.rows[0][4]), "ST_Polygon");
+    assert_eq!(cell_text(&result.rows[0][5]), "2");
+}
+
+#[test]
+fn st_envelope_returns_the_bounding_box_polygon() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_AsText(ST_Envelope(ST_GeomFromText('LINESTRING(0 0, 4 2)')))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        cell_text(&result.rows[0][0]),
+        "POLYGON((0 0, 4 0, 4 2, 0 2, 0 0))"
+    );
+}
+
+#[test]
+fn st_equals_is_exact_coordinate_equality() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_Equals(ST_GeomFromText('POINT(1 2)'), ST_GeomFromText('POINT(1 2)')), \
+         ST_Equals(ST_GeomFromText('POINT(1 2)'), ST_GeomFromText('POINT(3 4)'))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "t");
+    assert_eq!(cell_text(&result.rows[0][1]), "f");
+}
+
+#[test]
+fn st_isempty_distinguishes_empty_from_populated_geometries() {
+    let (db, _b, _l) = test_db();
+    let result = execute_query(
+        "SELECT ST_IsEmpty(ST_GeomFromText('LINESTRING EMPTY')), ST_IsEmpty(ST_GeomFromText('LINESTRING(0 0, 1 1)'))",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&result.rows[0][0]), "t");
+    assert_eq!(cell_text(&result.rows[0][1]), "f");
+}

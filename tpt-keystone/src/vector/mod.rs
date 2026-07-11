@@ -29,12 +29,22 @@
 //! Hybrid vector+BM25+SQL-filter search now exists (`hybrid_search` table
 //! function, `executor/graph_fn.rs`, backed by Canopy's BM25 `FtsIndex`).
 //!
-//! Explicitly NOT implemented (documented scope cuts, tracked in
+//! GPU offload for batch similarity is now implemented (`gpu`): a WGSL
+//! compute shader computes the full query×base distance matrix on the
+//! device, wired into `Database::vector_knn_query` as a fail-safe brute-force
+//! k-NN path for `vector_search`/`hybrid_search` when no HNSW/IVF-PQ index
+//! exists and a GPU adapter is available (same WGSL/`f32`/fail-safe discipline
+//! as Meridian's `geo::gpu`). This is the "CUDA/ROCm GPU offload" item from the
+//! roadmap, delivered via `wgpu` (Vulkan/Metal/DX12) rather than a vendor
+//! CUDA/ROCm backend — see `gpu`'s module docs for the honest portability note.
+//!
+//! Explicitly still NOT implemented (documented scope cuts, tracked in
 //! `TODO.md`): DiskANN (on-disk billion-scale graphs), scalar/binary
-//! quantization (only product quantization exists), consistent hashing for
-//! distributed shards, and CUDA/ROCm GPU offload. All are left unchecked in
-//! `TODO.md` rather than stubbed out and claimed done.
+//! quantization (only product quantization exists), and consistent hashing for
+//! distributed shards. All are left unchecked in `TODO.md` rather than stubbed
+//! out and claimed done.
 
+pub mod gpu;
 pub mod hnsw;
 pub mod ivf_pq;
 pub mod kmeans;

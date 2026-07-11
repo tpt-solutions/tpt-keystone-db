@@ -32,11 +32,14 @@
 //!   adapter in this dev environment; not verified on other vendors/drivers
 //!   or in a headless CI environment.
 //!
-//! Explicitly NOT implemented (documented scope cut, tracked in
-//! `TODO.md`): a unified raster+vector storage model. Left unchecked in
-//! `TODO.md` rather than stubbed out and claimed done.
+//! - `raster`: a single-band `f64` raster type sharing `Geometry`'s "hex text
+//!   via `Value::Text`" storage precedent, plus `ST_AsRaster` rasterization
+//!   built on the same `point_in_polygon` test vector queries already use —
+//!   see `raster`'s module docs for exact scope (single band, no image
+//!   import, no raster algebra).
 
 pub mod geometry;
 pub mod gpu;
 pub mod h3;
+pub mod raster;
 pub mod s2;

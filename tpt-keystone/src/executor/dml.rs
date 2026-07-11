@@ -10,6 +10,42 @@ use crate::sql::ast::Expr;
 use crate::storage::database::Database;
 use crate::storage::{ColumnType, StorageEngine, TableSchema};
 
+/// Serialize a schema-ordered row of wire-encoded cells into the length-
+/// prefixed on-disk row value. Each cell is `len(4) | bytes`, or `-1i32` for
+/// NULL. When `Database::jsonb_binary_storage()` is on, `Json` columns are
+/// re-encoded into Canopy's native binary jsonb format (`storage::jsonb`);
+/// otherwise cells are stored verbatim (raw JSON text). The read path
+/// (`executor::parse_rows`, `storage::database::decode_column`) is
+/// self-describing via `jsonb::CELL_MARKER`, so this choice is per-write.
+pub(super) fn build_row_value(
+    schema: &TableSchema,
+    cells: &[Option<Vec<u8>>],
+    db: &Database,
+) -> Vec<u8> {
+    let binary_json = db.jsonb_binary_storage();
+    let mut value_buf = Vec::new();
+    for (i, cell) in cells.iter().enumerate() {
+        match cell {
+            Some(data) => {
+                let is_json = schema
+                    .columns
+                    .get(i)
+                    .map(|c| matches!(c.col_type, ColumnType::Json))
+                    .unwrap_or(false);
+                let stored: std::borrow::Cow<[u8]> = if binary_json && is_json {
+                    std::borrow::Cow::Owned(crate::storage::jsonb::encode_cell(data))
+                } else {
+                    std::borrow::Cow::Borrowed(data.as_slice())
+                };
+                value_buf.extend_from_slice(&(stored.len() as u32).to_be_bytes());
+                value_buf.extend_from_slice(&stored);
+            }
+            None => value_buf.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    value_buf
+}
+
 /// Resolve one `VALUES (...)` row (positional or via an explicit column
 /// list) to a full-width, schema-ordered row of already wire-encoded cells,
 /// filling any column not mentioned in `insert_columns` from its DEFAULT
@@ -233,18 +269,7 @@ pub(super) fn execute_insert(
         let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
         let pk_value = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
 
-        let mut value_buf = Vec::new();
-        for cell in &cells {
-            match cell {
-                Some(data) => {
-                    value_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    value_buf.extend_from_slice(data);
-                }
-                None => {
-                    value_buf.extend_from_slice(&(-1i32).to_be_bytes());
-                }
-            }
-        }
+        let value_buf = build_row_value(&schema, &cells, &db);
 
         db.write(&insert.table, &pk_value, &value_buf)?;
         publish_cdc_event(
@@ -393,16 +418,7 @@ pub(super) fn execute_update(
         check_foreign_keys(&schema, &db, &new_row)?;
         check_json_schemas(&schema, &new_row)?;
 
-        let mut value_buf = Vec::new();
-        for cell in &new_row {
-            match cell {
-                Some(data) => {
-                    value_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    value_buf.extend_from_slice(data);
-                }
-                None => value_buf.extend_from_slice(&(-1i32).to_be_bytes()),
-            }
-        }
+        let value_buf = build_row_value(&schema, &new_row, &db);
         db.write(&update.table, &kv.key, &value_buf)?;
         publish_cdc_event(
             &db,

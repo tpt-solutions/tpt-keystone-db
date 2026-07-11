@@ -12,6 +12,7 @@ use crate::storage::config::NodeRole;
 use crate::storage::database::Database;
 use crate::storage::lease::LeaseManager;
 use crate::storage::objectstore::{LocalFsObjectStore, ObjectStore};
+use crate::storage::StorageEngine;
 
 fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
     let bucket = tempfile::tempdir().unwrap();
@@ -249,4 +250,77 @@ fn json_schema_off_mode_never_rejects() {
     .unwrap();
     let result = execute_query("SELECT id FROM loose", db.clone()).unwrap();
     assert_eq!(result.rows.len(), 1);
+}
+
+/// Phase 10: with native binary jsonb storage enabled, `Json` columns are
+/// stored in the compact binary format on disk but every JSON operator/index
+/// still works transparently (the read path decodes back to text). Also
+/// asserts the on-disk bytes really are binary (marker-prefixed), not text.
+#[test]
+fn jsonb_binary_storage_is_transparent_to_queries() {
+    let (db, _b, _l) = test_db();
+    db.set_jsonb_binary_storage(true);
+    make_docs_table(&db);
+
+    // Operators still resolve.
+    let name = execute_query(
+        "SELECT body -> 'user' ->> 'name' FROM docs WHERE id = 1",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&name.rows[0][0]), "Ada");
+
+    let city = execute_query(
+        "SELECT body #>> '{user,address,city}' FROM docs WHERE id = 2",
+        db.clone(),
+    )
+    .unwrap();
+    assert_eq!(cell_text(&city.rows[0][0]), "Auckland");
+
+    // Containment (@>) still works against binary-stored rows.
+    let contained = execute_query(
+        "SELECT id FROM docs WHERE body @> '{\"tags\":[\"beta\"]}' ORDER BY id",
+        db.clone(),
+    )
+    .unwrap();
+    let ids: Vec<String> = contained.rows.iter().map(|r| cell_text(&r[0])).collect();
+    assert_eq!(ids, vec!["1".to_string(), "3".to_string()]);
+
+    // A JSONPATH index over the binary-stored column still resolves.
+    execute_query(
+        "CREATE INDEX ON docs USING JSONPATH (body) WITH (path = 'user.address.city')",
+        db.clone(),
+    )
+    .unwrap();
+    let hits = execute_query(
+        "SELECT row_key FROM json_path_lookup('docs', 'body', 'Wellington') ORDER BY row_key",
+        db.clone(),
+    )
+    .unwrap();
+    let keys: Vec<String> = hits.rows.iter().map(|r| cell_text(&r[0])).collect();
+    assert_eq!(keys, vec!["1".to_string(), "3".to_string()]);
+
+    // The raw on-disk cell for the JSON column is genuinely binary, not text.
+    let raw = db.read("docs", b"1").unwrap().unwrap();
+    // Row layout: id cell (len4 + "1"), then body cell (len4 + bytes).
+    let id_len = i32::from_be_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let body_start = 4 + id_len + 4;
+    assert!(
+        crate::storage::jsonb::is_binary_cell(&raw[body_start..]),
+        "body column should be stored as native binary jsonb"
+    );
+}
+
+/// A row written in binary mode must still read back correctly after binary
+/// storage is turned off again (stored cells are self-describing).
+#[test]
+fn jsonb_binary_rows_readable_after_disabling() {
+    let (db, _b, _l) = test_db();
+    db.set_jsonb_binary_storage(true);
+    execute_query("CREATE TABLE d (id INT4, body JSON)", db.clone()).unwrap();
+    execute_query(r#"INSERT INTO d VALUES (1, '{"k":"v"}')"#, db.clone()).unwrap();
+
+    db.set_jsonb_binary_storage(false);
+    let got = execute_query("SELECT body ->> 'k' FROM d WHERE id = 1", db.clone()).unwrap();
+    assert_eq!(cell_text(&got.rows[0][0]), "v");
 }

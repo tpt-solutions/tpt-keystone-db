@@ -171,6 +171,10 @@ pub struct Database {
     stmt_cache: crate::sql::cache::StatementCache,
     /// Reader-node manifest-refresh health (Phase 12a staleness signal).
     reader_staleness: ReaderStaleness,
+    /// Whether `Json` columns are stored using Canopy's native binary jsonb
+    /// format (`storage::jsonb`) instead of raw JSON text. Off by default —
+    /// see `set_jsonb_binary_storage`. Read on every INSERT/UPDATE/COPY.
+    jsonb_binary: std::sync::atomic::AtomicBool,
 }
 
 impl Database {
@@ -424,12 +428,30 @@ impl Database {
             notify_bus,
             stmt_cache: crate::sql::cache::StatementCache::new(256),
             reader_staleness: ReaderStaleness::default(),
+            jsonb_binary: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// Get the transaction manager.
     pub fn tx_mgr(&self) -> &TransactionManager {
         &self.tx_mgr
+    }
+
+    /// Whether `Json` columns are stored using Canopy's native binary jsonb
+    /// format (`storage::jsonb`). See `set_jsonb_binary_storage`.
+    pub fn jsonb_binary_storage(&self) -> bool {
+        self.jsonb_binary.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enable/disable native binary jsonb storage for `Json` columns. Wired
+    /// from `TPT_JSONB_BINARY=1` in `main.rs`; also settable directly (used by
+    /// tests). Decoding is self-describing (a marker byte on each stored cell,
+    /// see `storage::jsonb::decode_cell`), so flipping this off later still
+    /// reads back rows previously written in binary form — only new writes are
+    /// affected.
+    pub fn set_jsonb_binary_storage(&self, enabled: bool) {
+        self.jsonb_binary
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the MVCC store.
@@ -1728,7 +1750,10 @@ impl Database {
                 }
                 (Some(hnsw), _) => hnsw.query_knn(query, k, ef_search),
                 (None, Some(ivf)) => ivf.query_knn(query, k, ef_search),
-                (None, None) => return None,
+                // No HNSW/IVF-PQ index: fall back to a GPU brute-force batch
+                // k-NN when an adapter is available (fails safe to `None`, the
+                // historical "no vector index" contract, when it isn't).
+                (None, None) => return self.gpu_vector_knn(table, column, query, k, ef_search),
             }
         };
         Some(
@@ -1738,6 +1763,72 @@ impl Database {
                         .ok()
                         .flatten()
                         .map(|v| (KeyValue { key: k, value: v }, dist))
+                })
+                .collect(),
+        )
+    }
+
+    /// GPU-accelerated brute-force k-NN fallback for `vector_knn_query`, used
+    /// when no HNSW/IVF-PQ index exists on `table.column`. Scans every row,
+    /// extracts its `VECTOR` cell into a flat `f32` base matrix, runs the
+    /// whole query×base distance matrix on the device, and returns the `k`
+    /// nearest by distance.
+    ///
+    /// Fails safe to `None` — exactly the historical "no vector index" contract
+    /// — whenever the GPU path is unavailable (`gpu_available()` is `false`),
+    /// any row fails to decode, dimensions mismatch, or the dispatch is refused
+    /// for being too large. So `vector_search`/`hybrid_search` keep erroring
+    /// exactly as they always did when no GPU is present. Metric defaults to
+    /// L2 (the HNSW default) since a bare `VECTOR` column carries no metric
+    /// metadata.
+    fn gpu_vector_knn(
+        &self,
+        table: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        _ef_search: Option<usize>,
+    ) -> Option<Vec<(KeyValue, f32)>> {
+        if !crate::vector::gpu::gpu_available() {
+            return None;
+        }
+        let dim = query.len();
+        if dim == 0 {
+            return None;
+        }
+        let schema = self.get_table(table).ok().flatten()?;
+        let col_pos = schema.columns.iter().position(|c| c.name == column)?;
+        if schema.columns[col_pos].col_type != ColumnType::Vector {
+            return None;
+        }
+
+        let rows = self.scan(table).ok()?;
+        if rows.is_empty() {
+            return None;
+        }
+
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(rows.len());
+        let mut base: Vec<f32> = Vec::with_capacity(rows.len() * dim);
+        for kv in &rows {
+            let text_bytes = decode_column(&kv.value, col_pos)?;
+            let text = String::from_utf8(text_bytes).ok()?;
+            let vector = crate::vector::vector::Vector::from_text(&text).ok()?;
+            if vector.dim() != dim {
+                return None;
+            }
+            keys.push(kv.key.clone());
+            base.extend_from_slice(vector.as_slice());
+        }
+
+        let hits = crate::vector::gpu::gpu_brute_force_knn(query, &base, dim, Metric::L2, k).ok()?;
+        Some(
+            hits.into_iter()
+                .filter_map(|(idx, dist)| {
+                    let key = &keys[idx as usize];
+                    self.read(table, key)
+                        .ok()
+                        .flatten()
+                        .map(|v| (KeyValue { key: key.clone(), value: v }, dist))
                 })
                 .collect(),
         )
@@ -2122,7 +2213,14 @@ fn decode_column(value: &[u8], idx: usize) -> Option<Vec<u8>> {
             return None;
         }
         if i == idx {
-            return Some(value[pos..end].to_vec());
+            let cell = &value[pos..end];
+            // If this cell was stored as native binary jsonb, hand callers
+            // (index maintenance, etc.) the decoded JSON text — the same shape
+            // the raw-text storage path produces.
+            if let Some(decoded) = super::jsonb::decode_cell(cell) {
+                return Some(decoded);
+            }
+            return Some(cell.to_vec());
         }
         pos = end;
         i += 1;

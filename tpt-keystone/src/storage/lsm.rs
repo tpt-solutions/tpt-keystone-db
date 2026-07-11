@@ -139,6 +139,16 @@ fn compaction_sstable_threshold() -> usize {
         .unwrap_or(DEFAULT_COMPACTION_SSTABLE_THRESHOLD)
 }
 
+/// `TPT_COMPACTION_SSTABLE_THRESHOLD` is process-global env state, but
+/// `cargo test` runs tests in parallel threads within the same process — any
+/// test that temporarily overrides it (here and in `storage::chaos_tests`)
+/// must hold this lock for the override's entire lifetime, or a concurrently
+/// running test reading the default threshold can observe the override (or
+/// vice versa), producing a flaky, seemingly-unrelated failure instead of a
+/// deterministic one.
+#[cfg(test)]
+pub(crate) static COMPACTION_THRESHOLD_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl LsmEngine {
     /// Open the engine. `local_dir` holds only the active WAL segment (a
     /// cache/staging area); `store` is the shared durable backend. `lease`
@@ -511,6 +521,7 @@ mod tests {
         let local = tempfile::tempdir().unwrap();
         let (mut engine, _store) = open_engine(bucket.path(), local.path());
 
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap();
         std::env::set_var("TPT_COMPACTION_SSTABLE_THRESHOLD", "3");
 
         force_flush(&mut engine, b"a", b"1");

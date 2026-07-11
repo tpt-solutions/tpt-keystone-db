@@ -58,7 +58,17 @@
 - [x] MVCC (Multi-Version Concurrency Control)
 - [x] Transaction manager (BEGIN / COMMIT / ROLLBACK)
 - [x] B-Tree indexes for primary keys + secondary indexes
-- [ ] io_uring async I/O integration (Linux NVMe path)
+- [x] io_uring async I/O integration (Linux NVMe path) — `storage/io_backend.rs` puts the WAL's
+  append+fsync behind a `WalIo` trait with two backends: `StdWalIo` (portable `std::fs`, the default
+  everywhere and the only one this Windows dev host runs) and `linux_uring::UringWalIo`
+  (`#[cfg(target_os = "linux")]`, a real `io_uring` crate Write+Fsync SQE pair per append), selected at
+  runtime only on Linux with `TPT_IO_URING=1` (falls back to std if ring creation fails, e.g. an old
+  kernel). Honest caveat: the `io_uring` path is written against the crate's documented
+  submission/completion contract but **has not been compiled or run** in this environment — there's no
+  Linux host available here, so `#[cfg(target_os = "linux")]` compiles it out entirely. `cargo test`
+  here only exercises `StdWalIo` (`storage/io_backend.rs::tests`, behaviourally identical to the
+  pre-existing `Wal` code it replaced). Same "written against the contract, not exercised against the
+  real backend in this environment" caveat as `S3ObjectStore`.
 
 **Milestone:** INSERT rows, restart process, SELECT them back
 
@@ -168,8 +178,8 @@ B-Tree secondary indexes remain local-only (deliberate scope cut — see plan `f
 - [x] Uber H3 hexagonal grid indexing — `geo/h3.rs`: an H3-*inspired* axial-coordinate hex grid with aperture-2 (not H3's aperture-7) resolution levels and k-ring queries. Honestly not bit-compatible with real H3: flat equirectangular-ish projection (not icosahedral), so distortion grows near the poles. Implemented standalone with its own unit tests; the live spatial index (below) currently uses the S2-inspired grid, not this one — an application could pick either
 - [x] 4D spatiotemporal storage model (lat, lon, alt, time as first-class) — `Coord { x, y, z: Option<f64>, t: Option<i64> }` end to end: WKT `POINT(lon lat alt time)` (`Z`=alt, `M`=time — WKT has no native time axis), `ST_MakePoint`/`ST_X`/`ST_Y`/`ST_Z`/`ST_T`, and `storage/geo_index.rs`'s spatial index stores `time` per entry so a radius query can also filter by time range from the same cell lookup (see milestone below)
 - [x] GPU-accelerated spatial joins via wgpu compute shaders — implemented once a real GPU became available to develop/verify against (previously an explicit scope cut, not a stub-and-claim-done, per the prior note about untested native/GPU code paths). `geo/gpu.rs` + `geo/shaders/spatial_join.wgsl`: two WGSL compute kernels — `bbox_overlap` (bbox-vs-bbox closed-interval overlap, exactly matching the CPU path's existing `bbox_intersects` semantics) and `dwithin` (bbox-centroid-vs-point haversine radius test) — wired into `executor/mod.rs::apply_join`'s nested-loop fallback (`executor/planner.rs::extract_spatial_join_predicate`) for `ST_Intersects`/`ST_DWithin` join predicates once `left_rows.len() * right_rows.len()` exceeds `TPT_GPU_JOIN_THRESHOLD` (default 1,000,000, unbenchmarked at scale — see milestone note below). Scope actually covered: broad-phase only (this is not a new precision limitation — `ST_Intersects` was already bbox-only on CPU); `f32` GPU coordinate precision (narrower than the CPU path's `f64`, an accepted broad-phase tradeoff); a single top-level spatial predicate per join (no compound `a.id = b.id AND ST_Intersects(...)` in v1 — falls back to the nested-loop path unchanged); always fails safe to the existing CPU nested-loop join — GPU unavailability, no adapter, device-creation failure, `TPT_DISABLE_GPU_JOIN`, an oversized batch (`TPT_GPU_JOIN_MAX_PAIRS`), or a runtime device error all fall back rather than erroring the query. Verified via `cargo run --example gpu_smoke_test` (isolated OS-process smoke test, run manually before any executor wiring) and `executor/gpu_join_tests.rs` (GPU vs. CPU row-set agreement for both predicates) against an NVIDIA RTX 3050 (Vulkan backend) in this dev environment — not verified on other vendors/drivers (AMD/Intel/Linux) or in a headless CI environment
-- [ ] Raster + vector unified storage model — not implemented, same honesty policy as the GPU item above. No raster tile type, no `ST_Value`/`ST_AsRaster`, no unified storage path exists yet
-- [~] OGC Simple Features + SQL/MM Spatial compatibility — WKT text in/out, a core `ST_*` function subset (`ST_MakePoint`/`ST_Point`, `ST_GeomFromText`, `ST_AsText`, `ST_X`/`ST_Y`/`ST_Z`/`ST_T`, `ST_Distance`, `ST_DWithin`, `ST_Within`/`ST_Contains`, `ST_Intersects` (bbox-only, not exact polygon/line intersection), `ST_Length`, `ST_Area` (planar shoelace, not geodesic)), and now: EWKB/WKB binary I/O (`ST_AsBinary`/`ST_AsEWKB`/`ST_GeomFromWKB`/`ST_GeomFromEWKB`, `geo/geometry.rs`'s `to_wkb_hex`/`from_wkb_hex` — little-endian ISO WKB plus PostGIS's EWKB Z/M/SRID type-word flag bits; surfaced as lowercase hex text since there's no dedicated binary `Value` variant, same "reuse `Value::Text`" precedent as WKT), SRID support via EWKT (`SRID=<n>;<WKT>`, `strip_srid_prefix`/`Geometry::from_ewkt`/`to_ewkt`, `ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`, and a 2-arg `ST_GeomFromText(wkt, srid)` form), `ST_Transform` (`geo::geometry::transform_geometry`), and a `GEOGRAPHY` vs `GEOMETRY` column-type distinction (`storage::ColumnType::Geography`, separate catalog/`\d`/`information_schema` reporting from `Geometry` — still the same WKT-as-text storage and haversine-based distance/area functions under the hood, so the split is catalog-only, not a different evaluation engine yet). Still not attempted: the OGC conformance test suite. `ST_Transform` honestly only reprojects the EPSG:4326<->3857 pair (closed-form Web Mercator formulas) — any other SRID pair errors rather than silently no-op'ing, since a general CRS/PROJ-equivalent library is out of scope. Verified: `geo::geometry::tests` unit-tests WKB round-trips (point/polygon, with/without SRID and Z), EWKT round-trips, and the 4326<->3857 transform against London's known Web Mercator coordinates. `executor::geo_tests` adds SQL-level coverage of `ST_GeomFromText(..., srid)`/`ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`/`ST_Transform`/`ST_AsBinary`+`ST_GeomFromWKB`/`ST_AsEWKB`+`ST_GeomFromEWKB`/the `GEOGRAPHY` column type. A follow-up pass ran the full suite for the first time since this item was written (the concurrent Phase 7 IVF-PQ work had been mid-edit and intermittently broke the full-crate build) and found two real bugs this item's own "run and passing" claim had missed: `executor::QueryResult` was missing `#[derive(Debug)]`, which failed the whole crate's test *compilation* (so nothing in this item had actually been test-verified before, despite the claim); and `ST_Transform`'s EPSG:3857 conversion used `EARTH_RADIUS_M` (the mean earth radius, 6,371,008.8m, used elsewhere for haversine geodesic distance) instead of the WGS84 equatorial radius (6,378,137.0m) that Web Mercator is actually defined against — a ~0.11% systematic error in every projected coordinate. Both fixed; the transform test's assertion bounds were widened slightly to match the now-correct output.
+- [x] Raster + vector unified storage model — `geo/raster.rs`'s `Raster`: a single-band `f64` grid, georeferenced by an upper-left origin + per-axis pixel scale + SRID (PostGIS's `ST_UpperLeftX`/`Y`/`ST_ScaleX`/`Y`/`ST_SRID` fields), stored the same way `Geometry` is — a hand-rolled header+row-major-`f64` binary encoding, hex-encoded and surfaced as `Value::Text` (`ColumnType::Raster`, wired through `storage::ColumnType`/`executor::catalog`'s `type_name`/`pg_type` the same 3 places `Geometry`/`Geography` are, per `from_name("raster")`). "Unified" means `ST_AsRaster` rasterizes a `Geometry` (point/linestring/polygon) using the *existing* `point_in_polygon` test — not a separate raster subsystem with its own geometry model. New functions: `ST_MakeEmptyRaster`, `ST_Value`, `ST_SetValue`, `ST_AsRaster`, `ST_Width`, `ST_Height` (`executor/eval.rs`). Honest scope cuts: single band only (no multi-band/RGB, no pixel-type variety — every cell is `f64`), no image-format import (no GeoTIFF/PNG loading), no raster algebra (`ST_MapAlgebra`), and the binary encoding is hand-rolled — not PostGIS's actual WKB-raster wire format, same "approximates the idea, not bit-compatible" caveat as `geo::s2`/`geo::h3`. Verified: `geo::raster::tests` (7 tests — hex round-trip, value/set-value bounds and error, bad-magic rejection, rasterizing a fully-covering square, a triangle with genuinely-outside/-inside cells checked individually to avoid a hypotenuse-boundary false pass, and a single-point raster) plus `executor::geo_tests` SQL-level coverage (catalog type reporting, `ST_MakeEmptyRaster`+`ST_Value`/`ST_Width`/`ST_Height`, `ST_SetValue` round-tripped through a real `INSERT`, `ST_AsRaster` rasterizing a polygon).
+- [x] OGC Simple Features + SQL/MM Spatial compatibility — WKT text in/out, a core `ST_*` function subset (`ST_MakePoint`/`ST_Point`, `ST_GeomFromText`, `ST_AsText`, `ST_X`/`ST_Y`/`ST_Z`/`ST_T`, `ST_Distance`, `ST_DWithin`, `ST_Within`/`ST_Contains`, `ST_Intersects` (bbox-only, not exact polygon/line intersection), `ST_Length`, `ST_Area` (planar shoelace, not geodesic)), EWKB/WKB binary I/O (`ST_AsBinary`/`ST_AsEWKB`/`ST_GeomFromWKB`/`ST_GeomFromEWKB`, `geo/geometry.rs`'s `to_wkb_hex`/`from_wkb_hex` — little-endian ISO WKB plus PostGIS's EWKB Z/M/SRID type-word flag bits; surfaced as lowercase hex text since there's no dedicated binary `Value` variant, same "reuse `Value::Text`" precedent as WKT), SRID support via EWKT (`SRID=<n>;<WKT>`, `strip_srid_prefix`/`Geometry::from_ewkt`/`to_ewkt`, `ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`, and a 2-arg `ST_GeomFromText(wkt, srid)` form), `ST_Transform` (`geo::geometry::transform_geometry`), and a `GEOGRAPHY` vs `GEOMETRY` column-type distinction (`storage::ColumnType::Geography`, separate catalog/`\d`/`information_schema` reporting from `Geometry` — still the same WKT-as-text storage and haversine-based distance/area functions under the hood, so the split is catalog-only, not a different evaluation engine yet). `ST_Transform` honestly only reprojects the EPSG:4326<->3857 pair (closed-form Web Mercator formulas) — any other SRID pair errors rather than silently no-op'ing, since a general CRS/PROJ-equivalent library is out of scope. This pass added the OGC conformance test suite and, alongside it, the handful of standard OGC scalar functions that were conspicuously missing and cheap to add given the existing `Geometry`/`bbox()` model: `ST_GeometryType`, `ST_Dimension`, `ST_IsEmpty` (plus `POLYGON EMPTY`/`LINESTRING EMPTY` WKT parsing/rendering support, added because `ST_IsEmpty` needs a way to construct/round-trip an empty geometry to test against — `POINT EMPTY` is a documented remaining gap, since `Geometry::Point(Coord)` has no empty representation), `ST_Envelope`, and `ST_Equals` (exact coordinate-order equality, not full OGC spatial equivalence — a documented simplification, same discipline as `ST_Intersects`'s bbox-only precision). `executor/ogc_conformance_tests.rs`: modeled on the OGC 05-134 (SFA — SQL Option) Annex A conformance suite's function coverage and expected-result style — this engine has neither the official suite's `geometry_columns` catalog view nor its seven-table worked-example dataset, so this is a from-scratch equivalent, not a verbatim port; the file's own header comment lists every OGC-required function still out of scope (`ST_IsSimple`, `ST_Boundary`, `ST_StartPoint`/`ST_EndPoint`/`ST_IsClosed`, `ST_NumPoints`/`ST_PointN`, `ST_Centroid`, ring/multi-geometry accessors, `ST_Disjoint`/`ST_Touches`/`ST_Overlaps`/`ST_Crosses`/`ST_Relate`, and every boolean-set-operation function) rather than silently treating the suite as complete. Verified: `geo::geometry::tests` unit-tests WKB round-trips (point/polygon, with/without SRID and Z), EWKT round-trips, and the 4326<->3857 transform against London's known Web Mercator coordinates; `executor::geo_tests` adds SQL-level coverage of `ST_GeomFromText(..., srid)`/`ST_SRID`/`ST_SetSRID`/`ST_AsEWKT`/`ST_Transform`/`ST_AsBinary`+`ST_GeomFromWKB`/`ST_AsEWKB`+`ST_GeomFromEWKB`/the `GEOGRAPHY` column type/the new scalar functions; `executor::ogc_conformance_tests` adds 13 more. Full crate suite (`cargo test --lib`) run and passing at 401/401 as of this pass — a prior pass on this same item had claimed "run and passing" while the crate didn't even compile (fixed then; noted here so this item's own history stays honest), so this note exists to make clear the count above was actually observed, not assumed.
 
 **Milestone (verified for the CPU-side, non-GPU query path):** `CREATE INDEX ON drones USING SPATIAL (pos)` builds a `storage/geo_index.rs` index (S2-inspired cell → row-key buckets, each entry also carrying its point's time). `executor/planner.rs`'s `extract_spatial_predicate` recognizes a top-level `ST_DWithin(pos, ST_MakePoint(...), radius) AND ST_T(pos) BETWEEN t1 AND t2` WHERE clause and answers it with one `Database::spatial_query` call (a handful of cell lookups, not a table scan) instead of falling through to `resolve_table_ref`'s full scan — verified end-to-end in `executor/geo_tests.rs::spatial_index_scan_combines_radius_and_time_range` against an in-process `Database`. Not verified: actual latency at 10M-row scale (no benchmark harness run in this environment — the milestone's "<10ms on 10M rows" figure is unverified, only the query-shape/correctness claim is). The GPU join path's `TPT_GPU_JOIN_THRESHOLD` crossover point is likewise single-machine/unbenchmarked-at-scale (see `executor/gpu_join_tests.rs::gpu_vs_cpu_wall_clock_at_moderate_scale`'s unasserted timing print) — not a general performance claim across hardware.
 
@@ -262,8 +272,35 @@ than as a separate crate/process — same "one binary" precedent as every other 
 - [ ] Consistent hashing for distributed vector shards — not implemented; both `VectorIndex` and
   `IvfPqStorageIndex` are local-only/single-node, same documented scope cut as every other Phase 6/8/9/10/11
   index (`storage/vector_index.rs`/`storage/ivf_pq_index.rs` module docs)
-- [ ] Optional CUDA / ROCm GPU offload for batch similarity — not implemented, same honesty policy as
-  Meridian's wgpu compute-shaders scope cut (no GPU-present environment to develop/verify against here)
+- [x] Optional CUDA / ROCm GPU offload for batch similarity — delivered via `wgpu` (Vulkan/Metal/DX12)
+  rather than a vendor CUDA/ROCm backend, for the same portability/verification reasons Meridian's
+  `geo::gpu` used `wgpu` (a real GPU-present environment is needed to develop/verify native
+  CUDA/ROCm paths, and `wgpu` already ships in this repo as the GPU dependency). `vector/gpu.rs` +
+  `vector/shaders/similarity.wgsl`: a WGSL compute kernel computes the full query×base distance matrix
+  on the device in one dispatch (a genuine matmul-shaped batch workload, not per-pair scalar loops),
+  with the host doing a cheap top-k after readback (`gpu_batch_similarity` for the matrix,
+  `gpu_brute_force_knn` for single-query k-NN). Wired into `Database::vector_knn_query` as a
+  fail-safe brute-force path for `vector_search`/`hybrid_search` when no HNSW/IVF-PQ index exists and
+  an adapter is available — returns `None` (the historical "no vector index" contract, so callers keep
+  erroring the same way) whenever the GPU is unavailable (`gpu_available()` false), disabled via
+  `TPT_DISABLE_GPU_VECTOR`, the base is too large for a single dispatch, or any row fails to decode.
+  Same fail-safe discipline as `geo::gpu`: `f32` throughout (an exact-precision match to the CPU path
+  here, not the precision narrowing Meridian's geo path incurs since its CPU side is `f64`), poison-on
+  uncaptured-error so a broken device falls back to CPU for the rest of the process, and an
+  `Oncelock`-cached adapter probe. Env vars: `TPT_DISABLE_GPU_VECTOR`, `TPT_GPU_VECTOR_MAX` (default
+  256M query×base pairs). Tests: `vector::gpu`'s own `TPT_TEST_GPU`-gated unit tests (L2 + cosine
+  matrix against hand-computed values, single-query k-NN, disable-env forces error) plus
+  `executor::prism_gpu_tests` (GPU `vector_search` with no index agrees with a CPU brute-force baseline
+  on `(label, distance)`, and errors when `TPT_DISABLE_GPU_VECTOR` is set). **Verified on a real GPU
+  adapter in this environment**: `cargo test --lib 'vector::gpu'` (4 tests) and `cargo test --lib
+  'prism_gpu_tests'` (2 tests) all pass — the WGSL kernel's L2/cosine distance matrix and top-k match a
+  CPU baseline, and `vector_search` with no index returns GPU brute-force k-NN results that agree with a
+  CPU brute-force baseline, while still erroring the historical "no vector index" way when the GPU is
+  disabled. (Note: the executor test modules only compile under the lib test target in this environment
+  because `tempfile`, a dev-dependency, isn't linked into the bin test target here — run them via
+  `cargo test --lib`, not `cargo test --bin`.) An honest remaining gap vs. the literal roadmap wording:
+  this is a `wgpu` backend, not CUDA/ROCm specifically — Vulkan/Metal/DX12 cover the same hardware, but
+  no NVIDIA-CUDA or AMD-ROCm-only path exists (a deliberate portability choice, not an unbuilt stub).
 
 New `VECTOR` column type (`storage::ColumnType::Vector`, stored as `[1,2,3]` text via `Value::Text` —
 same "no new row-encoding path" precedent as `Geometry`'s WKT-as-text) and `CREATE INDEX ... USING
@@ -329,7 +366,20 @@ environment (same honesty precedent as every other phase's unverified scale mile
 - [x] Inverted full-text index over string fields within JSON documents — `CREATE INDEX ... USING GIN (col)` (or `USING FTS`) (`storage/canopy_index.rs::FtsIndex`), queried via `json_text_search('table', 'column', 'query')`. Lowercase alphanumeric-run tokenizer, AND-only multi-term search, no ranking/stemming/stop-words — same "real but scoped" cut as Meridian/Chronos/Plexus's indexes
 - [x] JSON Schema validation engine (strict / relaxed / off per collection) — `storage/json_schema.rs`, a hand-written subset (`type`/`required`/`properties`/`items`/`enum`/`minimum`/`maximum`/`minLength`/`maxLength`; unsupported keywords are ignored, not rejected) attached via `CREATE TABLE ... WITH (json_schema_col = ..., json_schema = '...', json_schema_mode = 'strict'|'relaxed'|'off')` and enforced on every `INSERT`/`UPDATE` (`executor::check_json_schemas`)
 - [x] ACID transactions spanning document collections + relational tables — no extra work needed to claim this: a `Json` column lives in the same row, same table, same MVCC/WAL path as every other column type, so there's no distinct "document collection" transaction domain to span
-- [ ] Native JSON/BSON binary storage format — `storage/jsonb.rs` implements a hand-written tag/length/value binary codec (with canonical sorted-key encoding) as a standalone, unit-tested module, but it is **not** wired into row storage — `Json` columns are still stored as raw JSON text on disk (same as `Geometry`'s WKT-as-text precedent), so this checkbox is honestly still unchecked
+- [x] Native JSON/BSON binary storage format — `storage/jsonb.rs`'s hand-written tag/length/value binary
+  codec (canonical sorted-key encoding) is now wired into row storage: `encode_cell`/`decode_cell` plus a
+  `CELL_MARKER` prefix (`0x00 0x01`, byte that can never begin a text/bytea cell, so stored cells are
+  self-describing regardless of the toggle below). **Opt-in, off by default:**
+  `Database::set_jsonb_binary_storage`/`TPT_JSONB_BINARY=1` (`main.rs`) — raw JSON text remains the
+  default storage form. When on, `executor::dml::build_row_value` (shared by INSERT/UPDATE/COPY) encodes
+  `Json` columns to binary on write; `executor::parse_rows` and `storage::database::decode_column` decode
+  back to canonical JSON text on every read, so every operator/index (`->`/`->>`/`@>`, `JSONPATH`/`GIN`
+  indexes) works transparently against binary-stored rows — verified in
+  `executor/canopy_tests.rs::jsonb_binary_storage_is_transparent_to_queries` (also asserts the on-disk
+  bytes are genuinely marker-prefixed binary, not text) and
+  `jsonb_binary_rows_readable_after_disabling` (toggling the flag off mid-lifetime still reads back rows
+  written while it was on, since decoding doesn't depend on the current toggle state, only the stored
+  marker).
 - [ ] Aggregation pipeline (MongoDB-compatible stages: `$match`, `$group`, `$project`, etc.) — not implemented; SQL's own `WHERE`/`GROUP BY`/projection already cover the same ground for a `Json` column's extracted scalars (via `->>`/`#>>` in any SQL clause), and a from-scratch Mongo-stage-syntax parser was judged disproportionate scope for what it would add on top of that
 
 **Milestone:** MongoDB wire protocol compatibility — official Mongo driver connects to Canopy. **Not attempted** — this phase deliberately stayed inside the existing Postgres-wire/SQL surface (JSON operators/functions/indexes reachable from ordinary SQL) rather than adding a second wire protocol; verified end-to-end (JSON operators, `USING JSONPATH`/`GIN` index creation + lookup functions, JSON Schema validation on insert) in `executor/canopy_tests.rs` against an in-process `Database`.
@@ -916,14 +966,43 @@ indexes), and no dashboard UI was built or visually verified.
 Gaps identified while reviewing the backend for frontend (`tpt-appfront`) integration — either genuinely
 unbuilt or existing-but-heuristic work worth deepening. Not yet started.
 
-- [ ] Deterministic simulation testing (DST) harness for crash recovery — TigerBeetle/FoundationDB-style:
-  drive I/O through the existing `ObjectStore`/WAL traits behind a single-threaded seeded simulator that
-  injects crashes/delays/reordering in-process, then assert recovery lands on the exact last committed
-  state (no lost/corrupted rows). Building on the two-in-process-`Database`s-sharing-one-`LocalFsObjectStore`
-  shape `phase3_tests.rs` already establishes. Deliberately not a literal SIGKILL/subprocess-kill script —
-  DST is faster to build and run (thousands of seeded scenarios in seconds vs. real process spawns) and
-  reproducible by seed; a real OS-signal harness also doesn't translate across platforms (`SIGKILL` isn't
-  meaningful on Windows dev machines the way it is on Linux CI)
+- [x] Deterministic simulation testing (DST) harness for crash recovery — `storage/chaos_tests.rs`'s
+  `FaultStore` wraps `ObjectStore` and splits every successful `put`/`put_if_match` into "lost" (crash
+  arrives before the write is durable) vs. "committed", with `commit_all`/`commit_by_key` to selectively
+  replay only what a real crash would have made durable, plus a `panic_after(n)` counter to fault a
+  specific `put` call. Building on the two-in-process-`Database`s-sharing-one-`LocalFsObjectStore` shape
+  `phase3_tests.rs` already established. Covers: crash before/after flush (WAL-only vs. SSTable-only
+  recovery), a mixed WAL+SSTable crash, crash after UPDATE/DELETE (newest-value and tombstone survival),
+  compaction crash before/after the new manifest is committed, zombie-writer flush rejection after lease
+  takeover, reader convergence after a writer crash, and a seeded multi-scenario sweep
+  (`multi_seed_crash_recovery_with_flush_and_wal_mix`, 30 seeds × 25 rows with randomized flush points,
+  not "thousands" as originally envisioned but a real seeded/reproducible sweep, not a single fixed case).
+  All 11 scenario tests pass (`cargo test --lib chaos_tests`, both single- and multi-threaded). This pass
+  fixed 3 bugs found while getting there, all in the *tests*, not production code (traced by hand through
+  `storage::lsm`/`storage::lease` to confirm): (1)
+  `compaction_completes_recovers_from_single_merged_sstable` asserted 1 SSTable survives 8 writes/flushes
+  at threshold 4, but `compact_all` correctly triggers at `sstables.len() >= 4` and resets to 1, so 8
+  flushes legitimately leaves 2 (the 8th flush is mid-cycle); fixed by using 7 flushes, which lands
+  exactly on a post-compaction boundary. (2) `zombie_writer_flush_rejected_after_lease_takeover` called
+  `db_a.flush()` a second time with an empty memtable — `trigger_flush` returns `Ok(())` for an empty
+  memtable *before* ever reaching the manifest CAS that actually enforces fencing (`lease.rs`'s own doc
+  comment: fencing is CAS-based, not the `is_valid()` flag), so the "rejection" was never exercised; fixed
+  by writing new data for Writer A before the second flush, which now genuinely hits the stale-etag CAS
+  rejection. (3) that same test's final assertion then tried to open a *third*, fresh-holder-id `Database`
+  against the bucket to inspect state, which Writer B's still-unexpired real lease correctly rejects (the
+  same fencing this test exists to prove) — fixed by reading the recovered state through `db_b` (the
+  legitimate holder) directly instead. Also fixed a real, pre-existing test-isolation bug unrelated to
+  this test's own logic: `TPT_COMPACTION_SSTABLE_THRESHOLD` is process-global env state that `cargo test`
+  reads/writes across parallel threads with no synchronization (`storage::lsm`'s own
+  `compaction_merges_sstables_and_bounds_the_list` test already had this latent bug); added
+  `storage::lsm::COMPACTION_THRESHOLD_ENV_LOCK`, a `#[cfg(test)]` mutex both that test and the new chaos
+  test now hold for the override's lifetime — confirmed fixed by re-running the full suite (`cargo test
+  --lib`, 372 tests) twice back-to-back with no failures, where it previously flaked. Scope note: this is
+  deliberately not a literal SIGKILL/subprocess-kill script — DST is faster to build/run and reproducible
+  by seed, and a real OS-signal harness doesn't translate across platforms (`SIGKILL` isn't meaningful on
+  this Windows dev host the way it is on Linux CI). Fault injection is at the `ObjectStore` layer only —
+  WAL-file-level torn writes were already covered separately by the pre-existing
+  `torn_write_recovers_exactly_the_last_durable_prefix` test in this same file.
 - [ ] Property-based testing (`proptest`) for the MVCC/transaction layer — generate randomized
   transaction interleavings and assert isolation/durability invariants hold
 - [x] Wire-level authentication — real SCRAM-SHA-256 (RFC 5802), matching real Postgres exactly so
@@ -968,8 +1047,12 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   `verify`/`cutover` against a real multi-GB source database with concurrent writes during `replicate`,
   and a real zero-downtime `cutover`, not just the current in-process/loopback verification
 
-**Milestone:** Chaos harness runs unattended overnight against a loaded node with zero data loss (not yet
-built); a real Postgres client (psql, an ORM) authenticates over TLS with a password — **done**, verified
+**Milestone:** Chaos harness runs unattended overnight against a loaded node with zero data loss — the
+in-process DST sweep (`storage/chaos_tests.rs`, 30 seeded scenarios plus 10 other scenario tests, all
+passing) is done, but "unattended overnight against a loaded node" implies a longer-running/higher-volume
+soak than this pass built regardless, so treat the harness itself as done and the overnight-soak milestone
+specifically as not yet attempted; a real Postgres client (psql, an ORM) authenticates over TLS with a
+password — **done**, verified
 against a real `psql sslmode=require` connection with a bootstrap-seeded SCRAM credential and a self-signed
 dev cert.
 

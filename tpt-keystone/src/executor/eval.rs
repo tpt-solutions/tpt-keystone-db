@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::geo::geometry::{Coord, Geometry};
+use crate::geo::raster::Raster;
 use crate::sql::ast::{BinOp, Expr, InList, Literal, UnOp};
 use crate::storage::database::Database;
 use crate::storage::TableSchema;
@@ -576,6 +577,16 @@ impl RowContext {
         }
     }
 
+    /// Evaluates `expr` and parses it as hex-encoded raster bytes — same
+    /// "no new `Value` variant, reuse `Value::Text`" precedent as
+    /// `eval_geom`/WKB (see `storage::ColumnType::Raster`'s doc comment).
+    fn eval_raster(&self, expr: &Expr) -> anyhow::Result<Raster> {
+        match self.eval(expr)? {
+            Value::Text(s) => Raster::from_hex(&s),
+            other => anyhow::bail!("expected raster (hex text), got {}", other.type_name()),
+        }
+    }
+
     /// Evaluates `expr` and parses it as `[1.0,2.0,...]` vector literal text
     /// — same "no new `Value` variant, reuse `Value::Text`" precedent as
     /// `eval_geom`/WKT (see `storage::ColumnType::Vector`'s doc comment).
@@ -950,6 +961,158 @@ impl RowContext {
                     sum += last.x * first.y - first.x * last.y;
                 }
                 Ok(Value::Float((sum / 2.0).abs()))
+            }
+            // --- OGC Simple Features scalar functions not previously wired
+            // (added while building the OGC conformance test suite, see
+            // `executor/ogc_conformance_tests.rs`).
+            "st_geometrytype" => {
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_geometrytype() requires 1 argument"))?,
+                )?;
+                Ok(Value::Text(
+                    match geom {
+                        Geometry::Point(_) => "ST_Point",
+                        Geometry::LineString(_) => "ST_LineString",
+                        Geometry::Polygon(_) => "ST_Polygon",
+                    }
+                    .to_string(),
+                ))
+            }
+            // 0 for a point, 1 for a curve/line, 2 for a surface/polygon —
+            // the OGC SFA topological dimension of the geometry's type
+            // (not the coordinate dimension `Z`/`M` adds).
+            "st_dimension" => {
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_dimension() requires 1 argument"))?,
+                )?;
+                Ok(Value::Int(match geom {
+                    Geometry::Point(_) => 0,
+                    Geometry::LineString(_) => 1,
+                    Geometry::Polygon(_) => 2,
+                }))
+            }
+            // True for a LINESTRING with no points or a POLYGON with no
+            // rings. A POINT is never empty in this model (`Coord` always
+            // carries x/y) — matches the OGC spec's own allowance that
+            // emptiness is type-dependent.
+            "st_isempty" => {
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_isempty() requires 1 argument"))?,
+                )?;
+                Ok(Value::Bool(match &geom {
+                    Geometry::Point(_) => false,
+                    Geometry::LineString(pts) => pts.is_empty(),
+                    Geometry::Polygon(rings) => rings.is_empty() || rings[0].is_empty(),
+                }))
+            }
+            // The geometry's bounding box, returned as a closed WKT POLYGON
+            // (matches PostGIS's `ST_Envelope`) built from the existing
+            // `Geometry::bbox`/`BBox`.
+            "st_envelope" => {
+                let geom = self.eval_geom(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_envelope() requires 1 argument"))?,
+                )?;
+                let b = geom.bbox();
+                let ring = vec![
+                    Coord::xy(b.min_x, b.min_y),
+                    Coord::xy(b.max_x, b.min_y),
+                    Coord::xy(b.max_x, b.max_y),
+                    Coord::xy(b.min_x, b.max_y),
+                    Coord::xy(b.min_x, b.min_y),
+                ];
+                Ok(Value::Text(Geometry::Polygon(vec![ring]).to_wkt()))
+            }
+            // Exact coordinate-sequence equality, not full OGC spatial
+            // equivalence (PostGIS's `ST_Equals` treats two polygons with the
+            // same shape but different ring-start-vertex/winding as equal;
+            // this doesn't) — a documented simplification, same discipline as
+            // `ST_Intersects`'s bbox-only precision.
+            "st_equals" => {
+                if args.len() != 2 {
+                    anyhow::bail!("st_equals() requires 2 arguments");
+                }
+                let a = self.eval_geom(&args[0])?;
+                let b = self.eval_geom(&args[1])?;
+                Ok(Value::Bool(a == b))
+            }
+            // --- Raster (`geo::raster::Raster`) — see that module's doc
+            // comment for exact scope (single f64 band, hex-text storage).
+            "st_makeemptyraster" => {
+                if args.len() != 6 && args.len() != 7 {
+                    anyhow::bail!(
+                        "st_makeemptyraster() requires 6-7 arguments (width, height, upperleftx, upperlefty, scalex, scaley, [srid])"
+                    );
+                }
+                let width = self.eval(&args[0])?.as_f64()? as u32;
+                let height = self.eval(&args[1])?.as_f64()? as u32;
+                let ulx = self.eval(&args[2])?.as_f64()?;
+                let uly = self.eval(&args[3])?.as_f64()?;
+                let sx = self.eval(&args[4])?.as_f64()?;
+                let sy = self.eval(&args[5])?.as_f64()?;
+                let srid = match args.get(6) {
+                    Some(e) => self.eval(e)?.as_f64()? as i32,
+                    None => 0,
+                };
+                Ok(Value::Text(
+                    Raster::new_empty(width, height, ulx, uly, sx, sy, srid).to_hex(),
+                ))
+            }
+            "st_value" => {
+                if args.len() != 3 {
+                    anyhow::bail!("st_value() requires 3 arguments (raster, x, y)");
+                }
+                let r = self.eval_raster(&args[0])?;
+                let x = self.eval(&args[1])?.as_f64()? as u32;
+                let y = self.eval(&args[2])?.as_f64()? as u32;
+                Ok(r.value(x, y).map(Value::Float).unwrap_or(Value::Null))
+            }
+            "st_setvalue" => {
+                if args.len() != 4 {
+                    anyhow::bail!("st_setvalue() requires 4 arguments (raster, x, y, value)");
+                }
+                let mut r = self.eval_raster(&args[0])?;
+                let x = self.eval(&args[1])?.as_f64()? as u32;
+                let y = self.eval(&args[2])?.as_f64()? as u32;
+                let v = self.eval(&args[3])?.as_f64()?;
+                r.set_value(x, y, v)?;
+                Ok(Value::Text(r.to_hex()))
+            }
+            "st_width" => Ok(Value::Int(
+                self.eval_raster(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_width() requires 1 argument"))?,
+                )?
+                .width as i64,
+            )),
+            "st_height" => Ok(Value::Int(
+                self.eval_raster(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("st_height() requires 1 argument"))?,
+                )?
+                .height as i64,
+            )),
+            // Rasterizes a geometry (point/linestring/polygon) into a new
+            // raster at the given pixel scale — see `Raster::rasterize`.
+            "st_asraster" => {
+                if args.len() < 3 || args.len() > 4 {
+                    anyhow::bail!(
+                        "st_asraster() requires 3-4 arguments (geom, scalex, scaley, [value])"
+                    );
+                }
+                let (geom, srid) = self.eval_geom_srid(&args[0])?;
+                let scale_x = self.eval(&args[1])?.as_f64()?;
+                let scale_y = self.eval(&args[2])?.as_f64()?;
+                let value = match args.get(3) {
+                    Some(e) => self.eval(e)?.as_f64()?,
+                    None => 1.0,
+                };
+                let raster =
+                    Raster::rasterize(&geom, scale_x, scale_y, value, srid.unwrap_or(0))?;
+                Ok(Value::Text(raster.to_hex()))
             }
             // Prism: vector distance/similarity scalar functions (`3prismspec.txt`).
             // Vectors are `Value::Text` holding `"[1.0,2.0,...]"`, same

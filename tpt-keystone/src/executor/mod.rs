@@ -18,6 +18,8 @@ mod join;
 #[cfg(test)]
 mod mirror_tests;
 #[cfg(test)]
+mod ogc_conformance_tests;
+#[cfg(test)]
 mod pg_dump_tests;
 #[cfg(test)]
 mod phase4_tests;
@@ -25,6 +27,7 @@ mod planner;
 #[cfg(test)]
 mod plexus_tests;
 #[cfg(test)]
+mod prism_gpu_tests;
 mod prism_tests;
 mod select;
 mod stats;
@@ -467,7 +470,16 @@ fn parse_rows(
             } else {
                 let end = pos + len as usize;
                 if end <= data.len() {
-                    row.push(Some(data[pos..end].to_vec()));
+                    let cell = &data[pos..end];
+                    // Native-binary jsonb cells (Phase 10 storage format) are
+                    // self-describing via a marker prefix; decode them back to
+                    // canonical JSON text so everything downstream (projection,
+                    // WHERE, ->/->>/@> operators) sees text, unchanged. Raw
+                    // text cells pass through untouched.
+                    match crate::storage::jsonb::decode_cell(cell) {
+                        Some(text) => row.push(Some(text)),
+                        None => row.push(Some(cell.to_vec())),
+                    }
                     pos = end;
                 } else {
                     row.push(None);
