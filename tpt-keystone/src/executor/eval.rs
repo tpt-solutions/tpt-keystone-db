@@ -8,7 +8,7 @@ use crate::storage::database::Database;
 use crate::storage::{StorageEngine, TableSchema};
 
 /// A typed runtime value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -1906,6 +1906,7 @@ fn cast_value(v: Value, ty: &str) -> anyhow::Result<Value> {
             Value::Text(s) => Ok(Value::Int(s.trim().parse()?)),
             Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
             Value::Null => Ok(Value::Null),
+            _ => anyhow::bail!("cannot cast {} to int", v.type_name()),
         },
         "float" | "float8" | "real" | "double" | "double precision" | "numeric" => match &v {
             Value::Float(f) => Ok(Value::Float(*f)),

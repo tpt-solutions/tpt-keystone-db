@@ -284,3 +284,71 @@ fn encodes_copy_data_and_copy_done() {
     assert_eq!(tag, b'c');
     assert!(body.is_empty());
 }
+
+// --- Binary result-format encoding (extended query protocol) ---
+
+#[test]
+fn supports_binary_covers_fixed_width_and_text_types() {
+    for t in [
+        oid::INT8,
+        oid::INT4,
+        oid::INT2,
+        oid::FLOAT8,
+        oid::FLOAT4,
+        oid::BOOL,
+        oid::TEXT,
+        oid::BYTEA,
+    ] {
+        assert!(supports_binary(t), "expected {t} to support binary");
+    }
+    // JSON (114), timestamp (1114), and an unknown OID are text-only.
+    assert!(!supports_binary(114));
+    assert!(!supports_binary(1114));
+    assert!(!supports_binary(999_999));
+}
+
+#[test]
+fn text_to_binary_integers_are_big_endian() {
+    assert_eq!(
+        text_cell_to_binary(b"1", oid::INT8).unwrap(),
+        1i64.to_be_bytes()
+    );
+    assert_eq!(
+        text_cell_to_binary(b"-42", oid::INT4).unwrap(),
+        (-42i32).to_be_bytes()
+    );
+    assert_eq!(
+        text_cell_to_binary(b"300", oid::INT2).unwrap(),
+        300i16.to_be_bytes()
+    );
+}
+
+#[test]
+fn text_to_binary_floats_roundtrip_bits() {
+    let f8 = text_cell_to_binary(b"3.5", oid::FLOAT8).unwrap();
+    assert_eq!(f64::from_be_bytes(f8.try_into().unwrap()), 3.5);
+
+    let f4 = text_cell_to_binary(b"1.25", oid::FLOAT4).unwrap();
+    assert_eq!(f32::from_be_bytes(f4.try_into().unwrap()), 1.25);
+}
+
+#[test]
+fn text_to_binary_bool_and_bytea() {
+    assert_eq!(text_cell_to_binary(b"t", oid::BOOL).unwrap(), vec![1]);
+    assert_eq!(text_cell_to_binary(b"f", oid::BOOL).unwrap(), vec![0]);
+    // Bytea text form is `\x`-prefixed hex; binary form is the raw bytes.
+    assert_eq!(
+        text_cell_to_binary(b"\\xdeadbeef", oid::BYTEA).unwrap(),
+        vec![0xde, 0xad, 0xbe, 0xef]
+    );
+    // Binary `text` is just the raw UTF-8 bytes.
+    assert_eq!(text_cell_to_binary(b"hi", oid::TEXT).unwrap(), b"hi".to_vec());
+}
+
+#[test]
+fn text_to_binary_rejects_unparsable_or_unsupported() {
+    assert!(text_cell_to_binary(b"not-an-int", oid::INT8).is_none());
+    assert!(text_cell_to_binary(b"maybe", oid::BOOL).is_none());
+    // JSON isn't binary-encodable here.
+    assert!(text_cell_to_binary(b"{}", 114).is_none());
+}

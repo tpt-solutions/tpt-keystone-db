@@ -1,0 +1,13 @@
+name: tpt_sdk
+description: >
+  TPT SDK for Flutter / Dart — client for TPT Keystone's Canvas HTTP/JSON
+  query bridge and Flux WebSocket stream, with offline-first caching for
+  Android and iOS apps (Phase 14).
+version: 0.1.0
+repository: https://github.com/Kilo-Org/tpt-keystone-db
+license: Apache-2.0
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+dependencies: {}
+dev_dependencies:
+  test: ^1.24.0

@@ -35,6 +35,12 @@ struct PreparedStmt {
 struct Portal {
     stmt: Stmt,
     params: Vec<Value>,
+    /// The client's requested result-column wire formats from `Bind`
+    /// (0 = text, 1 = binary). Postgres semantics: an empty list means all
+    /// text, a single entry applies to every column, otherwise it's one code
+    /// per column. Resolved against each column's actual type at `Execute`/
+    /// `Describe` time via `resolve_result_formats`.
+    result_formats: Vec<i16>,
 }
 
 /// Per-connection extended query protocol state.
@@ -278,7 +284,7 @@ async fn run_query_loop(
                 stmt,
                 params,
                 param_formats,
-                ..
+                result_formats,
             } => {
                 match ext.prepared.get(&stmt) {
                     Some(prepared) => {
@@ -287,7 +293,9 @@ async fn run_query_loop(
                             .enumerate()
                             .map(|(i, bytes)| {
                                 let format = param_formats.get(i).copied().unwrap_or(0);
-                                decode_param(bytes.as_deref(), format)
+                                let type_oid =
+                                    prepared.param_types.get(i).copied().unwrap_or(0);
+                                decode_param(bytes.as_deref(), format, type_oid)
                             })
                             .collect();
                         ext.portals.insert(
@@ -295,6 +303,7 @@ async fn run_query_loop(
                             Portal {
                                 stmt: prepared.stmt.clone(),
                                 params: values,
+                                result_formats,
                             },
                         );
                         conn.send(&BackendMessage::BindComplete);
@@ -326,7 +335,7 @@ async fn run_query_loop(
                                 })
                                 .collect();
                             conn.send(&BackendMessage::ParameterDescription(types));
-                            send_row_description_for(conn, &prepared.stmt, &db)?;
+                            send_row_description_for(conn, &prepared.stmt, &db, &[])?;
                         }
                         None => {
                             conn.send_error(ErrorInfo::new(
@@ -337,7 +346,9 @@ async fn run_query_loop(
                     }
                 } else {
                     match ext.portals.get(&name) {
-                        Some(portal) => send_row_description_for(conn, &portal.stmt, &db)?,
+                        Some(portal) => {
+                            send_row_description_for(conn, &portal.stmt, &db, &portal.result_formats)?
+                        }
                         None => {
                             conn.send_error(ErrorInfo::new(
                                 "34000",
@@ -360,8 +371,20 @@ async fn run_query_loop(
                             } else {
                                 &result.rows[..]
                             };
+                            // Resolve the client's requested result formats
+                            // (from `Bind`) against the actual column types,
+                            // then re-encode each cell accordingly. Binary is
+                            // only used for columns whose type we can encode
+                            // that way; everything else stays text, matching
+                            // the format codes a `Describe` on this portal
+                            // would have reported.
+                            let oids: Vec<i32> =
+                                result.fields.iter().map(|f| f.type_oid).collect();
+                            let formats = resolve_result_formats(&p.result_formats, &oids);
                             for row in rows {
-                                conn.send(&BackendMessage::DataRow(row.clone()));
+                                conn.send(&BackendMessage::DataRow(encode_result_row(
+                                    row, &oids, &formats,
+                                )));
                             }
                             if limited {
                                 conn.send(&BackendMessage::PortalSuspended);
@@ -692,15 +715,28 @@ async fn handle_copy_out(conn: &mut Conn, copy: CopyStmt, db: Arc<Database>) -> 
 }
 
 /// Send RowDescription (or NoData for non-SELECT / no-FROM statements) for
-/// a prepared statement or portal, ahead of Execute.
+/// a prepared statement or portal, ahead of Execute. `result_formats` is the
+/// portal's requested per-column wire formats from `Bind` (empty for a
+/// statement-level Describe, where the formats aren't known yet — Postgres
+/// reports text in that case); each field's advertised `format` is set to
+/// what will actually be sent, honoring a binary request only for types we
+/// can encode in binary.
 fn send_row_description_for(
     conn: &mut Conn,
     stmt: &Stmt,
     db: &Arc<Database>,
+    result_formats: &[i16],
 ) -> anyhow::Result<()> {
     match stmt {
         Stmt::Select(select) => match describe_select(select, db.clone()) {
-            Ok(fields) if !fields.is_empty() => conn.send(&BackendMessage::RowDescription(fields)),
+            Ok(mut fields) if !fields.is_empty() => {
+                let oids: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+                let formats = resolve_result_formats(result_formats, &oids);
+                for (f, fmt) in fields.iter_mut().zip(formats) {
+                    f.format = fmt;
+                }
+                conn.send(&BackendMessage::RowDescription(fields))
+            }
             Ok(_) => conn.send(&BackendMessage::NoData),
             Err(_) => conn.send(&BackendMessage::NoData),
         },
@@ -709,14 +745,97 @@ fn send_row_description_for(
     Ok(())
 }
 
+/// Resolve a `Bind` result-format list against the result columns' type OIDs,
+/// yielding one effective wire-format code per column (0 = text, 1 = binary).
+///
+/// Postgres list semantics: no entries ⇒ all text; one entry ⇒ applies to
+/// every column; otherwise one per column. A binary request is downgraded to
+/// text for any type this engine can't binary-encode, so the returned code
+/// always matches the bytes that will actually be written.
+fn resolve_result_formats(requested: &[i16], oids: &[i32]) -> Vec<i16> {
+    oids.iter()
+        .enumerate()
+        .map(|(i, &type_oid)| {
+            let want = match requested.len() {
+                0 => 0,
+                1 => requested[0],
+                _ => requested.get(i).copied().unwrap_or(0),
+            };
+            if want == 1 && crate::wire::messages::supports_binary(type_oid) {
+                1
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+/// Re-encode one result row's text cells into the per-column wire formats
+/// computed by `resolve_result_formats`. Text columns pass through unchanged;
+/// binary columns are converted from the stored text form to the Postgres
+/// binary representation (with a defensive text fallback that can't normally
+/// trigger, since `resolve_result_formats` only picks binary for encodable
+/// types).
+fn encode_result_row(
+    row: &[Option<Vec<u8>>],
+    oids: &[i32],
+    formats: &[i16],
+) -> Vec<Option<Vec<u8>>> {
+    row.iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            let cell = cell.as_ref()?;
+            let fmt = formats.get(i).copied().unwrap_or(0);
+            if fmt == 1 {
+                let type_oid = oids.get(i).copied().unwrap_or(oid::TEXT);
+                Some(
+                    crate::wire::messages::text_cell_to_binary(cell, type_oid)
+                        .unwrap_or_else(|| cell.clone()),
+                )
+            } else {
+                Some(cell.clone())
+            }
+        })
+        .collect()
+}
+
 /// Decode one bound parameter value using its declared wire format
-/// (0 = text, 1 = binary). Binary decoding is a best-effort fallback for
-/// the common fixed-width numeric encodings.
-fn decode_param(bytes: Option<&[u8]>, format: i16) -> Value {
+/// (0 = text, 1 = binary) and, for binary, its declared type OID. Binary
+/// decoding covers the fixed-width numeric types and bool; the type OID is
+/// needed to tell an 8-byte `float8` apart from an 8-byte `int8` (both are
+/// 8 bytes on the wire), which a length-only heuristic gets wrong. Falls back
+/// to length-based sniffing when the OID is unspecified (0).
+fn decode_param(bytes: Option<&[u8]>, format: i16, type_oid: i32) -> Value {
     let Some(b) = bytes else { return Value::Null };
     if format == 0 {
         return Value::from_bytes(Some(b));
     }
+    // Binary format.
+    match type_oid {
+        oid::INT8 if b.len() == 8 => return Value::Int(i64::from_be_bytes(b.try_into().unwrap())),
+        oid::INT4 if b.len() == 4 => {
+            return Value::Int(i32::from_be_bytes(b.try_into().unwrap()) as i64)
+        }
+        oid::INT2 if b.len() == 2 => {
+            return Value::Int(i16::from_be_bytes(b.try_into().unwrap()) as i64)
+        }
+        oid::FLOAT8 if b.len() == 8 => {
+            return Value::Float(f64::from_be_bytes(b.try_into().unwrap()))
+        }
+        oid::FLOAT4 if b.len() == 4 => {
+            return Value::Float(f32::from_be_bytes(b.try_into().unwrap()) as f64)
+        }
+        oid::BOOL if b.len() == 1 => return Value::Bool(b[0] != 0),
+        oid::TEXT => {
+            if let Ok(s) = std::str::from_utf8(b) {
+                return Value::Text(s.to_string());
+            }
+        }
+        _ => {}
+    }
+    // Unknown/unspecified OID: fall back to width-based sniffing (legacy
+    // behavior), with a float8-vs-int8 caveat only relevant when the client
+    // sends 8-byte binary params without declaring their type.
     match b.len() {
         1 => Value::Bool(b[0] != 0),
         4 => Value::Int(i32::from_be_bytes(b.try_into().unwrap()) as i64),
@@ -994,5 +1113,231 @@ mod tests {
         wire_send_query(&mut client, "THIS IS NOT SQL").await;
         let code = wire_read_sqlstate(&mut client).await;
         assert_eq!(code.as_deref(), Some("42601"));
+    }
+
+    // --- Binary result-format encoding (extended query protocol) ---
+
+    /// Spawn the post-auth query loop with an unrestricted actor over a pipe,
+    /// returning the client half — same shape as `spawn_denied_session` but
+    /// without RBAC restrictions, for exercising the extended query protocol.
+    async fn spawn_session(db: Arc<Database>) -> tokio::io::DuplexStream {
+        spawn_denied_session(db, Actor::unrestricted()).await
+    }
+
+    /// Frame and send one extended-protocol message (`tag` + body).
+    async fn wire_send(stream: &mut tokio::io::DuplexStream, tag: u8, body: &[u8]) {
+        let len = (body.len() as i32) + 4;
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(body);
+        stream.write_all(&frame).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    fn cstr(s: &str) -> Vec<u8> {
+        let mut v = s.as_bytes().to_vec();
+        v.push(0);
+        v
+    }
+
+    /// Read one backend message, returning `(tag, body)`.
+    async fn wire_read_msg(stream: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = i32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+        let mut body = vec![0u8; len - 4];
+        stream.read_exact(&mut body).await.unwrap();
+        (header[0], body)
+    }
+
+    /// Read backend messages until the first `DataRow` (`D`), returning its
+    /// decoded cells; panics if an `ErrorResponse` (`E`) arrives first.
+    async fn wire_read_data_row(stream: &mut tokio::io::DuplexStream) -> Vec<Option<Vec<u8>>> {
+        loop {
+            let (tag, body) = wire_read_msg(stream).await;
+            match tag {
+                b'D' => return parse_data_row(&body),
+                b'E' => panic!("unexpected ErrorResponse: {}", parse_error_code(&body)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Decode a `DataRow` body into its cells.
+    fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
+        let n = i16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+        let mut cells = Vec::with_capacity(n);
+        let mut i = 2;
+        for _ in 0..n {
+            let len = i32::from_be_bytes(body[i..i + 4].try_into().unwrap());
+            i += 4;
+            if len < 0 {
+                cells.push(None);
+            } else {
+                let len = len as usize;
+                cells.push(Some(body[i..i + len].to_vec()));
+                i += len;
+            }
+        }
+        cells
+    }
+
+    /// Run a full Parse/Bind(result_formats)/Execute/Sync sequence for
+    /// `SELECT * FROM <table>` and return the first data row's cells.
+    async fn select_star_row(
+        client: &mut tokio::io::DuplexStream,
+        table: &str,
+        result_formats: &[i16],
+    ) -> Vec<Option<Vec<u8>>> {
+        // Parse: unnamed statement, the query, zero param types.
+        let mut parse = cstr(""); // statement name
+        parse.extend_from_slice(&cstr(&format!("SELECT * FROM {table}")));
+        parse.extend_from_slice(&0i16.to_be_bytes()); // param count
+        wire_send(client, b'P', &parse).await;
+
+        // Bind: unnamed portal, unnamed statement, no param formats, no
+        // params, then the requested result formats.
+        let mut bind = cstr(""); // portal
+        bind.extend_from_slice(&cstr("")); // statement
+        bind.extend_from_slice(&0i16.to_be_bytes()); // param format count
+        bind.extend_from_slice(&0i16.to_be_bytes()); // param count
+        bind.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
+        for f in result_formats {
+            bind.extend_from_slice(&f.to_be_bytes());
+        }
+        wire_send(client, b'B', &bind).await;
+
+        // Execute: unnamed portal, no row limit.
+        let mut exec = cstr("");
+        exec.extend_from_slice(&0i32.to_be_bytes());
+        wire_send(client, b'E', &exec).await;
+
+        // Sync.
+        wire_send(client, b'S', &[]).await;
+
+        // Skip ParseComplete/BindComplete, read the first DataRow.
+        wire_read_data_row(client).await
+    }
+
+    fn setup_typed_table(db: &Arc<Database>) {
+        execute_parsed(
+            crate::sql::parse(
+                "CREATE TABLE t (id INT8 PRIMARY KEY, score FLOAT8, active BOOL, name TEXT)",
+            )
+            .unwrap(),
+            db.clone(),
+            &[],
+        )
+        .unwrap();
+        execute_parsed(
+            crate::sql::parse("INSERT INTO t VALUES (7, 2.5, true, 'hi')").unwrap(),
+            db.clone(),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_result_format_encodes_numeric_columns() {
+        let (db, _b, _l) = test_db();
+        setup_typed_table(&db);
+        let mut client = spawn_session(db.clone()).await;
+
+        // result_formats = [1] applies binary to every column.
+        let row = select_star_row(&mut client, "t", &[1]).await;
+        assert_eq!(row.len(), 4);
+        // id INT8 → 8-byte big-endian.
+        assert_eq!(
+            row[0].as_deref().unwrap(),
+            &7i64.to_be_bytes(),
+            "int8 should be binary"
+        );
+        // score FLOAT8 → 8-byte big-endian IEEE-754.
+        assert_eq!(
+            f64::from_be_bytes(row[1].as_deref().unwrap().try_into().unwrap()),
+            2.5
+        );
+        // active BOOL → single 0/1 byte.
+        assert_eq!(row[2].as_deref().unwrap(), &[1u8]);
+        // name TEXT → raw UTF-8 (binary text == text bytes).
+        assert_eq!(row[3].as_deref().unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn text_result_format_is_unchanged_default() {
+        let (db, _b, _l) = test_db();
+        setup_typed_table(&db);
+        let mut client = spawn_session(db.clone()).await;
+
+        // No result formats ⇒ all text (the default, backward-compatible path).
+        let row = select_star_row(&mut client, "t", &[]).await;
+        assert_eq!(row[0].as_deref().unwrap(), b"7");
+        assert_eq!(row[1].as_deref().unwrap(), b"2.5");
+        assert_eq!(row[2].as_deref().unwrap(), b"t");
+        assert_eq!(row[3].as_deref().unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn per_column_result_formats_mix_binary_and_text() {
+        let (db, _b, _l) = test_db();
+        setup_typed_table(&db);
+        let mut client = spawn_session(db.clone()).await;
+
+        // Per-column: binary id, text score, binary active, text name.
+        let row = select_star_row(&mut client, "t", &[1, 0, 1, 0]).await;
+        assert_eq!(row[0].as_deref().unwrap(), &7i64.to_be_bytes());
+        assert_eq!(row[1].as_deref().unwrap(), b"2.5"); // text
+        assert_eq!(row[2].as_deref().unwrap(), &[1u8]);
+        assert_eq!(row[3].as_deref().unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn describe_portal_reports_resolved_formats() {
+        let (db, _b, _l) = test_db();
+        setup_typed_table(&db);
+        let mut client = spawn_session(db.clone()).await;
+
+        // Parse + Bind with all-binary, then Describe the portal ('D' kind 'P').
+        let mut parse = cstr("");
+        parse.extend_from_slice(&cstr("SELECT * FROM t"));
+        parse.extend_from_slice(&0i16.to_be_bytes());
+        wire_send(&mut client, b'P', &parse).await;
+
+        let mut bind = cstr("");
+        bind.extend_from_slice(&cstr(""));
+        bind.extend_from_slice(&0i16.to_be_bytes());
+        bind.extend_from_slice(&0i16.to_be_bytes());
+        bind.extend_from_slice(&1i16.to_be_bytes()); // one result format...
+        bind.extend_from_slice(&1i16.to_be_bytes()); // ...= binary for all
+        wire_send(&mut client, b'B', &bind).await;
+
+        let mut describe = vec![b'P'];
+        describe.extend_from_slice(&cstr("")); // portal name
+        wire_send(&mut client, b'D', &describe).await;
+        wire_send(&mut client, b'S', &[]).await;
+
+        // Skip ParseComplete/BindComplete, find the RowDescription ('T').
+        let body = loop {
+            let (tag, body) = wire_read_msg(&mut client).await;
+            if tag == b'T' {
+                break body;
+            }
+            assert_ne!(tag, b'E', "unexpected error");
+        };
+        // Every field's advertised format code (last i16 of each field entry)
+        // must be 1 (binary), since all four columns are binary-encodable.
+        let n = i16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+        assert_eq!(n, 4);
+        let mut i = 2;
+        for _ in 0..n {
+            // name cstr
+            let end = body[i..].iter().position(|&b| b == 0).unwrap() + i;
+            i = end + 1;
+            i += 4 + 2 + 4 + 2 + 4; // table_oid, col_attr, type_oid, type_size, type_modifier
+            let format = i16::from_be_bytes(body[i..i + 2].try_into().unwrap());
+            i += 2;
+            assert_eq!(format, 1, "field format should be binary");
+        }
     }
 }

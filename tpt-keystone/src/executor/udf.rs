@@ -275,14 +275,14 @@ fn alloc_bytes(
 ) -> anyhow::Result<i32> {
     let mut result = [Val::I32(0)];
     alloc
-        .call(store, &[Val::I32(data.len() as i32)], &mut result)
+        .call(&mut *store, &[Val::I32(data.len() as i32)], &mut result)
         .map_err(|e| anyhow::anyhow!("UDF `alloc` failed: {e}"))?;
     let ptr = match result[0] {
         Val::I32(p) => p,
         _ => anyhow::bail!("UDF `alloc` returned a non-i32 value"),
     };
     memory
-        .write(store, ptr as usize, data)
+        .write(&mut *store, ptr as usize, data)
         .map_err(|e| anyhow::anyhow!("failed to write UDF argument into linear memory: {e}"))?;
     Ok(ptr)
 }
@@ -497,22 +497,25 @@ mod tests {
             (func (export "sqmag") (param $in_ptr i32) (param $in_len i32) (result i32 i32)
               (local $i i32)
               (local $sum f64)
+              (local $v f64)
+              (local $addr i32)
               (local $out i32)
               (local.set $i (i32.const 0))
               (block $done
                 (loop $cont
                   (br_if $done (i32.ge_u (local.get $i) (local.get $in_len)))
-                  (local.set $sum
-                    (f64.add (local.get $sum)
-                      (f64.mul
-                        (f64.load (i32.add (local.get $in_ptr) (i32.mul (local.get $i) (i32.const 8))))
-                        (f64.load (i32.add (local.get $in_ptr) (i32.mul (local.get $i) (i32.const 8))))))
+                  (local.set $addr (i32.add (local.get $in_ptr) (i32.mul (local.get $i) (i32.const 8))))
+                  (local.set $v (f64.load (local.get $addr)))
+                  (local.set $sum (f64.add (local.get $sum) (f64.mul (local.get $v) (local.get $v))))
                   (local.set $i (i32.add (local.get $i) (i32.const 1)))
-                  (br $cont)))
+                  (br $cont)
+                )
+              )
               (local.set $out (call $alloc (i32.const 8)))
               (f64.store (local.get $out) (local.get $sum))
               (local.get $out)
-              (i32.const 1)))"#;
+              (i32.const 1)
+            ))"#;
         let wasm_b64 = wat_base64(wasm);
 
         let uf = UserFunction {

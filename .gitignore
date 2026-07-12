@@ -22,4 +22,8 @@ dist/
 *.tsbuildinfo
 npm-debug.log*
 
+# Flutter / Dart
+.dart_tool/
+build/
+
 .mimocode/.cron-lock

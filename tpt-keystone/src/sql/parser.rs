@@ -311,6 +311,18 @@ impl Parser {
                 self.advance();
                 self.parse_create_role()
             }
+            Token::Function => {
+                self.advance();
+                self.parse_create_function()
+            }
+            Token::Sequence => {
+                self.advance();
+                self.parse_create_sequence()
+            }
+            Token::Topic => {
+                self.advance();
+                self.parse_create_topic()
+            }
             other => anyhow::bail!(
                 "expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}",
                 other
