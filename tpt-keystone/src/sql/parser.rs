@@ -81,7 +81,10 @@ impl Parser {
                 self.advance();
                 match self.peek() {
                     Token::Table => self.parse_alter_table(),
-                    Token::Role => self.parse_alter_role(),
+                    Token::Role => {
+                        self.advance();
+                        self.parse_alter_role()
+                    }
                     other => anyhow::bail!(
                         "expected TABLE or ROLE after ALTER, got {:?}",
                         other
@@ -306,7 +309,7 @@ impl Parser {
             }
             Token::Role => {
                 self.advance();
-                self.parse_drop_role()
+                self.parse_create_role()
             }
             other => anyhow::bail!(
                 "expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}",
@@ -945,6 +948,10 @@ impl Parser {
                 }
                 let table = self.parse_object_name()?;
                 Ok(Stmt::DropTable(DropTableStmt { table, if_exists }))
+            }
+            Token::Role => {
+                self.advance();
+                self.parse_drop_role()
             }
             Token::Index => {
                 self.advance();

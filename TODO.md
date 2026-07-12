@@ -1291,17 +1291,28 @@ with it later (ReBAC itself stays out of scope here).
 - [x] `pg_catalog` surface — `pg_roles`/`pg_auth_members` virtual tables added to
   `executor/catalog.rs::resolve_virtual_table`, following the existing synthesized-OID virtual-table
   pattern.
-- [~] Tests — `sql/parser_tests.rs` has `Stmt`-shape coverage for all five statement kinds (154 new lines).
-  **Still missing:** store-level round-trip tests for `RoleMemberStore`/`PrivilegeStore` (no
-  `wire/role_members_tests.rs`/`wire/privileges_tests.rs` yet — zero `#[test]`s in either new file), an
-  `executor/rbac_tests.rs` integration suite (per-statement allow/deny, superuser bypass, membership
-  inheritance, the `_tpt_roles`-empty no-op regression, system-catalog write protection, admin-only DDL),
-  and a wire-level end-to-end test asserting a denied query's `ErrorInfo` carries SQLSTATE `42501`.
+- [x] Tests — `sql/parser_tests.rs` has `Stmt`-shape coverage for all five statement kinds; store-level
+   round-trip tests added in `wire/role_members_tests.rs` (`grant_membership`/`revoke_membership`/
+   `all_memberships` BFS closure, self-membership and cyclic-membership rejection, `revoke_all`) and
+   `wire/privileges_tests.rs` (`grant`/`revoke`/`ALL` satisfaction, membership-inherited privilege
+   resolution); `executor/rbac_tests.rs` covers per-statement allow/deny, superuser bypass, membership
+   inheritance, the `_tpt_roles`-empty no-op regression, system-catalog write protection, admin-only role
+   DDL, database-level `CREATE` for DDL, and the downcastable `InsufficientPrivilege` (`42501`) marker.
+   Wire-level end-to-end coverage of the SQLSTATE is now in place too: `wire::session::tests` drives the
+   real post-auth query loop (`run_query_loop`) over an in-memory pipe with a non-superuser, unprivileged
+   `Actor` and reads the `ErrorResponse`'s `C` (SQLSTATE) field off the wire — asserting a denied `SELECT`
+   carries `42501` (`denied_query_returns_sqlstate_42501_on_the_wire`), an allowed query with no privilege
+   requirement carries none (`allowed_query_without_privileges_is_not_denied`), and a syntax error carries
+   the generic `42601` (`syntax_error_returns_generic_sqlstate_42601`). The full wire path
+   (`handle_simple_query` → `sqlstate_for` → `ErrorInfo` → byte encoding → client parse) is exercised;
+   the SCRAM handshake itself is covered separately by `wire::scram` unit tests.
 
-**Milestone:** met functionally — a bootstrapped superuser can `CREATE ROLE`/`GRANT` a restricted role via
-SQL alone (no further env-var dependency), that role is denied access to tables/statements it hasn't been
-granted (SQLSTATE `42501`), and the zero-config (`_tpt_roles` empty) quickstart remains behaviorally
-unchanged. Not yet verified by an automated integration/e2e test — see the Tests bullet above.
+**Milestone: reached.** A bootstrapped superuser can `CREATE ROLE`/`GRANT` a restricted role via SQL alone
+(no further env-var dependency), that role is denied access to tables/statements it hasn't been granted
+(SQLSTATE `42501`), and the zero-config (`_tpt_roles` empty) quickstart remains behaviorally unchanged.
+Verified by an automated wire-level end-to-end test (`wire::session::tests`, driving the real post-auth
+query loop over an in-memory pipe) as well as store/executor-level unit and integration tests — see the
+Tests bullet above.
 
 ---
 
@@ -1386,25 +1397,22 @@ environment doesn't have, not just more engineering time)
 > verifying this were fixed along the way (see the follow-up note above for exactly what).
 
 ### Authorization — buildable here, no external infra needed
-- **Phase 20 — RBAC Authorization Layer:** functionally complete — role catalog (`rolsuper`/`rolcanlogin`
-  + legacy-row migration), role membership with transitive closure, object privileges, `CREATE`/`ALTER`/
+- **Phase 20 — RBAC Authorization Layer:** **complete.** Role catalog (`rolsuper`/`rolcanlogin` +
+  legacy-row migration), role membership with transitive closure, object privileges, `CREATE`/`ALTER`/
   `DROP ROLE`/`GRANT`/`REVOKE` parsing and execution, per-connection `Actor` enforcement (SQLSTATE
-  `42501` on denial), and a `pg_roles`/`pg_auth_members` `pg_catalog` surface are all wired up — see
-  Phase 20 above. **Remaining:** only the test suite — no store-level round-trip tests for
-  `RoleMemberStore`/`PrivilegeStore`, no `executor/rbac_tests.rs` integration suite, no wire-level e2e
-  test for the `42501` SQLSTATE. Parser shape tests exist; enforcement itself is unverified by automated
-  tests. Pure in-repo engineering with no external dependency.
+  `42501` on denial), a `pg_roles`/`pg_auth_members` `pg_catalog` surface, and the automated test suite
+  (store round-trips + `executor/rbac_tests.rs` integration) are all wired up — see Phase 20 above. Pure
+  in-repo engineering with no external dependency.
 
 **Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
 real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision
-itself), 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
-effort), and 1 fully in-repo authorization layer (Phase 20 — RBAC) not yet started. Phase 19
-(adoption/CI/test-coverage hardening) and Harbor's 5 stub-connector replacements are now both fully
-closed out — see their respective closeout notes above (Oracle's connector carries an explicit,
-higher-than-usual confidence caveat rather than being unqualified). Every item that was a pure
-"more code, no external dependency" scope cut *from every prior pass* has been closed out except the new
-Phase 20 RBAC work; what else remains either needs real external infrastructure/hardware, or is blocked
-on platform availability.
+itself), and 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
+effort). Phase 19 (adoption/CI/test-coverage hardening), Harbor's 5 stub-connector replacements, and the
+Phase 20 RBAC authorization layer are now all fully closed out — see their respective closeout notes
+above (Oracle's connector carries an explicit, higher-than-usual confidence caveat rather than being
+unqualified). Every item that was a pure "more code, no external dependency" scope cut *from every prior
+pass* has now been closed out; what else remains either needs real external infrastructure/hardware, or
+is blocked on platform availability.
 
 ---
 

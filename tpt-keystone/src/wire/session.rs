@@ -728,10 +728,14 @@ fn decode_param(bytes: Option<&[u8]>, format: i16) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::rbac::Actor;
     use crate::storage::config::NodeRole;
     use crate::storage::lease::LeaseManager;
     use crate::storage::objectstore::{LocalFsObjectStore, ObjectStore};
+    use crate::wire::roles::RoleStore;
+    use std::net::SocketAddr;
     use std::time::Duration;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
@@ -862,5 +866,133 @@ mod tests {
         let (channel, payload) = rx.try_recv().unwrap();
         assert_eq!(channel, "foo");
         assert_eq!(payload, "hello");
+    }
+
+    /// Spawn the real post-auth query loop (`run_query_loop`, the exact
+    /// function `run()` delegates to after a SCRAM handshake) over an
+    /// in-memory pipe, with a pre-built `Actor`. Returns the client half so
+    /// the test can speak the wire protocol to it. Skipping the startup +
+    /// SCRAM steps is intentional: those are covered separately by the
+    /// `scram` tests and the `roles.is_empty` zero-config branch; this test
+    /// targets the wire encoding of the authorization result.
+    async fn spawn_denied_session(db: Arc<Database>, actor: Actor) -> tokio::io::DuplexStream {
+        let (client, server) = duplex(8192);
+        let mut conn = Conn::from_boxed(Box::new(server));
+        tokio::spawn(async move {
+            let _ = run_query_loop(
+                &mut conn,
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                db,
+                actor,
+            )
+            .await;
+        });
+        client
+    }
+
+    /// Send a simple-query (`Q`) protocol message over the wire.
+    async fn wire_send_query(stream: &mut tokio::io::DuplexStream, sql: &str) {
+        let mut body = sql.as_bytes().to_vec();
+        body.push(0); // cstring terminator
+        let len = (body.len() as i32) + 4;
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(b'Q');
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(&body);
+        stream.write_all(&frame).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    /// Read backend messages until the first `ErrorResponse`, returning its
+    /// SQLSTATE (`C` field); or `None` once a `ReadyForQuery` (success) is
+    /// seen. This is the field real clients key on to detect `42501`
+    /// (insufficient_privilege) vs. every other error class.
+    async fn wire_read_sqlstate(stream: &mut tokio::io::DuplexStream) -> Option<String> {
+        let mut header = [0u8; 5];
+        loop {
+            stream.read_exact(&mut header).await.unwrap();
+            let tag = header[0];
+            let len = i32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+            let mut body = vec![0u8; len - 4];
+            stream.read_exact(&mut body).await.unwrap();
+            match tag {
+                b'E' => return Some(parse_error_code(&body)),
+                b'Z' => return None,
+                _ => {}
+            }
+        }
+    }
+
+    /// Extract the `C` (SQLSTATE code) field from a Postgres `ErrorResponse`
+    /// body (sequence of `type-byte` + null-terminated value, NUL-terminated).
+    fn parse_error_code(body: &[u8]) -> String {
+        let mut i = 0;
+        while i < body.len() {
+            let ftype = body[i];
+            i += 1;
+            let end = match body[i..].iter().position(|&b| b == 0) {
+                Some(p) => i + p,
+                None => break,
+            };
+            let val = String::from_utf8_lossy(&body[i..end]).into_owned();
+            if ftype == b'C' {
+                return val;
+            }
+            i = end + 1;
+        }
+        panic!("ErrorResponse without a SQLSTATE 'C' field");
+    }
+
+    #[tokio::test]
+    async fn denied_query_returns_sqlstate_42501_on_the_wire() {
+        let (db, _b, _l) = test_db();
+        db.parse_cached("CREATE TABLE secret (id INT8 PRIMARY KEY)")
+            .unwrap();
+
+        // Seed a non-superuser role and build its actor exactly as `run()`
+        // does right after a successful SCRAM handshake.
+        let roles = RoleStore::new(db.clone()).unwrap();
+        roles
+            .create_role("reader", false, true, Some("reader-pw"), &[])
+            .unwrap();
+        let reader = Actor::for_role(&db, "reader").unwrap();
+        assert!(!reader.superuser);
+
+        let mut client = spawn_denied_session(db.clone(), reader).await;
+        wire_send_query(&mut client, "SELECT * FROM secret").await;
+        let code = wire_read_sqlstate(&mut client).await;
+        assert_eq!(code.as_deref(), Some("42501"));
+    }
+
+    #[tokio::test]
+    async fn allowed_query_without_privileges_is_not_denied() {
+        let (db, _b, _l) = test_db();
+        let roles = RoleStore::new(db.clone()).unwrap();
+        roles
+            .create_role("reader", false, true, Some("reader-pw"), &[])
+            .unwrap();
+        let reader = Actor::for_role(&db, "reader").unwrap();
+
+        let mut client = spawn_denied_session(db.clone(), reader).await;
+        // No FROM clause ⇒ no table privilege required ⇒ the non-superuser
+        // actor is allowed, so no ErrorResponse is sent.
+        wire_send_query(&mut client, "SELECT 1").await;
+        let code = wire_read_sqlstate(&mut client).await;
+        assert_eq!(code, None);
+    }
+
+    #[tokio::test]
+    async fn syntax_error_returns_generic_sqlstate_42601() {
+        let (db, _b, _l) = test_db();
+        let roles = RoleStore::new(db.clone()).unwrap();
+        roles
+            .create_role("reader", false, true, Some("reader-pw"), &[])
+            .unwrap();
+        let reader = Actor::for_role(&db, "reader").unwrap();
+
+        let mut client = spawn_denied_session(db.clone(), reader).await;
+        wire_send_query(&mut client, "THIS IS NOT SQL").await;
+        let code = wire_read_sqlstate(&mut client).await;
+        assert_eq!(code.as_deref(), Some("42601"));
     }
 }

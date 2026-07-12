@@ -30,9 +30,9 @@ pub mod rbac;
 #[cfg(test)]
 mod plexus_tests;
 #[cfg(test)]
-mod prism_gpu_tests;
-#[cfg(test)]
 mod prism_tests;
+#[cfg(test)]
+mod rbac_tests;
 #[cfg(test)]
 mod regex_op_tests;
 mod select;

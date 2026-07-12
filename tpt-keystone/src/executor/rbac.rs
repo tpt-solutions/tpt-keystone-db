@@ -90,7 +90,11 @@ impl Actor {
 
     /// Authorize `stmt` for this actor. Returns `InsufficientPrivilege`
     /// (SQLSTATE 42501 at the wire layer) on denial.
-    pub fn check(&self, db: &Arc<Database>, stmt: &Stmt) -> Result<(), InsufficientPrivilege> {
+    pub fn check(
+        &self,
+        db: &Arc<Database>,
+        stmt: &Stmt,
+    ) -> std::result::Result<(), InsufficientPrivilege> {
         // Superuser bypass and zero-config bypass: no further checks.
         if self.unrestricted || self.superuser {
             return Ok(());
@@ -167,7 +171,7 @@ impl Actor {
         db: &Arc<Database>,
         privilege: PrivilegeRepr,
         object: &GrantObjectRepr,
-    ) -> Result<(), InsufficientPrivilege> {
+    ) -> std::result::Result<(), InsufficientPrivilege> {
         let store = match PrivilegeStore::new(db.clone()) {
             Ok(s) => s,
             Err(_) => {

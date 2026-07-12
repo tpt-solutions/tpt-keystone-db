@@ -178,7 +178,7 @@ pub enum Privilege {
 /// The object a privilege is granted on (or `*`/`ALL` whole-instance,
 /// represented as `Database` in this schema-less engine — there is no
 /// namespace concept, so `ON DATABASE` is the only whole-instance form).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantObject {
     /// `ON [TABLE] name` — a single relation. `table` already has any
     /// schema qualifier stripped (this engine has one implicit schema).

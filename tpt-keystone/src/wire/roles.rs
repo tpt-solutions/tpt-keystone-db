@@ -122,35 +122,20 @@ impl RoleStore {
         let Some(value) = self.db.read(TABLE, rolname.as_bytes())? else {
             return Ok(None);
         };
-        let salt_b64 = match cell_str(&value, 1) {
-            Ok(s) => s,
-            Err(_) => return Ok(None),
-        };
-        let iterations = match cell_str(&value, 2)?.parse::<u32>() {
-            Ok(i) => i,
-            Err(_) => return Ok(None),
-        };
-        let stored_key_b64 = match cell_str(&value, 3) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok(None),
-        };
-        let server_key_b64 = match cell_str(&value, 4) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok(None),
-        };
+        let salt_b64 = cell_str(&value, 1)?;
+        let iterations = cell_str(&value, 2)?.parse::<u32>()?;
+        let stored_key_b64 = cell_str(&value, 3)?;
+        let server_key_b64 = cell_str(&value, 4)?;
 
-        let salt = match STANDARD.decode(salt_b64) {
-            Ok(s) => s,
-            Err(_) => return Ok(None),
-        };
-        let stored_key: [u8; 32] = match STANDARD.decode(stored_key_b64)?.try_into() {
-            Ok(k) => k,
-            Err(_) => return Ok(None),
-        };
-        let server_key: [u8; 32] = match STANDARD.decode(server_key_b64)?.try_into() {
-            Ok(k) => k,
-            Err(_) => return Ok(None),
-        };
+        let salt = STANDARD.decode(salt_b64)?;
+        let stored_key: [u8; 32] = STANDARD
+            .decode(stored_key_b64)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("corrupt stored_key for role \"{rolname}\""))?;
+        let server_key: [u8; 32] = STANDARD
+            .decode(server_key_b64)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("corrupt server_key for role \"{rolname}\""))?;
 
         Ok(Some(ScramCredential {
             salt,
