@@ -173,6 +173,13 @@ fn execute_parsed_inner(
         Stmt::CopyIn(_) | Stmt::CopyOut(_) => {
             anyhow::bail!("COPY is only supported over the simple query protocol")
         }
+        Stmt::CreateRole(_) | Stmt::AlterRole(_) | Stmt::DropRole(_) | Stmt::Grant(_)
+        | Stmt::Revoke(_) => {
+            anyhow::bail!(
+                "RBAC DDL (CREATE/ALTER/DROP ROLE, GRANT, REVOKE) is parsed but not yet executable; \
+                 enforcement is tracked in TODO.md Phase 20"
+            )
+        }
     }
 }
 

@@ -29,6 +29,18 @@ pub enum Stmt {
     /// `ANALYZE [table]` — `None` means every table in `public`.
     Analyze(Option<String>),
     Match(MatchStmt),
+    /// `CREATE ROLE` / `ALTER ROLE` / `DROP ROLE` (RBAC DDL, Phase 2 §9).
+    /// Full enforcement (catalog writes, superuser checks, membership/privilege
+    /// grants) is Phase 20 — this engine only parses these shapes today.
+    CreateRole(CreateRoleStmt),
+    AlterRole(AlterRoleStmt),
+    DropRole(DropRoleStmt),
+    /// `GRANT ... TO ...` / `REVOKE ... FROM ...` (RBAC DDL, Phase 2 §9).
+    /// `is_role_grant` distinguishes `GRANT role TO role` (membership) from
+    /// `GRANT priv ON obj TO role` (object privilege) — the two parse very
+    /// differently and must not be confused.
+    Grant(GrantStmt),
+    Revoke(RevokeStmt),
 }
 
 /// Plexus's GQL-subset pattern-matching statement:
@@ -109,6 +121,94 @@ pub struct CreateFunctionStmt {
     pub return_type: String,
     pub language: String,
     pub body_base64: String,
+}
+
+/// `CREATE ROLE [IF NOT EXISTS] name
+///   [SUPERUSER | NOSUPERUSER]
+///   [LOGIN | NOLOGIN]
+///   [PASSWORD '...']
+///   [IN ROLE role, ...]`.
+/// `IF NOT EXISTS` is accepted syntactically but not modeled (role creation
+/// is single-statement and idempotent-by-name at the catalog level in Phase
+/// 20); `SUPERUSER`/`NOLOGIN` default to the Postgres defaults
+/// (`NOSUPERUSER LOGIN`).
+#[derive(Debug, Clone)]
+pub struct CreateRoleStmt {
+    pub name: String,
+    pub superuser: bool,
+    pub can_login: bool,
+    pub password: Option<String>,
+    /// `IN ROLE a, b` — roles this new role is a *member* of at creation.
+    pub in_role: Vec<String>,
+}
+
+/// `ALTER ROLE name
+///   [SUPERUSER | NOSUPERUSER]
+///   [LOGIN | NOLOGIN]
+///   [PASSWORD '...']`.
+/// Every clause is optional and applied independently; omitted attributes are
+/// left unchanged (modeled as `None`).
+#[derive(Debug, Clone)]
+pub struct AlterRoleStmt {
+    pub name: String,
+    pub superuser: Option<bool>,
+    pub can_login: Option<bool>,
+    pub password: Option<String>,
+}
+
+/// `DROP ROLE [IF EXISTS] name`.
+#[derive(Debug, Clone)]
+pub struct DropRoleStmt {
+    pub if_exists: bool,
+    pub name: String,
+}
+
+/// A grantable object privilege.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Privilege {
+    Select,
+    Insert,
+    Update,
+    Delete,
+    Create,
+    Drop,
+    Usage,
+}
+
+/// The object a privilege is granted on (or `*`/`ALL` whole-instance,
+/// represented as `Database` in this schema-less engine — there is no
+/// namespace concept, so `ON DATABASE` is the only whole-instance form).
+#[derive(Debug, Clone)]
+pub enum GrantObject {
+    /// `ON [TABLE] name` — a single relation. `table` already has any
+    /// schema qualifier stripped (this engine has one implicit schema).
+    Table(String),
+    /// `ON DATABASE` — the whole instance.
+    Database,
+}
+
+/// `GRANT ... TO ...` (RBAC DDL, Phase 2 §9).
+#[derive(Debug, Clone)]
+pub struct GrantStmt {
+    /// `true` ⇒ `GRANT role [, ...] TO role [, ...]` (membership);
+    /// `false` ⇒ `GRANT priv [, ...] ON obj TO role [, ...]` (privilege).
+    pub is_role_grant: bool,
+    /// Populated when `is_role_grant` is true.
+    pub roles: Vec<String>,
+    /// Populated when `is_role_grant` is false.
+    pub privileges: Vec<Privilege>,
+    pub object: GrantObject,
+    pub grantees: Vec<String>,
+}
+
+/// `REVOKE ... FROM ...` (RBAC DDL, Phase 2 §9). Mirrors `GrantStmt`.
+#[derive(Debug, Clone)]
+pub struct RevokeStmt {
+    pub is_role_grant: bool,
+    pub roles: Vec<String>,
+    pub privileges: Vec<Privilege>,
+    pub object: GrantObject,
+    pub grantees: Vec<String>,
 }
 
 /// `COPY table [(columns)] FROM STDIN` / `COPY table [(columns)] TO STDOUT`.

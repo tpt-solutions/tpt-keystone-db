@@ -120,6 +120,29 @@ pub enum Token {
     /// arbitrary expressions, are what gets listed here).
     Return,
 
+    // RBAC DDL (Phase 2 §9 grammar — full enforcement is Phase 20).
+    /// `ROLE` — `CREATE ROLE` / `ALTER ROLE` / `DROP ROLE`.
+    Role,
+    /// `SUPERUSER` / `NOSUPERUSER` — `CREATE ROLE`/`ALTER ROLE` attributes.
+    Superuser,
+    NoSuperuser,
+    /// `LOGIN` / `NOLOGIN` — `CREATE ROLE`/`ALTER ROLE` attributes.
+    Login,
+    NoLogin,
+    /// `PASSWORD` — introduces the quoted secret in `CREATE ROLE`/
+    /// `ALTER ROLE ... PASSWORD '...'`.
+    Password,
+    /// `GRANT` / `REVOKE` — privilege/role membership DDL.
+    Grant,
+    Revoke,
+    /// `PRIVILEGES` — the optional keyword after a `GRANT` privilege list
+    /// (`GRANT SELECT ON t TO u` parses identically with or without it).
+    Privileges,
+    /// `USAGE` — a privilege in the `GRANT <privs> ON ...` list.
+    Usage,
+    /// `DATABASE` — the `ON DATABASE` granularity for `GRANT`/`REVOKE`.
+    Database,
+
     // Identifiers
     Ident(String),
 
@@ -550,6 +573,17 @@ fn keyword_or_ident(s: &str) -> Token {
         "OPERATOR" => Token::Operator,
         "MATCH" => Token::Match,
         "RETURN" => Token::Return,
+        "ROLE" => Token::Role,
+        "SUPERUSER" => Token::Superuser,
+        "NOSUPERUSER" => Token::NoSuperuser,
+        "LOGIN" => Token::Login,
+        "NOLOGIN" => Token::NoLogin,
+        "PASSWORD" => Token::Password,
+        "GRANT" => Token::Grant,
+        "REVOKE" => Token::Revoke,
+        "PRIVILEGES" => Token::Privileges,
+        "USAGE" => Token::Usage,
+        "DATABASE" => Token::Database,
         _ => Token::Ident(s.to_string()),
     }
 }

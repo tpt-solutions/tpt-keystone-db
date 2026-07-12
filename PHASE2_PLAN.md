@@ -49,3 +49,19 @@
 - [ ] Add planner module
 - [ ] Implement cost-based optimization
 - [ ] Add plan execution
+
+#### 9. RBAC DDL Parsing
+- [ ] Add `Role`/`Superuser`/`Nosuperuser`/`Login`/`Nologin`/`Password`/`Grant`/`Revoke`/`Privileges`/
+  `Usage`/`Database` keywords to the lexer
+- [ ] Add `CreateRoleStmt`/`AlterRoleStmt`/`DropRoleStmt`/`GrantStmt`/`RevokeStmt` AST nodes
+  (`GrantStmt`/`RevokeStmt` need an `is_role_grant` flag to disambiguate `GRANT role TO role` membership
+  grants from `GRANT priv ON obj TO role` privilege grants)
+- [ ] Add `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE` parsing (`SUPERUSER`/`NOSUPERUSER`/`LOGIN`/`NOLOGIN`/
+  `PASSWORD '...'`/`IN ROLE ...` optional clauses); branch `Token::Alter`'s dispatch between `ALTER TABLE`
+  and `ALTER ROLE` (currently unconditional `ALTER TABLE`)
+- [ ] Add `GRANT`/`REVOKE` parsing (privilege-list-vs-role-list disambiguation via first-token peek,
+  `ON [TABLE] <name>` / `ON DATABASE`, `TO`/`FROM` grantee list)
+- [ ] Parser unit tests for all five new statement shapes
+
+See `TODO.md` Phase 20 for the full RBAC design (catalog tables, session-identity threading, enforcement,
+tests) — this section covers only the SQL-engine-specific grammar work.

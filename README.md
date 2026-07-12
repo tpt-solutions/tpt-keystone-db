@@ -28,8 +28,9 @@ MVCC with a transaction manager and local B-Tree indexes, disaggregated cloud-na
 lease with fencing), WASM UDFs (sandboxed via `wasmtime`), `pg_catalog`/`information_schema`, COPY/
 cursors/LISTEN-NOTIFY, a connection admission limiter + statement cache, `pg_dump`-plain-compatible DDL
 (sequences, SERIAL, UNIQUE/FOREIGN KEY), a Kubernetes operator, Prometheus metrics, and OpenTelemetry
-tracing. See `TODO.md` Phase 4/12 for exact scope cuts (no TLS/auth on the wire protocol, no
-`ALTER TABLE ADD/DROP COLUMN`, etc.).
+tracing, plus opt-in wire-level SCRAM-SHA-256 auth and TLS (Phase 18 — no-op until `_tpt_roles` is
+populated or `TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set, so the zero-config quickstart below is
+unchanged). See `TODO.md` Phase 4/12/18 for exact scope cuts (no `ALTER TABLE ADD/DROP COLUMN`, etc.).
 
 ## The other six engines (SQL extensions over Keystone, same binary)
 
@@ -37,16 +38,20 @@ Rather than separate storage engines, Phases 6–11 each add indexes, functions,
 Keystone's existing row storage — a `USING SPATIAL`/`USING VECTOR`/`USING GRAPH`/`USING TIME`/
 `USING JSONPATH` index option, plus table-valued SQL functions to query it:
 
-- **Meridian** (geospatial) — `geo/`: hand-written WKT geometry, S2/H3-inspired grid indexing,
-  `ST_*` functions, GPU-accelerated (`wgpu`) spatial joins above a row-count threshold.
-- **Prism** (vector/AI) — `vector/`: a from-scratch HNSW index, `vector_search()`, cosine/L2/dot-product
-  functions.
+- **Meridian** (geospatial) — `geo/`: hand-written WKT geometry, S2/H3-inspired grid indexing, SRID/EWKB
+  support, `ST_*` functions including `ST_Transform`, GPU-accelerated (`wgpu`) spatial joins above a
+  row-count threshold.
+- **Prism** (vector/AI) — `vector/`: a from-scratch HNSW index plus sharded HNSW, DiskANN/Vamana, and
+  IVF-PQ index strategies, `vector_search()`, cosine/L2/dot-product functions, hybrid BM25 search, and
+  GPU-accelerated (`wgpu`) batch similarity.
 - **Chronos** (time-series) — `storage/ts_index.rs`, `storage/compress.rs`: Gorilla + delta-of-delta
   compression, time-bucketed indexes, retention/rollups, `time_bucket()`/`moving_average()`.
 - **Plexus** (graph) — `graph/`: adjacency-list indexing, BFS/PageRank/label-propagation/connected-
-  components/triangle-count, `graph_neighbors()`/`graph_bfs()`/etc. as table functions.
+  components/triangle-count, `graph_neighbors()`/`graph_bfs()`/etc. as table functions, plus a
+  GQL-subset `MATCH` pattern-query statement.
 - **Canopy** (document/JSON) — `->`/`->>`/`@>` JSON operators, JSONPath + full-text (GIN-style) indexes,
   JSON Schema validation on insert.
+- POSIX regex match operators (`~`/`!~`/`~*`/`!~*`) are also available on any text column.
 - **Flux** (event streaming) — `storage/flux.rs`: append-only partitioned logs, consumer groups,
   automatic per-table CDC, tumbling/sliding/session windowing, a hand-rolled WebSocket push bridge
   (`wire/websocket.rs`).
@@ -70,9 +75,10 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
   subcommands.
 - **`tpt-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
   verify → cutover) targeting Keystone. PostgreSQL and PostGIS sources are fully implemented and
-  verified against a live server; MongoDB/Neo4j/MySQL/MSSQL have real protocol clients but are
-  unverified against a live server of that kind; InfluxDB/Kafka/vector-DB/Oracle/Elasticsearch sources
-  are named stubs only. See `TODO.md` Phase 15 for the exact per-connector state.
+  verified against a live server; MongoDB/Neo4j/MySQL/MSSQL/InfluxDB/Kafka/vector-DB (Pinecone/Weaviate/
+  Qdrant)/Elasticsearch/Oracle all now have real protocol-level source connectors, though most (and
+  Oracle especially, which reverse-engineers the TTC wire protocol) are unverified against a live server
+  of that kind. See `TODO.md` Phase 15 for the exact per-connector state.
 - **`tpt-operator/`** — a Kubernetes operator (kube-rs) for cluster lifecycle management.
 
 ## Getting started
@@ -83,11 +89,11 @@ engine:
 ```bash
 cd tpt-keystone
 cargo build
-cargo run                      # starts a single-node writer on 0.0.0.0:5432, local-fs storage under tpt-data/
+cargo run                      # starts a single-node writer on 0.0.0.0:55432 (TPT_PG_ADDR overrides), local-fs storage under tpt-data/
 cargo test                     # unit tests + the Phase 3 multi-node cloud-storage integration tests
 ```
 
-Once running, connect with any Postgres client, e.g. `psql -h localhost -p 5432`, or use the `tpt` CLI
+Once running, connect with any Postgres client, e.g. `psql -h localhost -p 55432`, or use the `tpt` CLI
 (`cd tpt-cli && cargo run -- query "SELECT 1"`). Other services on the same node: MCP on `:5433`
 (`TPT_MCP_ADDR`), the HTTP/JSON bridge for browsers on `:5435` (`TPT_HTTP_ADDR`), the Flux WebSocket
 bridge on `:5434` (`TPT_FLUX_WS_ADDR`), and Prometheus metrics on `:9187` (`TPT_METRICS_ADDR`).
@@ -138,11 +144,12 @@ This starts a single-node writer and maps the following host ports:
 
 ## Roadmap
 
-See [`TODO.md`](TODO.md) for the full 17-phase plan and, critically, the per-item honesty notes on what's
-verified vs. stubbed vs. explicitly scope-cut. Known open gaps across the whole platform: no wire-level
-auth/TLS anywhere, no distributed (multi-node) secondary indexes for any of the six extension engines
-(all local/single-node), no benchmark harness (every throughput/latency figure in the specs is
-unverified), and several Harbor source connectors and SDK-mobile targets remain stubs.
+See [`TODO.md`](TODO.md) for the full 17-phase plan (plus Phase 18/19 hardening follow-ups) and,
+critically, the per-item honesty notes on what's verified vs. stubbed vs. explicitly scope-cut. Known
+open gaps across the whole platform: wire-level auth/TLS is opt-in, not mandatory, and off by default;
+no distributed (multi-node) secondary indexes for any of the six extension engines (all
+local/single-node); no benchmark harness (every throughput/latency figure in the specs is unverified);
+and SDK-mobile targets remain stubs (Harbor's source connectors are no longer stubs — see above).
 
 ## License
 

@@ -79,7 +79,22 @@ impl Parser {
             }
             Token::Alter => {
                 self.advance();
-                self.parse_alter_table()
+                match self.peek() {
+                    Token::Table => self.parse_alter_table(),
+                    Token::Role => self.parse_alter_role(),
+                    other => anyhow::bail!(
+                        "expected TABLE or ROLE after ALTER, got {:?}",
+                        other
+                    ),
+                }
+            }
+            Token::Grant => {
+                self.advance();
+                self.parse_grant()
+            }
+            Token::Revoke => {
+                self.advance();
+                self.parse_revoke()
             }
             Token::Set => {
                 self.advance();
@@ -289,17 +304,9 @@ impl Parser {
                 self.advance();
                 self.parse_create_index()
             }
-            Token::Function => {
+            Token::Role => {
                 self.advance();
-                self.parse_create_function()
-            }
-            Token::Sequence => {
-                self.advance();
-                self.parse_create_sequence()
-            }
-            Token::Topic => {
-                self.advance();
-                self.parse_create_topic()
+                self.parse_drop_role()
             }
             other => anyhow::bail!(
                 "expected TABLE, INDEX, FUNCTION, SEQUENCE, or TOPIC after CREATE, got {:?}",
@@ -596,8 +603,231 @@ impl Parser {
         Ok(Stmt::AlterTable(AlterTableStmt { table, action }))
     }
 
-    /// `(ident, ident, ...)`.
-    fn parse_paren_ident_list(&mut self) -> anyhow::Result<Vec<String>> {
+    /// `CREATE ROLE [IF NOT EXISTS] name
+    ///   [SUPERUSER | NOSUPERUSER] [LOGIN | NOLOGIN]
+    ///   [PASSWORD '...'] [IN ROLE a, b, ...]`.
+    fn parse_create_role(&mut self) -> anyhow::Result<Stmt> {
+        // `IF NOT EXISTS` is accepted syntactically; catalog-level
+        // idempotency is Phase 20's concern.
+        if self.peek() == &Token::If && self.peek2() == &Token::Not {
+            self.advance();
+            self.advance();
+            self.expect(&Token::Exists)?;
+        }
+        let mut superuser = false;
+        let mut can_login = true;
+        let mut password = None;
+        let mut in_role = Vec::new();
+
+        loop {
+            match self.peek() {
+                Token::Superuser => {
+                    self.advance();
+                    superuser = true;
+                }
+                Token::NoSuperuser => {
+                    self.advance();
+                    superuser = false;
+                }
+                Token::Login => {
+                    self.advance();
+                    can_login = true;
+                }
+                Token::NoLogin => {
+                    self.advance();
+                    can_login = false;
+                }
+                Token::Password => {
+                    self.advance();
+                    match self.advance().clone() {
+                        Token::StringLiteral(s) => password = Some(s),
+                        other => {
+                            anyhow::bail!("expected string literal password after PASSWORD, got {:?}", other)
+                        }
+                    }
+                }
+                Token::In => {
+                    self.advance();
+                    self.expect(&Token::Role)?;
+                    in_role.push(self.parse_ident_string()?);
+                    while self.eat(&Token::Comma) {
+                        in_role.push(self.parse_ident_string()?);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        Ok(Stmt::CreateRole(CreateRoleStmt {
+            name,
+            superuser,
+            can_login,
+            password,
+            in_role,
+        }))
+    }
+
+    /// `ALTER ROLE name [SUPERUSER|NOSUPERUSER] [LOGIN|NOLOGIN]
+    ///   [PASSWORD '...']` — each clause optional, applied independently.
+    fn parse_alter_role(&mut self) -> anyhow::Result<Stmt> {
+        let name = self.parse_ident_string()?;
+        let mut superuser = None;
+        let mut can_login = None;
+        let mut password = None;
+
+        loop {
+            match self.peek() {
+                Token::Superuser => {
+                    self.advance();
+                    superuser = Some(true);
+                }
+                Token::NoSuperuser => {
+                    self.advance();
+                    superuser = Some(false);
+                }
+                Token::Login => {
+                    self.advance();
+                    can_login = Some(true);
+                }
+                Token::NoLogin => {
+                    self.advance();
+                    can_login = Some(false);
+                }
+                Token::Password => {
+                    self.advance();
+                    match self.advance().clone() {
+                        Token::StringLiteral(s) => password = Some(s),
+                        other => {
+                            anyhow::bail!("expected string literal password after PASSWORD, got {:?}", other)
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        Ok(Stmt::AlterRole(AlterRoleStmt {
+            name,
+            superuser,
+            can_login,
+            password,
+        }))
+    }
+
+    /// `DROP ROLE [IF EXISTS] name`.
+    fn parse_drop_role(&mut self) -> anyhow::Result<Stmt> {
+        let if_exists = self.peek() == &Token::If && self.peek2() == &Token::Exists;
+        if if_exists {
+            self.advance();
+            self.advance();
+        }
+        let name = self.parse_ident_string()?;
+        Ok(Stmt::DropRole(DropRoleStmt { if_exists, name }))
+    }
+
+    /// `GRANT ... TO grantee [, ...]`.
+    /// Disambiguated by the first token after `GRANT`: a known privilege
+    /// name (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP`,
+    /// `USAGE`, or `ALL`) ⇒ object-privilege grant; a bare identifier ⇒
+    /// role-membership grant (`GRANT role TO role`).
+    fn parse_grant(&mut self) -> anyhow::Result<Stmt> {
+        let (is_role_grant, roles, privileges, object) = self.parse_grant_or_revoke_head(true)?;
+        self.expect(&Token::To)?;
+        let grantees = self.parse_role_name_list()?;
+        Ok(Stmt::Grant(GrantStmt {
+            is_role_grant,
+            roles,
+            privileges,
+            object,
+            grantees,
+        }))
+    }
+
+    /// `REVOKE ... FROM grantee [, ...]`.
+    fn parse_revoke(&mut self) -> anyhow::Result<Stmt> {
+        let (is_role_grant, roles, privileges, object) = self.parse_grant_or_revoke_head(false)?;
+        self.expect(&Token::From)?;
+        let grantees = self.parse_role_name_list()?;
+        Ok(Stmt::Revoke(RevokeStmt {
+            is_role_grant,
+            roles,
+            privileges,
+            object,
+            grantees,
+        }))
+    }
+
+    /// Shared head parser for `GRANT`/`REVOKE`: returns the
+    /// role-grant flag, role list / privilege list, and target object.
+    fn parse_grant_or_revoke_head(
+        &mut self,
+        is_grant: bool,
+    ) -> anyhow::Result<(bool, Vec<String>, Vec<Privilege>, GrantObject)> {
+        // Role-membership grant/revoke: `GRANT role [, ...] TO ...`.
+        if matches!(self.peek(), Token::Ident(_)) && !is_privilege_keyword(&self.peek()) {
+            let roles = self.parse_role_name_list()?;
+            return Ok((true, roles, vec![], GrantObject::Database));
+        }
+
+        // Object-privilege grant/revoke.
+        let privileges = self.parse_privilege_list()?;
+        self.eat(&Token::Privileges); // optional trailing keyword
+        let object = if self.eat(&Token::On) {
+            if self.eat(&Token::Database) {
+                GrantObject::Database
+            } else {
+                self.eat(&Token::Table);
+                GrantObject::Table(self.parse_object_name()?)
+            }
+        } else if is_grant {
+            anyhow::bail!("GRANT privileges require an ON <object> clause");
+        } else {
+            anyhow::bail!("REVOKE privileges require an ON <object> clause");
+        };
+        Ok((false, vec![], privileges, object))
+    }
+
+    /// `ALL` (→ all seven privileges) or a comma-separated privilege list.
+    fn parse_privilege_list(&mut self) -> anyhow::Result<Vec<Privilege>> {
+        if self.eat(&Token::All) {
+            return Ok(vec![
+                Privilege::Select,
+                Privilege::Insert,
+                Privilege::Update,
+                Privilege::Delete,
+                Privilege::Create,
+                Privilege::Drop,
+                Privilege::Usage,
+            ]);
+        }
+        let mut privs = vec![self.parse_one_privilege()?];
+        while self.eat(&Token::Comma) {
+            privs.push(self.parse_one_privilege()?);
+        }
+        Ok(privs)
+    }
+
+    fn parse_one_privilege(&mut self) -> anyhow::Result<Privilege> {
+        match self.advance().clone() {
+            Token::Select => Ok(Privilege::Select),
+            Token::Insert => Ok(Privilege::Insert),
+            Token::Update => Ok(Privilege::Update),
+            Token::Delete => Ok(Privilege::Delete),
+            Token::Create => Ok(Privilege::Create),
+            Token::Drop => Ok(Privilege::Drop),
+            Token::Usage => Ok(Privilege::Usage),
+            other => anyhow::bail!("expected a privilege name, got {:?}", other),
+        }
+    }
+
+    /// `role [, role ...]` — a non-empty role-name list.
+    fn parse_role_name_list(&mut self) -> anyhow::Result<Vec<String>> {
+        let mut names = vec![self.parse_ident_string()?];
+        while self.eat(&Token::Comma) {
+            names.push(self.parse_ident_string()?);
+        }
+        Ok(names)
+    }
         self.expect(&Token::LParen)?;
         let mut names = vec![self.parse_ident_string()?];
         while self.eat(&Token::Comma) {
@@ -1723,6 +1953,24 @@ impl Parser {
             else_,
         })
     }
+}
+
+/// Whether `tok` is a privilege-name keyword usable in a `GRANT`/`REVOKE`
+/// privilege list (`GRANT SELECT, INSERT ON ...`). Used to disambiguate an
+/// object-privilege grant from a role-membership grant (`GRANT role TO role`),
+/// where the first token is instead a plain role-name identifier.
+fn is_privilege_keyword(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Select
+            | Token::Insert
+            | Token::Update
+            | Token::Delete
+            | Token::Create
+            | Token::Drop
+            | Token::Usage
+            | Token::All
+    )
 }
 
 fn infix_bp(tok: &Token) -> Option<(u8, u8, BinOp)> {

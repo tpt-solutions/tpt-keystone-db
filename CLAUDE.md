@@ -20,9 +20,10 @@ checking `TODO.md` first.
   (`sdk-web`/`sdk-server`/`sdk-edge` TypeScript SDKs) are separate crates/packages, each building
   independently (no root Cargo workspace).
 
-Every "implemented" item has real, scoped caveats — no wire-level auth/TLS, no distributed secondary
-indexes (all six extension engines' indexes are local/single-node), no benchmark harness, several Harbor
-source connectors are stubs. **`TODO.md` is the authoritative phase-by-phase status** — it documents
+Every "implemented" item has real, scoped caveats — wire-level SCRAM-SHA-256 auth and TLS exist but are
+opt-in (empty `_tpt_roles`/no `TPT_TLS_CERT_PATH`+`TPT_TLS_KEY_PATH` keeps the old no-auth/no-TLS
+zero-config default), no distributed secondary indexes (all six extension engines' indexes are
+local/single-node), no benchmark harness. **`TODO.md` is the authoritative phase-by-phase status** — it documents
 scope cuts and what's actually been verified (often "unit/integration-tested in-process," not "run
 against a real external server" or "run at scale") vs. just claimed; read the relevant phase there before
 assuming a feature is missing, complete, or production-ready. `PHASE2_PLAN.md` (root and duplicated in
@@ -47,10 +48,10 @@ core engine, which every other crate/SDK talks to over the wire:
 ```
 cd tpt-keystone
 cargo build
-cargo run                      # starts a single-node writer on 0.0.0.0:5432, local-fs storage under tpt-data/
+cargo run                      # starts a single-node writer on 0.0.0.0:55432 (TPT_PG_ADDR overrides), local-fs storage under tpt-data/
 cargo test                     # unit tests + storage::phase3_tests (multi-node cloud-storage integration tests)
 cargo test phase3_tests::<name>  # run one Phase 3 test
-psql -h localhost -p 5432      # connect once running (no auth; startup handshake auto-approves)
+psql -h localhost -p 55432     # connect once running (no auth by default; SCRAM only kicks in once _tpt_roles is non-empty)
 ```
 
 Other listeners `cargo run` starts on the same node: MCP (`TPT_MCP_ADDR`, default `:5433`), the HTTP/JSON
@@ -64,8 +65,9 @@ native test path since it's browser-only. TypeScript packages (`packages/*`) use
 `node --test`; `sdk-python` uses `uv pip install -e ".[pandas,dev]"`; `sdk-go` uses `go build ./...`/
 `go test ./...` (`go test -tags live ./...` needs a running `tpt-keystone` node).
 
-No lint/CI config exists in the repo (no `.github/workflows`, no `rustfmt.toml`/`clippy.toml`) — use
-`cargo fmt` / `cargo clippy` at your own discretion but there is no enforced convention to match.
+`.github/workflows/ci.yml` runs the test suite; no `rustfmt.toml`/`clippy.toml` exist yet, so use
+`cargo fmt` / `cargo clippy` at your own discretion but there is no enforced formatting/lint convention
+to match.
 
 ### Running two nodes against shared storage (Phase 3 cloud-native mode)
 

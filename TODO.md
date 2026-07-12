@@ -1154,8 +1154,10 @@ unbuilt or existing-but-heuristic work worth deepening. Not yet started.
   documented zero-config quickstart (`psql -h localhost -p 5432`, no flags) is unchanged. The catalog is
   seeded via `TPT_AUTH_BOOTSTRAP_USER`/`TPT_AUTH_BOOTSTRAP_PASSWORD` (mirrors the existing `TPT_MCP_TOKEN`
   bootstrap-secret precedent) — solves "how do you create the first role with no SQL access yet."
-  **Scope cut:** no `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE` DDL yet; a role can only be created via the
-  bootstrap env vars for this pass. Verified against a real `psql` client (not just unit tests) — see
+  **Scope cut:** no `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE` DDL yet, and no authorization layer at all —
+  every authenticated connection has unrestricted access to everything (authentication only, no
+  privilege model). See **Phase 20** for the follow-up that closes this gap. Verified against a real
+  `psql` client (not just unit tests) — see
   `wire::scram::tests` for the protocol-level tests (including a regression test for real `libpq`
   sending a `y,,` gs2-header over TLS, which the first implementation didn't handle and failed
   `psql sslmode=require` against a real bootstrap credential until fixed).
@@ -1249,6 +1251,54 @@ feedback across every crate/SDK, not just whatever the last contributor happened
 
 ---
 
+## Phase 20 — RBAC Authorization Layer
+
+Phase 18 built wire-level *authentication* (SCRAM-SHA-256) but explicitly scoped out authorization —
+today an authenticated connection has unrestricted access to every table. This phase is that follow-up:
+a Postgres-style DAC layer (role catalog, membership/inheritance, GRANT/REVOKE object privileges,
+superuser bypass), not the Zanzibar-style ReBAC tuple model CLAUDE.md separately anticipates pairing
+with it later (ReBAC itself stays out of scope here).
+
+- [ ] Role-attribute catalog — extend `_tpt_roles` (`wire/roles.rs`) with `rolsuper`/`rolcanlogin`
+  columns (append-only, with an internal `ALTER TABLE ADD COLUMN` migration in `ensure_schema` for
+  existing installs); `bootstrap_if_empty` marks the env-var-seeded first role superuser.
+- [ ] Role membership — new `_tpt_role_members` system table + `wire/role_members.rs::RoleMemberStore`
+  (`grant_membership`/`revoke_membership`/`direct_memberships`/`all_memberships` transitive closure,
+  cycle rejection on grant). Scope cut: no `WITH ADMIN OPTION`, no `NOINHERIT` roles.
+- [ ] Object privileges — new `_tpt_privileges` system table + `wire/privileges.rs::PrivilegeStore`
+  (`Privilege` enum: Select/Insert/Update/Delete/Create/Drop/Usage; `GrantObject`: `Table`/`Database`).
+  Scope cuts: no column-level privileges, no `WITH GRANT OPTION` re-delegation, no
+  `ALTER DEFAULT PRIVILEGES`, no object-ownership model (a non-superuser's own `CREATE TABLE` grants no
+  implicit privileges on it — must be separately `GRANT`ed or be superuser), no `SET ROLE`/
+  `SET SESSION AUTHORIZATION`.
+- [ ] Parser/AST — `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` (`sql/ast.rs`, `sql/lexer.rs`,
+  `sql/parser.rs`), including `GRANT role TO role` vs. `GRANT priv ON obj TO role` disambiguation. Scope
+  cut: no `GRANT ... ON ALL TABLES IN SCHEMA ...` (no schema/namespace concept in this codebase —
+  `ON DATABASE` is the only whole-instance granularity).
+- [ ] Session identity threading — `executor/rbac.rs::Actor` (rolname/superuser/transitive memberships),
+  built once per connection right after the SCRAM handshake in `wire/session.rs::run()` (or
+  `Actor::unrestricted()` when `_tpt_roles` is empty, preserving the zero-config default), threaded
+  through `run_query_loop`/`execute_simple`/`execute_parsed`/`execute_parsed_inner`.
+- [ ] Enforcement — `executor/rbac.rs::check()` (superuser/no-rolname short-circuit, direct privilege,
+  then per-membership privilege, else deny with SQLSTATE `42501` via a downcastable marker error type
+  rather than the generic `42601` every other executor error currently reports); per-`Stmt`-arm checks in
+  `execute_parsed_inner`; `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` are superuser-only, no
+  delegation model this pass. Plus a dedicated guard rejecting direct DML/DDL against reserved `_tpt_*`
+  system-catalog tables for non-superusers, so `INSERT INTO _tpt_roles ...` can't bypass `CREATE ROLE`.
+- [ ] `pg_catalog` surface (optional/droppable) — `pg_roles`/`pg_auth_members` virtual tables in
+  `executor/catalog.rs`, following the existing synthesized-OID virtual-table pattern.
+- [ ] Tests — store-level round-trips (`wire/role_members_tests.rs`, `wire/privileges_tests.rs`),
+  integration enforcement suite (`executor/rbac_tests.rs`: per-statement allow/deny, superuser bypass,
+  membership inheritance, the `_tpt_roles`-empty no-op regression across every statement kind,
+  system-catalog write protection, admin-only role/grant DDL), parser `Stmt`-shape tests, and one
+  wire-level end-to-end test asserting a denied query's `ErrorInfo` carries SQLSTATE `42501`.
+
+**Milestone:** a bootstrapped superuser can `CREATE ROLE`/`GRANT` a restricted role via SQL alone (no
+further env-var dependency), that role is denied access to tables/statements it hasn't been granted, and
+the zero-config (`_tpt_roles` empty) quickstart remains behaviorally unchanged.
+
+---
+
 ## Open / Remaining Tasks
 
 Consolidated view of every unchecked (`[ ]`) / partial (`[~]`) item across the roadmap.
@@ -1329,14 +1379,22 @@ environment doesn't have, not just more engineering time)
 > unrelated compile errors and three test bugs found in the InfluxDB/Kafka/Vector connectors while
 > verifying this were fixed along the way (see the follow-up note above for exactly what).
 
+### Authorization — buildable here, no external infra needed
+- **Phase 20 — RBAC Authorization Layer:** entirely unbuilt as of this pass — see Phase 20 above for the
+  full checklist (catalog tables, parser/AST, session threading, enforcement, `pg_catalog` surface,
+  tests). Unlike the gaps below, this is pure in-repo engineering with no external dependency; it's
+  listed as remaining, not scope-cut.
+
 **Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
 real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision
 itself), 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
-effort). Phase 19 (adoption/CI/test-coverage hardening) and Harbor's 5 stub-connector replacements are
-now both fully closed out — see their respective closeout notes above (Oracle's connector carries an
-explicit, higher-than-usual confidence caveat rather than being unqualified). Every item that was a pure
-"more code, no external dependency" scope cut *from every prior pass* has been closed out; what remains
-either needs real external infrastructure/hardware, or is blocked on platform availability.
+effort), and 1 fully in-repo authorization layer (Phase 20 — RBAC) not yet started. Phase 19
+(adoption/CI/test-coverage hardening) and Harbor's 5 stub-connector replacements are now both fully
+closed out — see their respective closeout notes above (Oracle's connector carries an explicit,
+higher-than-usual confidence caveat rather than being unqualified). Every item that was a pure
+"more code, no external dependency" scope cut *from every prior pass* has been closed out except the new
+Phase 20 RBAC work; what else remains either needs real external infrastructure/hardware, or is blocked
+on platform availability.
 
 ---
 

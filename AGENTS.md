@@ -2,7 +2,7 @@
 
 ## What's real vs roadmap
 
-This is a multi-engine data platform where the **Keystone relational engine** (`tpt-keystone/`) is the core, and most other engines are implemented as modules inside it (not separate crates). Phases 0–15 of `TODO.md` are implemented. Only Phase 16 (Synapse) and Phase 17 (Mirror) remain unbuilt.
+This is a multi-engine data platform where the **Keystone relational engine** (`tpt-keystone/`) is the core, and most other engines are implemented as modules inside it (not separate crates). All 17 roadmap phases in `TODO.md` have an implementation, including Synapse (`src/synapse/`) and Mirror (`src/mirror/`); Phase 18 ("Hardening & Follow-ups") and Phase 19 ("Adoption, CI, and Test-Coverage Hardening") followed with further fixes and coverage. Don't assume a feature is unbuilt without checking `TODO.md` first.
 
 **Rust crates** (each independent — no workspace `Cargo.toml`):
 | Crate | Purpose | Status |
@@ -10,7 +10,7 @@ This is a multi-engine data platform where the **Keystone relational engine** (`
 | `tpt-keystone/` | Core engine (relational + geo/graph/vector/time-series/document/streaming) | Substantial |
 | `tpt-sdk/` | Rust client SDK (sync + async, FFI) | Real, unverified by `cargo test` |
 | `tpt-cli/` | `tpt` CLI binary (REPL, query, export/import, migrate, stream) | Real |
-| `tpt-harbor/` | Migration platform (Harbor/PG implemented, others are stubs) | Real |
+| `tpt-harbor/` | Migration platform (PG plus real InfluxDB/Kafka/vector-DB/Oracle source connectors; Oracle is reverse-engineered TTC and least verified) | Real |
 | `tpt-canvas/` | WASM frontend framework (builds to `wasm32-unknown-unknown`) | Real |
 | `tpt-operator/` | Kubernetes operator (CRD-based lifecycle) | Real |
 
@@ -41,9 +41,9 @@ All commands from `tpt-keystone/`:
 | `cargo test prism_tests` | Vector/AI engine tests |
 | `cargo test phase4_tests` | Phase 4 (WASM UDFs, pg_catalog, COPY, cursors, etc.) |
 | `cargo test pg_dump_tests` | pg_dump compatibility tests |
-| `psql -h localhost -p 55432` | Connect (no auth; auto-approved) |
+| `psql -h localhost -p 55432` | Connect (no auth by default; SCRAM-SHA-256 kicks in once `_tpt_roles` is non-empty, TLS if `TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set) |
 
-No CI, no `rustfmt.toml`/`clippy.toml`, no lint/format enforcement — use `cargo fmt`/`cargo clippy` at discretion.
+`.github/workflows/ci.yml` runs the test suite; `docker-compose.yml` at repo root gives a quickstart. No `rustfmt.toml`/`clippy.toml` yet — use `cargo fmt`/`cargo clippy` at discretion.
 
 ### Listeners (all started by `cargo run`)
 
@@ -80,9 +80,9 @@ TS packages use Node's built-in `node --test` runner (not jest/vitest). `pretest
 
 ## Architecture (4 layers, each thin over the one below)
 
-- **`src/wire/`** — Postgres wire protocol v3, hand-written. `codec.rs` frames bytes; `messages.rs` defines types/OIDs; `session.rs` drives startup handshake → simple/extended query loop. Also includes `http_query.rs` (Canvas HTTP/JSON bridge) and `websocket.rs` (Flux WebSocket streaming).
-- **`src/sql/`** — Hand-written lexer → recursive-descent parser → `ast.rs` node types. Single entry point: `sql::parse()` returns a `Stmt`. Includes `cache.rs` (shared prepared-statement cache).
-- **`src/executor/`** — Turns `Stmt` → `QueryResult` (`mod.rs`). SELECT executes as one pipeline in `execute_select_with_cte`. Hash join (build = smaller input); else nested-loop.
+- **`src/wire/`** — Postgres wire protocol v3, hand-written. `codec.rs` frames bytes; `messages.rs` defines types/OIDs; `session.rs` drives startup handshake → simple/extended query loop. Also includes `http_query.rs` (Canvas HTTP/JSON bridge), `websocket.rs` (Flux WebSocket streaming), `scram.rs` (SCRAM-SHA-256 auth) and `tls.rs` (rustls TLS) — both opt-in, see the auth/TLS row above — plus `roles.rs` for the `_tpt_roles` catalog table.
+- **`src/sql/`** — Hand-written lexer → recursive-descent parser → `ast.rs` node types. Single entry point: `sql::parse()` returns a `Stmt`. Includes `cache.rs` (shared prepared-statement cache) and GQL-subset `MATCH` pattern-query parsing (`parse_match`) for Plexus.
+- **`src/executor/`** — Turns `Stmt` → `QueryResult` (`mod.rs`). SELECT executes as one pipeline in `execute_select_with_cte`. Hash join (build = smaller input); else nested-loop. `eval.rs` also implements POSIX regex operators (`~`/`!~`/`~*`/`!~*`) and GQL `MATCH` execution (`gql.rs`).
 - **`src/storage/`** — LSM engine (MemTable + SSTable + levelled compaction, `lsm.rs`/`sstable.rs`), MVCC/transaction manager (`mvcc.rs`/`tx.rs`), local B-Tree indexes (`btree.rs`, local-only per Phase 3 scope cut). `database.rs` ties LSM + MVCC + schema catalog + indexes together. Also contains `compress.rs` (Gorilla/delta-of-delta codecs), `flux.rs` (event streaming log), `jsonb.rs` (JSON binary format), `json_schema.rs` (schema validation).
 
 ## Important src modules beyond the core 4
@@ -91,8 +91,8 @@ TS packages use Node's built-in `node --test` runner (not jest/vitest). `pretest
 - **`src/metrics.rs`** / **`src/telemetry.rs`** — OpenTelemetry tracing setup.
 - **`src/geo/`** — Meridian geospatial engine: hand-written computational geometry, S2-inspired hierarchical grid, H3-inspired hex grid. Real implementations, not stubs.
 - **`src/graph/`** — Plexus graph engine: adjacency-list property graph, BFS/PageRank/community detection/triangle counting. Real implementations, not stubs.
-- **`src/vector/`** — Prism vector engine: HNSW index, L2/cosine/dot-product similarity. Real implementations, not stubs.
-- **`src/storage/geo_index.rs`**, **`src/storage/graph_index.rs`**, **`src/storage/ts_index.rs`**, **`src/storage/canopy_index.rs`**, **`src/storage/vector_index.rs`** — Local secondary index accelerators for each engine (all local-only, not object-store-replicated).
+- **`src/vector/`** — Prism vector engine: HNSW index, L2/cosine/dot-product similarity, hybrid BM25 search, and `gpu.rs` (wgpu batch-similarity offload). Real implementations, not stubs.
+- **`src/storage/geo_index.rs`**, **`src/storage/graph_index.rs`**, **`src/storage/ts_index.rs`**, **`src/storage/canopy_index.rs`**, **`src/storage/vector_index.rs`** — Local secondary index accelerators for each engine (all local-only, not object-store-replicated). `vector_index.rs` is joined by `sharded_vector_index.rs` (sharded HNSW), `diskann_index.rs` (DiskANN/Vamana), and `ivf_pq_index.rs` (IVF-PQ) for larger/alternative vector index strategies. `src/geo/gpu.rs` mirrors the vector engine's wgpu offload for spatial joins.
 
 ## Key reference files
 
