@@ -1404,15 +1404,39 @@ environment doesn't have, not just more engineering time)
   (store round-trips + `executor/rbac_tests.rs` integration) are all wired up — see Phase 20 above. Pure
   in-repo engineering with no external dependency.
 
+### SDK & UDF follow-ups (buildable here, no external infra needed)
+- [ ] **tpt-sdk bulk/COPY ingest path:** add `KeystoneClient::copy_in(table, columns, rows) ->
+  Result<u64, KeystoneError>` (and the `blocking::Client` equivalent) driving the server's existing
+  `COPY table FROM STDIN` path (`tpt-keystone/src/wire`, Phase 4 — TODO.md:110) instead of one
+  `query`/`query_params` round trip per row. Today `tpt-sdk`'s only client surface is
+  `KeystoneClient::query`/`query_params` (TODO.md:654,656) — fine for a demo, but undercuts the
+  platform's "terabytes of high-frequency time-series data" pitch for any bulk-ingest consumer
+  (e.g. a `tpt-fluxstream`-style pipeline). Highest-leverage item of the three below.
+- [ ] **Array/bytea-capable UDF parameters:** WASM UDFs (`executor/udf.rs`, Phase 4 — TODO.md:109)
+  take only scalar `int8`/`float8`/`bool` args/returns; `tpt_sdk::keystone::Value` is
+  `Null | Bool | Int(i64) | Float(f64) | Text(String)` with no array/bytea variant. Needs: a new
+  `Value` variant (e.g. `FloatArray(Vec<f64>)` and/or `Bytea(Vec<u8>)`) plus matching wire
+  encode/decode; a linear-memory + allocator ABI in the wasmtime harness so a UDF can receive e.g. a
+  signal window for in-DB FFT-style work (the original spec's §5.1 promise); and resolving the
+  wasmtime trap/fuel-limit crash already flagged as untested at TODO.md:116 (`STATUS_STACK_BUFFER_OVERRUN`
+  on this dev host) — a landmine for any UDF user regardless of this work. Without this, in-DB FFT
+  stays impossible and downstream consumers must do FFT natively instead.
+- [ ] **(Lower priority) Binary-format wire encoding:** the extended query protocol
+  (`src/wire/session.rs`) is text-format only in both directions. Binary encoding would remove
+  string-parse overhead for high-frequency numeric ingestion/reads. Nice-to-have, not blocking
+  either item above.
+
 **Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
 real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision
-itself), and 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
-effort). Phase 19 (adoption/CI/test-coverage hardening), Harbor's 5 stub-connector replacements, and the
-Phase 20 RBAC authorization layer are now all fully closed out — see their respective closeout notes
-above (Oracle's connector carries an explicit, higher-than-usual confidence caveat rather than being
-unqualified). Every item that was a pure "more code, no external dependency" scope cut *from every prior
-pass* has now been closed out; what else remains either needs real external infrastructure/hardware, or
-is blocked on platform availability.
+itself), 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
+effort), and 3 new SDK/UDF follow-ups above that are buildable in this environment but not yet started
+(bulk/COPY ingest for `tpt-sdk`, array/bytea UDF parameters, binary wire encoding). Phase 19
+(adoption/CI/test-coverage hardening), Harbor's 5 stub-connector replacements, and the Phase 20 RBAC
+authorization layer are now all fully closed out — see their respective closeout notes above (Oracle's
+connector carries an explicit, higher-than-usual confidence caveat rather than being unqualified).
+Every item that was a pure "more code, no external dependency" scope cut *from every prior pass before
+this one* has been closed out; what else remains either needs real external infrastructure/hardware, is
+blocked on platform availability, or is one of the 3 newly-added SDK/UDF follow-ups above.
 
 ---
 
