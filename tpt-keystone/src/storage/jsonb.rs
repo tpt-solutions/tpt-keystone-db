@@ -80,7 +80,6 @@ pub fn decode_cell(bytes: &[u8]) -> Option<Vec<u8>> {
     serde_json::to_vec(&value).ok()
 }
 
-
 fn write_varint(out: &mut Vec<u8>, mut n: u64) {
     loop {
         let byte = (n & 0x7f) as u8;

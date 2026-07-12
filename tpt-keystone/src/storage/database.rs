@@ -1837,15 +1837,21 @@ impl Database {
             base.extend_from_slice(vector.as_slice());
         }
 
-        let hits = crate::vector::gpu::gpu_brute_force_knn(query, &base, dim, Metric::L2, k).ok()?;
+        let hits =
+            crate::vector::gpu::gpu_brute_force_knn(query, &base, dim, Metric::L2, k).ok()?;
         Some(
             hits.into_iter()
                 .filter_map(|(idx, dist)| {
                     let key = &keys[idx as usize];
-                    self.read(table, key)
-                        .ok()
-                        .flatten()
-                        .map(|v| (KeyValue { key: key.clone(), value: v }, dist))
+                    self.read(table, key).ok().flatten().map(|v| {
+                        (
+                            KeyValue {
+                                key: key.clone(),
+                                value: v,
+                            },
+                            dist,
+                        )
+                    })
                 })
                 .collect(),
         )

@@ -387,7 +387,10 @@ pub fn to_hex(bytes: &[u8]) -> String {
 
 pub fn from_hex(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("\\x")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("\\x"))
+        .unwrap_or(s);
     if s.len() % 2 != 0 {
         bail!("odd-length hex string");
     }
@@ -732,9 +735,7 @@ mod tests {
     fn transform_4326_to_3857_and_back() {
         let g = Geometry::Point(Coord::xy(-0.1276, 51.5074)); // London
         let merc = transform_geometry(&g, 4326, 3857).unwrap();
-        let Geometry::Point(m) = &merc else {
-            panic!()
-        };
+        let Geometry::Point(m) = &merc else { panic!() };
         // Known approximate Web Mercator coords for London.
         assert!((-14210.0..-14190.0).contains(&m.x), "got {}", m.x);
         assert!((6710000.0..6720000.0).contains(&m.y), "got {}", m.y);

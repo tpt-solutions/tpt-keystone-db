@@ -21,9 +21,9 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+use crate::storage::vector_index::VectorIndex;
 use crate::vector::hnsw::{HnswConfig, Metric};
 use crate::vector::shard::ConsistentHashRing;
-use crate::storage::vector_index::VectorIndex;
 
 pub struct ShardedVectorIndex {
     ring: ConsistentHashRing,

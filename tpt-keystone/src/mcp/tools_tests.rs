@@ -65,8 +65,12 @@ fn schema_combines_tables_and_columns() {
 fn query_rejects_non_select_show() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let err = call(&db, "query", &json!({"sql": "INSERT INTO users (id, name) VALUES (3, 'x')"}))
-        .unwrap_err();
+    let err = call(
+        &db,
+        "query",
+        &json!({"sql": "INSERT INTO users (id, name) VALUES (3, 'x')"}),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("read-only"));
 }
 
@@ -110,7 +114,12 @@ fn mutate_parses_ddl_with_no_count_tag() {
 fn explain_returns_plan_shape() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "explain", &json!({"sql": "SELECT * FROM users WHERE id = 1"})).unwrap();
+    let result = call(
+        &db,
+        "explain",
+        &json!({"sql": "SELECT * FROM users WHERE id = 1"}),
+    )
+    .unwrap();
     assert_eq!(result["statement"], "select");
     assert_eq!(result["has_where"], true);
     assert_eq!(result["tables"][0], "users");
@@ -139,8 +148,18 @@ fn related_respects_limit_clamp() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
     // limit 0 clamps up to 1, limit 1000 clamps down to 100 — neither should error.
-    assert!(call(&db, "related", &json!({"table": "users", "id": "1", "limit": 0})).is_ok());
-    assert!(call(&db, "related", &json!({"table": "users", "id": "1", "limit": 1000})).is_ok());
+    assert!(call(
+        &db,
+        "related",
+        &json!({"table": "users", "id": "1", "limit": 0})
+    )
+    .is_ok());
+    assert!(call(
+        &db,
+        "related",
+        &json!({"table": "users", "id": "1", "limit": 1000})
+    )
+    .is_ok());
 }
 
 #[test]

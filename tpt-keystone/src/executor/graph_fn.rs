@@ -394,7 +394,9 @@ pub(super) fn resolve_graph_function(
                 .map_err(|e| anyhow::anyhow!("aggregate: invalid pipeline JSON: {e}"))?;
             let stages = stages_val
                 .as_array()
-                .ok_or_else(|| anyhow::anyhow!("aggregate: pipeline must be a JSON array of stages"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("aggregate: pipeline must be a JSON array of stages")
+                })?
                 .clone();
 
             let schema = db
@@ -410,7 +412,9 @@ pub(super) fn resolve_graph_function(
                     let ctx = super::eval::RowContext::new(row.clone(), Some(schema_arc.clone()));
                     let mut map = serde_json::Map::new();
                     for col in &schema_arc.columns {
-                        let v = ctx.eval(&Expr::Ident(col.name.clone())).unwrap_or(Value::Null);
+                        let v = ctx
+                            .eval(&Expr::Ident(col.name.clone()))
+                            .unwrap_or(Value::Null);
                         map.insert(col.name.clone(), value_to_json(&v, &col.col_type));
                     }
                     map
@@ -764,7 +768,8 @@ pub(super) fn resolve_graph_function(
 fn value_to_json(v: &Value, col_type: &ColumnType) -> serde_json::Value {
     if *col_type == ColumnType::Json {
         if let Value::Text(s) = v {
-            return serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()));
+            return serde_json::from_str(s)
+                .unwrap_or_else(|_| serde_json::Value::String(s.clone()));
         }
     }
     match v {

@@ -230,11 +230,7 @@ fn psql_dt_meta_command_lists_user_tables() {
     let type_i = headers.iter().position(|h| h == "Type").unwrap();
     let owner_i = headers.iter().position(|h| h == "Owner").unwrap();
 
-    let mut names: Vec<String> = result
-        .rows
-        .iter()
-        .map(|r| cell_text(&r[name_i]))
-        .collect();
+    let mut names: Vec<String> = result.rows.iter().map(|r| cell_text(&r[name_i])).collect();
     names.sort();
     assert_eq!(names, vec!["things", "users", "widgets"]);
 

@@ -365,7 +365,11 @@ fn aggregate_table_function_runs_match_group_sort_pipeline() {
     assert_eq!(result.rows.len(), 2);
     // eng: 100 + 200 = 300 (the 20 is excluded by $match); sales: 50 + 150 = 200.
     let id_i = result.fields.iter().position(|f| f.name == "_id").unwrap();
-    let total_i = result.fields.iter().position(|f| f.name == "total").unwrap();
+    let total_i = result
+        .fields
+        .iter()
+        .position(|f| f.name == "total")
+        .unwrap();
     let n_i = result.fields.iter().position(|f| f.name == "n").unwrap();
     assert_eq!(cell_text(&result.rows[0][id_i]), "eng");
     assert_eq!(cell_text(&result.rows[0][total_i]), "300.0");

@@ -28,9 +28,8 @@ fn parses_simple_select_with_where_order_limit() {
 
 #[test]
 fn parses_select_joins() {
-    let stmt = parse_ok(
-        "SELECT * FROM a JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id CROSS JOIN d",
-    );
+    let stmt =
+        parse_ok("SELECT * FROM a JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id CROSS JOIN d");
     match stmt {
         Stmt::Select(s) => {
             let fj = s.from.expect("from");
@@ -88,12 +87,13 @@ fn parses_window_function_and_frame() {
     match stmt {
         Stmt::Select(s) => match &s.projections[0] {
             Projection::Expr {
-                expr: Expr::Window {
-                    partition_by,
-                    order_by,
-                    frame,
-                    ..
-                },
+                expr:
+                    Expr::Window {
+                        partition_by,
+                        order_by,
+                        frame,
+                        ..
+                    },
                 ..
             } => {
                 assert_eq!(partition_by.len(), 1);
@@ -154,7 +154,10 @@ fn parses_create_table_with_options() {
             assert!(s.columns[0].is_pk);
             assert!(!s.columns[0].nullable);
             assert!(!s.columns[1].nullable);
-            assert_eq!(s.options, vec![("json_schema".to_string(), "strict".to_string())]);
+            assert_eq!(
+                s.options,
+                vec![("json_schema".to_string(), "strict".to_string())]
+            );
         }
         other => panic!("expected CreateTable, got {other:?}"),
     }
@@ -309,13 +312,7 @@ fn pratt_parser_operator_precedence() {
             rhs,
             ..
         } => {
-            assert!(matches!(
-                *rhs,
-                Expr::BinaryOp {
-                    op: BinOp::Mul,
-                    ..
-                }
-            ));
+            assert!(matches!(*rhs, Expr::BinaryOp { op: BinOp::Mul, .. }));
         }
         other => panic!("expected top-level Add, got {other:?}"),
     }
@@ -326,13 +323,7 @@ fn pratt_parser_operator_precedence() {
         Expr::BinaryOp {
             op: BinOp::Or, rhs, ..
         } => {
-            assert!(matches!(
-                *rhs,
-                Expr::BinaryOp {
-                    op: BinOp::And,
-                    ..
-                }
-            ));
+            assert!(matches!(*rhs, Expr::BinaryOp { op: BinOp::And, .. }));
         }
         other => panic!("expected top-level Or, got {other:?}"),
     }
@@ -371,21 +362,24 @@ fn parses_posix_regex_operators() {
     // `~` binds tighter than AND, so `a ~ 'x' AND b ~ 'y'` groups each match.
     assert!(matches!(
         expr_ok("a ~ 'x' AND b ~ 'y'"),
-        Expr::BinaryOp {
-            op: BinOp::And,
-            ..
-        }
+        Expr::BinaryOp { op: BinOp::And, .. }
     ));
 }
 
 #[test]
 fn parses_between_like_in_exists() {
-    assert!(matches!(expr_ok("a BETWEEN 1 AND 10"), Expr::Between { negated: false, .. }));
+    assert!(matches!(
+        expr_ok("a BETWEEN 1 AND 10"),
+        Expr::Between { negated: false, .. }
+    ));
     assert!(matches!(
         expr_ok("a NOT BETWEEN 1 AND 10"),
         Expr::Between { negated: true, .. }
     ));
-    assert!(matches!(expr_ok("a LIKE 'x%'"), Expr::Like { negated: false, .. }));
+    assert!(matches!(
+        expr_ok("a LIKE 'x%'"),
+        Expr::Like { negated: false, .. }
+    ));
     match expr_ok("a IN (1, 2, 3)") {
         Expr::In {
             list: InList::Exprs(items),
@@ -401,7 +395,10 @@ fn parses_between_like_in_exists() {
         } => {}
         other => panic!("expected In with subquery, got {other:?}"),
     }
-    assert!(matches!(expr_ok("EXISTS (SELECT 1)"), Expr::Exists { negated: false, .. }));
+    assert!(matches!(
+        expr_ok("EXISTS (SELECT 1)"),
+        Expr::Exists { negated: false, .. }
+    ));
     assert!(matches!(
         expr_ok("NOT EXISTS (SELECT 1)"),
         Expr::Exists { negated: true, .. }
@@ -483,7 +480,8 @@ fn malformed_sql_returns_err() {
 
 #[test]
 fn parses_match_single_hop_out_directed_typed_edge() {
-    let stmt = parse_ok("MATCH (a)-[:FOLLOWS]->(b) ON follows(from_id) WHERE a = 'alice' RETURN a, b");
+    let stmt =
+        parse_ok("MATCH (a)-[:FOLLOWS]->(b) ON follows(from_id) WHERE a = 'alice' RETURN a, b");
     match stmt {
         Stmt::Match(m) => {
             assert_eq!(m.nodes, vec!["a".to_string(), "b".to_string()]);
@@ -505,7 +503,10 @@ fn parses_match_two_hop_chain_untyped_with_limit() {
     let stmt = parse_ok("MATCH (a)-[]->(b)-[]->(c) ON t(col) RETURN a, b, c LIMIT 5");
     match stmt {
         Stmt::Match(m) => {
-            assert_eq!(m.nodes, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            assert_eq!(
+                m.nodes,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
             assert_eq!(m.hops.len(), 2);
             assert!(m.hops.iter().all(|h| h.rel_type.is_none()));
             assert!(m.hops.iter().all(|h| h.direction == MatchDirection::Out));

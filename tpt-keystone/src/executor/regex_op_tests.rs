@@ -41,7 +41,9 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
 fn scalar(db: &Arc<Database>, sql: &str) -> Option<String> {
     let res = execute_query(sql, db.clone()).unwrap();
     assert_eq!(res.rows.len(), 1, "expected exactly one row for: {sql}");
-    res.rows[0][0].as_ref().map(|b| String::from_utf8(b.clone()).unwrap())
+    res.rows[0][0]
+        .as_ref()
+        .map(|b| String::from_utf8(b.clone()).unwrap())
 }
 
 #[test]
@@ -142,4 +144,3 @@ fn regex_filters_a_real_table() {
         .collect();
     assert_eq!(rest, vec!["beta".to_string(), "gamma".to_string()]);
 }
-

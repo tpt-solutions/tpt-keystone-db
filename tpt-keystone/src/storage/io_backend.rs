@@ -223,7 +223,10 @@ mod linux_uring {
             let fd = types::Fd(self.file.as_raw_fd());
             let r = self.submit_one(opcode::Fsync::new(fd).build())?;
             if r < 0 {
-                return Err(anyhow!("io_uring fsync after truncate failed: errno {}", -r));
+                return Err(anyhow!(
+                    "io_uring fsync after truncate failed: errno {}",
+                    -r
+                ));
             }
             self.offset = 0;
             Ok(())

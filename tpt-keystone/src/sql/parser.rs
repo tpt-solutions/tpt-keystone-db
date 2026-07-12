@@ -1174,7 +1174,10 @@ impl Parser {
                     self.expect(&Token::LParen)?;
                     nodes.push(self.parse_ident_string()?);
                     self.expect(&Token::RParen)?;
-                    hops.push(MatchHop { rel_type, direction });
+                    hops.push(MatchHop {
+                        rel_type,
+                        direction,
+                    });
                 }
                 Token::Lt => {
                     self.advance();

@@ -329,27 +329,37 @@ mod tests {
             StorageBackend::Local => StorageSpec {
                 backend,
                 claim_name: Some("shared-pvc".into()),
-                ..Default::default()
+                bucket: None,
+                region: None,
+                endpoint: None,
+                prefix: None,
+                credentials_secret: None,
             },
             StorageBackend::S3 => StorageSpec {
                 backend,
+                claim_name: None,
                 bucket: Some("my-bucket".into()),
                 region: Some("us-east-1".into()),
-                ..Default::default()
+                endpoint: None,
+                prefix: None,
+                credentials_secret: None,
             },
         };
         KeystoneCluster {
             metadata: ObjectMeta {
                 name: Some("demo".into()),
                 namespace: Some("tpt-system".into()),
+                uid: Some("test-uid".into()),
                 ..Default::default()
             },
             spec: KeystoneClusterSpec {
                 image: "ghcr.io/example/tpt-keystone:0.3.0".into(),
                 reader_replicas: 3,
                 storage,
+                resources: None,
+                autoscaling: None,
                 backup,
-                ..Default::default()
+                extra_env: Default::default(),
             },
             status: None,
         }
@@ -410,8 +420,10 @@ mod tests {
         assert!(env.contains(&"TPT_STORAGE_BACKEND".to_string()));
         assert!(env.contains(&"TPT_S3_BUCKET".to_string()));
         assert!(env.contains(&"TPT_S3_REGION".to_string()));
-        // S3 backend must not mount a local PVC claim.
-        assert!(spec.template.spec.as_ref().unwrap().volumes.is_none());
+        // S3 backend must not mount a shared PVC claim (the local cache
+        // emptyDir is still present, by design).
+        let volumes = spec.template.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(volumes.iter().all(|v| v.persistent_volume_claim.is_none()));
     }
 
     #[test]
@@ -446,10 +458,10 @@ mod tests {
             }),
         );
         let cj = build_backup_cronjob(&c).expect("backup cronjob should be built");
-        assert_eq!(cj.spec.unwrap().schedule, "0 3 * * *");
+        assert_eq!(cj.spec.schedule, "0 3 * * *");
         assert_eq!(cj.metadata.name.as_deref(), Some("demo-backup"));
-        let container = &cj.spec.unwrap().job_template.spec.unwrap().template.spec.unwrap().containers[0];
-        assert_eq!(container.command.as_ref().unwrap(), &vec!["/bin/backup".into(), "--all".into()]);
+        let container = &cj.spec.job_template.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(container.command.as_ref().unwrap(), &vec!["/bin/backup".to_string(), "--all".to_string()]);
     }
 
     #[test]

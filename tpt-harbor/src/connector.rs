@@ -1,8 +1,13 @@
-//! Source/target connector traits every Harbor plugin implements. Only
-//! `sources::postgres` (source) and `target::keystone` (target) have real
-//! bodies; the rest of `sources` are stubs that return
-//! [`ConnectorError::Unimplemented`] so the CLI's connector matrix is
-//! complete even where the protocol work isn't.
+//! Source/target connector traits every Harbor plugin implements. Every
+//! `sources::*` connector now has real protocol code (see each module's own
+//! doc comment for its confidence tier — `sources::oracle` in particular is
+//! a best-effort reconstruction of an undocumented protocol, materially
+//! less certain than the rest). [`ConnectorError::Unimplemented`] is still
+//! used within otherwise-real connectors for genuinely scope-cut phases
+//! (every connector's live-CDC `replicate`, which each has its own reason
+//! for cutting), not as a whole-connector stub anymore. `unimplemented_source!`
+//! below is unused dead code now that no connector needs it — kept in case a
+//! future connector is added stub-first again.
 
 use crate::schema::TableSchema;
 use async_trait::async_trait;

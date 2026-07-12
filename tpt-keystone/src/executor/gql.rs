@@ -119,7 +119,8 @@ mod tests {
     fn test_db() -> (Arc<Database>, tempfile::TempDir, tempfile::TempDir) {
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
         let lease = Arc::new(LeaseManager::new(
             store.clone(),
             "db",
@@ -128,8 +129,14 @@ mod tests {
         ));
         lease.try_acquire().unwrap();
         let db = Arc::new(
-            Database::open(local.path(), store, lease.handle(), NodeRole::Writer, Default::default())
-                .unwrap(),
+            Database::open(
+                local.path(),
+                store,
+                lease.handle(),
+                NodeRole::Writer,
+                Default::default(),
+            )
+            .unwrap(),
         );
         (db, bucket, local)
     }

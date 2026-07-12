@@ -201,11 +201,8 @@ fn st_transform_4326_to_3857_moves_the_point() {
 #[test]
 fn st_transform_without_srid_errors() {
     let (db, _b, _l) = test_db();
-    let err = execute_query(
-        "SELECT ST_Transform(ST_MakePoint(1, 2), 3857)",
-        db.clone(),
-    )
-    .unwrap_err();
+    let err =
+        execute_query("SELECT ST_Transform(ST_MakePoint(1, 2), 3857)", db.clone()).unwrap_err();
     assert!(err.to_string().contains("known SRID"), "{err}");
 }
 
@@ -234,11 +231,7 @@ fn st_asewkb_preserves_srid_through_st_geomfromewkb() {
 #[test]
 fn geography_column_type_is_distinct_from_geometry() {
     let (db, _b, _l) = test_db();
-    execute_query(
-        "CREATE TABLE zones (id INT4, area GEOGRAPHY)",
-        db.clone(),
-    )
-    .unwrap();
+    execute_query("CREATE TABLE zones (id INT4, area GEOGRAPHY)", db.clone()).unwrap();
     execute_query(
         "INSERT INTO zones VALUES (1, 'POINT(-122.4194 37.7749)')",
         db.clone(),

@@ -123,14 +123,22 @@ impl Raster {
     /// already documents). `scale_y` is stored negative internally (raster
     /// convention) even though the caller passes a positive magnitude, same
     /// as PostGIS's `ST_AsRaster`.
-    pub fn rasterize(geom: &Geometry, scale_x: f64, scale_y: f64, value: f64, srid: i32) -> Result<Self> {
+    pub fn rasterize(
+        geom: &Geometry,
+        scale_x: f64,
+        scale_y: f64,
+        value: f64,
+        srid: i32,
+    ) -> Result<Self> {
         if scale_x <= 0.0 || scale_y <= 0.0 {
             bail!("ST_AsRaster: scale_x/scale_y must be positive pixel sizes");
         }
         let bbox: BBox = geom.bbox();
         let width = (((bbox.max_x - bbox.min_x) / scale_x).ceil() as u32).max(1);
         let height = (((bbox.max_y - bbox.min_y) / scale_y).ceil() as u32).max(1);
-        let mut r = Raster::new_empty(width, height, bbox.min_x, bbox.max_y, scale_x, -scale_y, srid);
+        let mut r = Raster::new_empty(
+            width, height, bbox.min_x, bbox.max_y, scale_x, -scale_y, srid,
+        );
 
         match geom {
             Geometry::Point(c) => {

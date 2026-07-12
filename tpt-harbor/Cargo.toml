@@ -24,6 +24,16 @@ anyhow = "1"
 thiserror = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 async-trait = "0.1"
+# Harbor/ODBC (sources/odbc.rs): a safe wrapper over the OS driver manager
+# (unixODBC / Windows ODBC) and whatever vendor ODBC driver is installed at
+# runtime — not a hand-rolled reimplementation of a vendor's own wire
+# protocol, so this doesn't conflict with this crate's "no pgwire crate"
+# rule above (there is no publicly documented wire protocol here to
+# reimplement in the first place; the driver manager + vendor driver do
+# that opaquely). Exists specifically for proprietary databases like Oracle
+# where hand-writing the real protocol isn't realistically possible — see
+# sources/odbc.rs's module doc comment.
+odbc-api = "28"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

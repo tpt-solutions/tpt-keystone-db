@@ -48,7 +48,8 @@ fn find_corrupt_stored_key_returns_err() {
         text_cell(STANDARD.encode([0u8; 32])),
         int_cell(now_ms()),
     ];
-    db.write("_tpt_roles", b"bob", &encode_cells(&cells)).unwrap();
+    db.write("_tpt_roles", b"bob", &encode_cells(&cells))
+        .unwrap();
 
     let err = store.find("bob").unwrap_err();
     assert!(err.to_string().contains("corrupt stored_key"));
@@ -67,7 +68,8 @@ fn find_corrupt_server_key_returns_err() {
         text_cell(STANDARD.encode([0u8; 5])), // wrong length
         int_cell(now_ms()),
     ];
-    db.write("_tpt_roles", b"carol", &encode_cells(&cells)).unwrap();
+    db.write("_tpt_roles", b"carol", &encode_cells(&cells))
+        .unwrap();
 
     let err = store.find("carol").unwrap_err();
     assert!(err.to_string().contains("corrupt server_key"));

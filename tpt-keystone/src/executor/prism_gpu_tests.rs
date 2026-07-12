@@ -102,21 +102,12 @@ fn gpu_vector_search_without_index_matches_cpu_brute_force() {
     let mut gpu: Vec<(String, f64)> = gpu_result
         .rows
         .iter()
-        .map(|r| {
-            (
-                cell_text(&r[0]),
-                cell_text(&r[1]).parse::<f64>().unwrap(),
-            )
-        })
+        .map(|r| (cell_text(&r[0]), cell_text(&r[1]).parse::<f64>().unwrap()))
         .collect();
     gpu.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
     // CPU brute-force baseline over the same rows.
-    let all = execute_query(
-        "SELECT label, embedding FROM docs ORDER BY id",
-        db.clone(),
-    )
-    .unwrap();
+    let all = execute_query("SELECT label, embedding FROM docs ORDER BY id", db.clone()).unwrap();
     let q = Vector::from_text(query).unwrap();
     let mut cpu: Vec<(String, f64)> = all
         .rows
@@ -134,7 +125,10 @@ fn gpu_vector_search_without_index_matches_cpu_brute_force() {
     assert_eq!(gpu.len(), cpu.len());
     for (g, c) in gpu.iter().zip(cpu.iter()) {
         assert_eq!(g.0, c.0, "nearest-label ranking must match CPU");
-        assert!((g.1 - c.1).abs() < 1e-3, "distance must match CPU within tolerance");
+        assert!(
+            (g.1 - c.1).abs() < 1e-3,
+            "distance must match CPU within tolerance"
+        );
     }
 }
 

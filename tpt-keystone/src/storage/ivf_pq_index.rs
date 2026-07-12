@@ -190,7 +190,12 @@ impl IvfPqStorageIndex {
 
     /// Approximate k-nearest-neighbor search. Returns `(row_key, distance)`
     /// pairs sorted nearest-first, length `<= k`.
-    pub fn query_knn(&self, query: &[f32], k: usize, n_probe: Option<usize>) -> Vec<(Vec<u8>, f32)> {
+    pub fn query_knn(
+        &self,
+        query: &[f32],
+        k: usize,
+        n_probe: Option<usize>,
+    ) -> Vec<(Vec<u8>, f32)> {
         self.ivf
             .search(query, k, n_probe)
             .into_iter()

@@ -913,16 +913,53 @@ session. `cargo build`/`cargo test` on `tpt-harbor` are green now (19/19 tests p
 per-connector notes above for exactly what was missing vs. broken vs. already fine.
 
 **Follow-up (2026-07-12): replace the five `unimplemented_source!` stubs with real connectors** — the
-prior pass's `unimplemented_source!` stubs got `tpt-harbor` compiling, but five sources still have zero
-protocol code:
-- [ ] **Harbor/TimeSeries** — InfluxDB → Chronos, real client (`sources/influxdb.rs`)
-- [ ] **Harbor/Stream** — Kafka → Flux, real client (`sources/kafka.rs`)
-- [ ] **Harbor/Vector** — Pinecone/Weaviate/Qdrant → Prism, real client(s) (`sources/vector.rs` — one
-  file covering all three per the existing stub's shape, not three separate connectors)
-- [ ] **Harbor/Oracle** — Oracle → Keystone, real client (`sources/oracle.rs`) — flagged risk: Oracle's
-  standard Rust client wraps Oracle's proprietary OCI C library, which needs the Oracle Instant Client
-  installed on the build/runtime machine; may end up more limited than the others in this environment
-- [ ] **Harbor/Search** — Elasticsearch → Canopy, real client (`sources/elasticsearch.rs`)
+prior pass's `unimplemented_source!` stubs got `tpt-harbor` compiling, but five sources had zero protocol
+code. All five now have real client code; see the per-connector confidence notes below — they are not
+uniformly trustworthy, and that's tracked explicitly rather than glossed over:
+- [x] **Harbor/TimeSeries** — InfluxDB → Chronos, real client (`sources/influxdb.rs`): HTTP client against
+  `/query`/`/write`, handling both `Content-Length` and chunked transfer-encoding (own hand-written
+  decoder — fixed an off-by-one in this pass that dropped the first record's leading byte and the last
+  chunk's trailing byte). Same confidence tier as this crate's other HTTP/text-protocol connectors
+  (Elasticsearch, PostGIS): a fully public wire format, unverified against a live server.
+- [x] **Harbor/Stream** — Kafka → Flux, real client (`sources/kafka.rs`): hand-written Kafka wire protocol
+  (`Metadata`/`Fetch` v-appropriate request/response framing, record-batch v2 decoding including the
+  zigzag-varint record-level fields). Same public-protocol confidence tier as the others; CDC-equivalent
+  (`replicate`) treats `Fetch` from committed offsets as the "change feed." Uncompressed batches only
+  (`gzip`/`snappy`/`lz4`/`zstd` compressed batches are rejected with a clear error, not silently
+  misdecoded) — no compression codec dependency was wired in.
+- [x] **Harbor/Vector** — Pinecone/Weaviate/Qdrant → Prism, real client (`sources/vector.rs`, one file
+  covering all three per the existing stub's shape): REST/HTTP clients against each service's own public
+  index/collection and vector-fetch APIs (`api_key` now an explicit `Option<&str>` parameter — the CLI
+  doesn't have a `--source-api-key` flag yet, so it's passed as `None` from `main.rs` for now). Same
+  public-protocol confidence tier as InfluxDB/Elasticsearch.
+- [x] **Harbor/Search** — Elasticsearch → Canopy, real client (`sources/elasticsearch.rs`): HTTP client
+  against `_cat/indices`, `_mapping`, and the scroll API for snapshot/checksums. Same confidence tier.
+- [x] **Harbor/Oracle** — Oracle → Keystone, real client (`sources/oracle.rs`) — **materially different
+  confidence tier than the other four.** The TNS packet-framing layer (8-byte header, CONNECT/ACCEPT/
+  REFUSE packet types, the CONNECT payload's field layout) is genuinely public (the same shape every
+  public TNS protocol dissector documents) and is written with the same confidence as this crate's other
+  from-scratch wire-protocol code. The TTC (Two-Task Common) layer carried inside DATA packets — the
+  login/auth handshake and the OALL8/OFETCH RPC opcodes used to run queries and fetch rows — has **no
+  public specification**; Oracle's own OCI client is the only officially documented way to speak it. That
+  layer is a best-effort reconstruction (documented in the module's own doc comment) and should be read as
+  a structural skeleton to correct against a real packet capture, not as validated protocol code — a
+  strictly higher-risk claim than "unverified against a real server," which is what the other nine Harbor
+  source connectors in this file get to claim. This flags exactly the OCI/proprietary-protocol risk called
+  out in the original follow-up note; the recommended next step if real Oracle connectivity is ever
+  needed is linking against Oracle Instant Client (OCI) rather than continuing to reverse-engineer TTC.
+  Unit-tested at the layer that can be (TNS framing helpers, TTC row-cell length-prefix decoding).
+
+**Test-gap fixes made alongside this pass (not new work, bugs found while verifying the above 5
+connectors actually build/pass their own tests — `tpt-harbor` was not green before this):**
+`sources/vector.rs`'s `VectorDbType` was missing `PartialEq`/`Eq` (wouldn't compile), a `collect()` call
+in `VectorSource::discover` needed an explicit `Vec<String>` type annotation, and its
+`parses_content_length_response` test asserted against a `Content-Length` header that didn't match its
+own body's byte length. `sources/influxdb.rs` had an `if`/`else` branch returning differently-sized byte
+array literals (wouldn't compile) and the chunked-decoder off-by-one already described above.
+`sources/kafka.rs` had two `Ok(x, y)` calls missing the tuple parens `Ok((x, y))` (wouldn't compile), and
+its own record-batch decode test encoded records as fixed-width integers when the format (and this file's
+own decoder) uses zigzag varints, so the test was silently checking the wrong thing before this pass.
+`cargo test` on `tpt-harbor` is green (36/36) as of this pass.
 
 ---
 
@@ -1179,39 +1216,36 @@ Added 2026-07-12 after a test-coverage/adoption assessment: `tpt-keystone` core 
 is thinner, and nothing runs automatically on push/PR anywhere in the repo. Tracked here so progress is
 checkable the same way every other phase is.
 
-- [ ] CI (GitHub Actions) — no `.github/workflows` exists at all today (confirmed: zero automation
-  currently runs any of this repo's test suites). Add workflows covering: `cargo test` for
-  `tpt-keystone` (the existing 455-test suite); `cargo build`/`cargo test` for `tpt-cli`, `tpt-sdk`,
-  `tpt-harbor`, `tpt-operator`; `cargo build --target wasm32-unknown-unknown` for `tpt-canvas` (no
-  meaningful native test path); `npm test` for `packages/sdk-web`/`sdk-server`/`sdk-edge`; `pytest` for
-  `sdk-python` (offline tests); `go test ./...` for `sdk-go`. Investigate running a `tpt-keystone`
-  service in-job so `-tags live` Go tests and `sdk-python`'s `live_smoke.py` can run for real in CI,
-  not just the offline subset.
-- [ ] `docker-compose.yml` at repo root — Dockerfiles already exist (`tpt-keystone/Dockerfile`,
-  `tpt-operator/Dockerfile`) but are unreferenced by anything; no one-command quickstart exists. Add a
-  compose file running `tpt-keystone`, exposing 5432 (Postgres wire)/5433 (MCP)/5434 (Flux WS)/5435
-  (HTTP)/9187 (metrics), and reference it from the root `README.md` quickstart.
-- [ ] Test-gap: `tpt-cli` — zero `#[test]` functions found anywhere in the crate today. Add unit tests
-  for whatever output-formatting/argument-parsing logic doesn't require a live connection.
-- [ ] Test-gap: `tpt-sdk` (Rust) — only 3 tests, all in `query_builder.rs`; `client.rs`
-  (`KeystoneClient`), `zerocopy.rs` (`RowView`), and `ffi.rs` are untested. Add offline tests for
-  `RowView` parsing against hand-built byte buffers and any other logic that doesn't need a live server.
-- [ ] Test-gap: `tpt-operator` — only 3 tests (`types.rs`/`autoscale.rs`); the reconciler/controller
-  logic itself is untested. Add tests if reconcile logic is separable from live `kube::Client` calls
-  (a pure current-state/desired-state diff), otherwise document honestly why it isn't yet.
-- [ ] Test-gap: `sdk-go` — 3 tests exist, all gated behind `-tags live` against a running server; there
-  is no offline-testable path at all (`go test ./...` runs nothing). Add offline unit tests for
-  connection-string parsing, request/response encoding, and error mapping.
-- [ ] Multi-engine example/cookbook — the project's pitch is "seven engines, one binary," but there is
-  no single runnable example touching more than one or two of them (only 2 example files exist repo-wide,
-  both smoke tests). Add a runnable `.sql` script or `docs/tutorials/cookbook.md` exercising Keystone,
-  Meridian (geo), Prism (vector), Chronos (time-series), Plexus (`MATCH`/graph), Canopy (JSON/aggregate),
-  and Flux (streaming) together.
+- [x] CI (GitHub Actions) — `.github/workflows/ci.yml` now runs `cargo test` for `tpt-keystone`;
+  `cargo build`/`cargo test` for `tpt-cli`, `tpt-sdk` (plus a separate `cargo test --features ffi` job),
+  `tpt-harbor`, `tpt-operator`; `cargo build --target wasm32-unknown-unknown` for `tpt-canvas`; `npm test`
+  for `packages/sdk-web`/`sdk-server`/`sdk-edge`; `pytest` for `sdk-python` (offline tests); `go test ./...`
+  for `sdk-go`. Scope cut: running a live `tpt-keystone` service in-job for `-tags live` Go tests and
+  `sdk-python`'s `live_smoke.py` was not attempted — CI runs the offline subset only.
+- [x] `docker-compose.yml` at repo root — runs `tpt-keystone`, exposes 5432 (Postgres wire)/5433 (MCP)/
+  5434 (Flux WS)/5435 (HTTP)/9187 (metrics), referenced from the root `README.md` quickstart
+  (`README.md:101`).
+- [x] Test-gap: `tpt-cli` — unit tests added across `data.rs` (4), `format.rs` (6), `main.rs` (5) covering
+  output formatting and argument parsing; `migrate.rs`/`repl.rs`/`schema.rs`/`stream.rs` remain untested
+  (live-connection-only logic).
+- [x] Test-gap: `tpt-sdk` (Rust) — offline tests added: `zerocopy.rs` (5, `RowView` parsing against
+  hand-built byte buffers), `keystone/mod.rs` (6, `Row`), `ffi.rs` (3, the C ABI), plus the existing 3 in
+  `query_builder.rs`; `client.rs`/`keystone/wire.rs`/`canvas.rs` remain untested (need a live server).
+- [x] Test-gap: `tpt-operator` — `resources.rs` grew from a few tests to 10 (Deployment/Service/CronJob
+  resource-building), plus `autoscale.rs` (1) and `types.rs` (2); the live reconcile loop itself
+  (`reconcile.rs`) is still untested — not separable from `kube::Client` without a fake/mock API server,
+  which wasn't built.
+- [x] Test-gap: `sdk-go` — offline unit tests added in `wire_test.go` (12, wire encode/decode, error
+  mapping) and `connstring_test.go` (1, connection-string parsing); `smoke_test.go` (3) remains
+  `-tags live`-gated against a running server.
+- [x] Multi-engine example/cookbook — `docs/tutorials/cookbook.md`, a runnable walkthrough touching
+  Keystone (core SQL), Meridian (geo), Prism (vector), Chronos (time-series), Plexus (`MATCH`/graph),
+  Canopy (JSON/aggregate), and Flux (streaming) in one connected session.
 
 
-**Milestone:** a newcomer can `git clone` this repo, run one command (`docker compose up`), connect with
-`psql`, and run the cookbook script — and every push to the repo gets automated pass/fail feedback across
-every crate/SDK, not just whatever the last contributor happened to run locally.
+**Milestone: reached.** A newcomer can `git clone` this repo, run one command (`docker compose up`),
+connect with `psql`, and run the cookbook script — and every push to the repo gets automated pass/fail
+feedback across every crate/SDK, not just whatever the last contributor happened to run locally.
 
 ---
 
@@ -1246,11 +1280,17 @@ Consolidated view of every unchecked (`[ ]`) / partial (`[~]`) item across the r
 > `tpt-keystone` core strongly tested (455 tests) but the surrounding project thin — no CI anywhere in
 > the repo, weak/zero test coverage in `tpt-cli`/`tpt-sdk`/`tpt-operator`/`sdk-go`, no one-command
 > quickstart, and five Harbor source connectors still genuine `unimplemented_source!` stubs. Tracked as
-> **Phase 19** above (CI, docker-compose, test gaps, cookbook, repo cleanup) plus a new Harbor follow-up
-> list under Phase 15 (replacing the InfluxDB/Kafka/Vector/Oracle/Elasticsearch stubs with real
-> connectors, "no stubs" per explicit direction — Oracle flagged as a real environment-dependency risk
-> given its OCI native-library requirement). In progress; see Phase 19 and the Phase 15 follow-up note
-> for current status rather than assuming this note reflects completion.
+> **Phase 19** above (CI, docker-compose, test gaps, cookbook) plus a new Harbor follow-up list under
+> Phase 15 (replacing the InfluxDB/Kafka/Vector/Oracle/Elasticsearch stubs with real connectors, "no
+> stubs" per explicit direction — Oracle flagged as a real environment-dependency risk given its OCI
+> native-library requirement).
+
+> **Note (2026-07-12, later same day — Phase 19 closeout):** every Phase 19 checklist item is now `[x]`:
+> `.github/workflows/ci.yml` covers every crate/SDK, `docker-compose.yml` + README quickstart exist,
+> `tpt-cli`/`tpt-sdk`/`tpt-operator`/`sdk-go` all gained offline unit tests (each honestly documents what
+> remains untestable without a live server or a mocked `kube::Client`), and `docs/tutorials/cookbook.md`
+> exercises all seven engines in one session. The Phase 15 Harbor stub-connector follow-up was unrelated
+> and, as of the Harbor stub-connector closeout note further down this section, is now closed too.
 
 ### Engine gaps (documented scope cuts — not attempted; need external infra/hardware this
 environment doesn't have, not just more engineering time)
@@ -1277,21 +1317,26 @@ environment doesn't have, not just more engineering time)
   Windows at all — the iOS SDK specifically cannot be built in this environment regardless of engineering
   time spent.
 
-### Adoption & test-coverage hardening (in progress — tracked as Phase 19)
-- CI (GitHub Actions), `docker-compose.yml` quickstart, test-gap filling in `tpt-cli`/`tpt-sdk`/
-  `tpt-operator`/`sdk-go`, a multi-engine cookbook, and repo root cleanup — see Phase 19 above for the
-  full checklist.
-- **Phase 15 — Harbor:** replacing the five `unimplemented_source!` stub connectors (InfluxDB, Kafka,
-  Pinecone/Weaviate/Qdrant, Oracle, Elasticsearch) with real clients — see the Phase 15 follow-up note
-  above.
+> **Note (2026-07-12, later same day — Harbor stub-connector closeout):** all five `unimplemented_source!`
+> stubs (InfluxDB, Kafka, Pinecone/Weaviate/Qdrant, Elasticsearch, Oracle) now have real client code —
+> see the Phase 15 follow-up note above for the per-connector detail and confidence tiers. Four are the
+> same "fully public protocol, unverified against a live server" tier as this crate's other connectors.
+> Oracle is explicitly flagged as a materially higher-risk tier: its TNS packet-framing is public and
+> solid, but the TTC login/query layer inside it has no public specification, so that part is a
+> best-effort reconstruction rather than validated protocol code — do not treat it as equivalent to the
+> other nine Harbor source connectors without a correction pass against a real packet capture or a
+> rewrite against Oracle Instant Client (OCI). `cargo test` on `tpt-harbor` is green (36/36); three
+> unrelated compile errors and three test bugs found in the InfluxDB/Kafka/Vector connectors while
+> verifying this were fixed along the way (see the follow-up note above for exactly what).
 
 **Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
 real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision
 itself), 4 unbuilt mobile SDKs (one of which, Swift/iOS, is blocked on platform availability, not
-effort), plus the newly-tracked Phase 19 adoption/coverage work and Harbor's 5 stub-connector
-replacements (both in progress, not yet counted as closed). Every item that was a pure "more code, no
-external dependency" scope cut *from the earlier two passes* has been closed out; this pass adds new,
-not-yet-closed work rather than closing more.
+effort). Phase 19 (adoption/CI/test-coverage hardening) and Harbor's 5 stub-connector replacements are
+now both fully closed out — see their respective closeout notes above (Oracle's connector carries an
+explicit, higher-than-usual confidence caveat rather than being unqualified). Every item that was a pure
+"more code, no external dependency" scope cut *from every prior pass* has been closed out; what remains
+either needs real external infrastructure/hardware, or is blocked on platform availability.
 
 ---
 

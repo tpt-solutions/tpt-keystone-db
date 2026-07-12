@@ -474,15 +474,15 @@ pub enum BinOp {
     Gte,
     And,
     Or,
-    Concat,        // ||
-    Arrow,         // ->
-    LongArrow,     // ->>
-    Contains,      // @> (JSON/JSONB containment)
-    HashArrow,     // #> (JSON path extraction, array-literal path)
-    HashLongArrow, // #>> (JSON path extraction as text)
-    RegexMatch,    // ~  (POSIX regex match)
-    RegexNotMatch, // !~ (POSIX regex non-match)
-    RegexMatchCI,  // ~* (case-insensitive POSIX regex match)
+    Concat,          // ||
+    Arrow,           // ->
+    LongArrow,       // ->>
+    Contains,        // @> (JSON/JSONB containment)
+    HashArrow,       // #> (JSON path extraction, array-literal path)
+    HashLongArrow,   // #>> (JSON path extraction as text)
+    RegexMatch,      // ~  (POSIX regex match)
+    RegexNotMatch,   // !~ (POSIX regex non-match)
+    RegexMatchCI,    // ~* (case-insensitive POSIX regex match)
     RegexNotMatchCI, // !~* (case-insensitive POSIX regex non-match)
 }
 

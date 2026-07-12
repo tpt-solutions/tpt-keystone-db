@@ -170,7 +170,7 @@ async fn open_source(args: &SourceArgs) -> anyhow::Result<Box<dyn SourceConnecto
             Ok(Box::new(KafkaSource::connect(&args.source_addr).await?))
         }
         SourceKind::Vector => {
-            Ok(Box::new(VectorSource::connect(&args.source_addr, &args.source_db).await?))
+            Ok(Box::new(VectorSource::connect(&args.source_addr, &args.source_db, None).await?))
         }
         SourceKind::Search => {
             Ok(Box::new(ElasticsearchSource::connect(&args.source_addr).await?))

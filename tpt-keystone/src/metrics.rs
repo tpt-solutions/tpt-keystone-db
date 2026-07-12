@@ -247,7 +247,8 @@ impl Metrics {
         out.push_str("# TYPE tpt_object_store_circuit_trips_total counter\n");
         out.push_str(&format!(
             "tpt_object_store_circuit_trips_total {}\n",
-            self.object_store_circuit_trips_total.load(Ordering::Relaxed)
+            self.object_store_circuit_trips_total
+                .load(Ordering::Relaxed)
         ));
 
         out.push_str(

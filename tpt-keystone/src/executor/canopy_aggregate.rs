@@ -37,9 +37,9 @@ pub type Doc = Map<String, Json>;
 /// `[{"$match": {...}}, {"$group": {...}}]`) over `docs` in order.
 pub fn run_pipeline(mut docs: Vec<Doc>, stages: &[Json]) -> Result<Vec<Doc>> {
     for stage in stages {
-        let obj = stage
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("aggregate: each pipeline stage must be a JSON object"))?;
+        let obj = stage.as_object().ok_or_else(|| {
+            anyhow::anyhow!("aggregate: each pipeline stage must be a JSON object")
+        })?;
         anyhow::ensure!(
             obj.len() == 1,
             "aggregate: each pipeline stage must have exactly one operator key, got {}",
@@ -85,9 +85,15 @@ fn eval_match_op(op: &str, actual: &Json, rhs: &Json) -> bool {
         "$eq" => actual == rhs,
         "$ne" => actual != rhs,
         "$gt" => json_cmp(actual, rhs) == Some(Ordering::Greater),
-        "$gte" => matches!(json_cmp(actual, rhs), Some(Ordering::Greater | Ordering::Equal)),
+        "$gte" => matches!(
+            json_cmp(actual, rhs),
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
         "$lt" => json_cmp(actual, rhs) == Some(Ordering::Less),
-        "$lte" => matches!(json_cmp(actual, rhs), Some(Ordering::Less | Ordering::Equal)),
+        "$lte" => matches!(
+            json_cmp(actual, rhs),
+            Some(Ordering::Less | Ordering::Equal)
+        ),
         "$in" => rhs.as_array().is_some_and(|a| a.contains(actual)),
         "$nin" => rhs.as_array().is_none_or(|a| !a.contains(actual)),
         _ => false,
@@ -113,9 +119,7 @@ fn json_cmp(a: &Json, b: &Json) -> Option<Ordering> {
 /// a literal.
 fn resolve_ref(doc: &Doc, expr: &Json) -> Json {
     match expr {
-        Json::String(s) if s.starts_with('$') => {
-            doc.get(&s[1..]).cloned().unwrap_or(Json::Null)
-        }
+        Json::String(s) if s.starts_with('$') => doc.get(&s[1..]).cloned().unwrap_or(Json::Null),
         Json::Object(fields) => {
             let mut out = Map::new();
             for (k, v) in fields {
@@ -142,7 +146,8 @@ fn apply_group(docs: Vec<Doc>, spec: &Json) -> Result<Vec<Doc>> {
     // same "this function returns ordinary rows" precedent as
     // `graph_neighbors`).
     let mut order: Vec<String> = Vec::new();
-    let mut groups: std::collections::HashMap<String, (Json, Vec<&Doc>)> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, (Json, Vec<&Doc>)> =
+        std::collections::HashMap::new();
     for doc in &docs {
         let key_json = resolve_ref(doc, id_expr);
         let key = serde_json::to_string(&key_json).unwrap_or_default();
@@ -170,10 +175,15 @@ fn apply_group(docs: Vec<Doc>, spec: &Json) -> Result<Vec<Doc>> {
 }
 
 fn apply_accumulator(acc_spec: &Json, members: &[&Doc]) -> Result<Json> {
-    let obj = acc_spec
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("aggregate: accumulator spec must be an object, e.g. {{\"$sum\": \"$amount\"}}"))?;
-    anyhow::ensure!(obj.len() == 1, "aggregate: accumulator spec must have exactly one operator");
+    let obj = acc_spec.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "aggregate: accumulator spec must be an object, e.g. {{\"$sum\": \"$amount\"}}"
+        )
+    })?;
+    anyhow::ensure!(
+        obj.len() == 1,
+        "aggregate: accumulator spec must have exactly one operator"
+    );
     let (op, arg) = obj.iter().next().unwrap();
 
     let numeric_values = || -> Vec<f64> {
@@ -217,8 +227,13 @@ fn apply_accumulator(acc_spec: &Json, members: &[&Doc]) -> Result<Json> {
             .max_by(|a, b| json_cmp(a, b).unwrap_or(Ordering::Equal))
             .unwrap_or(Json::Null)),
         "$count" => Ok(num(members.len() as f64)),
-        "$first" => Ok(members.first().map(|d| resolve_ref(d, arg)).unwrap_or(Json::Null)),
-        "$push" => Ok(Json::Array(members.iter().map(|d| resolve_ref(d, arg)).collect())),
+        "$first" => Ok(members
+            .first()
+            .map(|d| resolve_ref(d, arg))
+            .unwrap_or(Json::Null)),
+        "$push" => Ok(Json::Array(
+            members.iter().map(|d| resolve_ref(d, arg)).collect(),
+        )),
         other => bail!("aggregate: unsupported $group accumulator \"{other}\""),
     }
 }

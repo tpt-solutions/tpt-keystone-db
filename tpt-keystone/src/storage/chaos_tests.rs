@@ -324,8 +324,7 @@ fn open_writer_faulted(
     local: &std::path::Path,
     cache: &std::path::Path,
 ) -> (Database, Arc<FaultStore>) {
-    let backend: Arc<dyn ObjectStore> =
-        Arc::new(LocalFsObjectStore::open(bucket).unwrap());
+    let backend: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket).unwrap());
     let fault = Arc::new(FaultStore::new(backend));
     let store: Arc<dyn ObjectStore> = fault.clone();
     let cached = Arc::new(CachedObjectStore::new(store, cache, 64 * 1024 * 1024).unwrap());
@@ -599,12 +598,8 @@ fn crash_after_delete_and_flush_tombstones_persist() {
     .unwrap();
 
     for i in 0..5 {
-        db.write(
-            "t",
-            format!("k{i}").as_bytes(),
-            format!("v{i}").as_bytes(),
-        )
-        .unwrap();
+        db.write("t", format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+            .unwrap();
     }
     db.flush().unwrap();
 
@@ -722,12 +717,8 @@ fn compaction_completes_recovers_from_single_merged_sstable() {
     std::env::set_var("TPT_COMPACTION_SSTABLE_THRESHOLD", "4");
     const ROWS: usize = 7;
     for i in 0..ROWS {
-        db.write(
-            "t",
-            format!("k{i}").as_bytes(),
-            format!("v{i}").as_bytes(),
-        )
-        .unwrap();
+        db.write("t", format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+            .unwrap();
         db.flush().unwrap();
     }
     std::env::remove_var("TPT_COMPACTION_SSTABLE_THRESHOLD");
@@ -767,7 +758,8 @@ fn zombie_writer_flush_rejected_after_lease_takeover() {
 
     // Writer A acquires the lease with a very short TTL so it expires
     // quickly without a Tokio renewal task.
-    let backend_a: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+    let backend_a: Arc<dyn ObjectStore> =
+        Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
     let store_a: Arc<dyn ObjectStore> =
         Arc::new(CachedObjectStore::new(backend_a, cache.path(), 64 * 1024 * 1024).unwrap());
     let lease_a = Arc::new(LeaseManager::new(
@@ -805,7 +797,8 @@ fn zombie_writer_flush_rejected_after_lease_takeover() {
     std::thread::sleep(Duration::from_millis(10));
 
     // Writer B takes over with a higher fencing token.
-    let backend_b: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+    let backend_b: Arc<dyn ObjectStore> =
+        Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
     let store_b: Arc<dyn ObjectStore> =
         Arc::new(CachedObjectStore::new(backend_b, cache.path(), 64 * 1024 * 1024).unwrap());
     let lease_b = Arc::new(LeaseManager::new(
@@ -917,8 +910,9 @@ fn reader_converges_after_writer_crash() {
     // Reader opens with no lease (read-only).
     let reader_backend: Arc<dyn ObjectStore> =
         Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
-    let reader_store: Arc<dyn ObjectStore> =
-        Arc::new(CachedObjectStore::new(reader_backend, reader_cache.path(), 64 * 1024 * 1024).unwrap());
+    let reader_store: Arc<dyn ObjectStore> = Arc::new(
+        CachedObjectStore::new(reader_backend, reader_cache.path(), 64 * 1024 * 1024).unwrap(),
+    );
     let reader = Database::open(
         reader_local.path(),
         reader_store,
@@ -1028,9 +1022,7 @@ fn multi_seed_crash_recovery_with_flush_and_wal_mix() {
         }
 
         // Verify the recovered node is fully usable.
-        recovered
-            .write("t", b"post-recovery", b"works")
-            .unwrap();
+        recovered.write("t", b"post-recovery", b"works").unwrap();
         assert!(
             recovered.read("t", b"post-recovery").unwrap().is_some(),
             "seed {seed}: node unusable after recovery"

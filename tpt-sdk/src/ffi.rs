@@ -106,7 +106,8 @@ pub unsafe extern "C" fn tpt_sdk_result_row_count(result: *const ResultHandle) -
     if result.is_null() {
         return 0;
     }
-    (*result).0.rows.len()
+    let result = &*result;
+    result.0.rows.len()
 }
 
 /// # Safety
@@ -116,7 +117,8 @@ pub unsafe extern "C" fn tpt_sdk_result_column_count(result: *const ResultHandle
     if result.is_null() {
         return 0;
     }
-    (*result).0.columns.len()
+    let result = &*result;
+    result.0.columns.len()
 }
 
 /// Borrow cell `(row, col)`'s raw bytes. Writes the cell's length to
@@ -138,7 +140,8 @@ pub unsafe extern "C" fn tpt_sdk_result_cell(
         return std::ptr::null();
     }
     *out_len = 0;
-    let Some(row) = (*result).0.rows.get(row) else { return std::ptr::null() };
+    let result = &*result;
+    let Some(row) = result.0.rows.get(row) else { return std::ptr::null() };
     let Some(cell) = row.get(col) else { return std::ptr::null() };
     *out_len = cell.len();
     cell.as_ptr()

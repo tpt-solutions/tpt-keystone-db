@@ -84,7 +84,10 @@ impl DiskAnnIndex {
         r: usize,
         l_build: usize,
     ) -> Result<Self> {
-        anyhow::ensure!(!rows.is_empty(), "DiskAnnIndex::build requires at least one row");
+        anyhow::ensure!(
+            !rows.is_empty(),
+            "DiskAnnIndex::build requires at least one row"
+        );
         let dim = rows[0].1.len();
         for (_, v) in rows {
             anyhow::ensure!(v.len() == dim, "all vectors must share dimension {dim}");
@@ -202,7 +205,12 @@ impl DiskAnnIndex {
     /// records off disk as it expands the candidate frontier — the same
     /// algorithm `vector::vamana`'s build-time `greedy_search` uses, just
     /// against a disk-backed graph instead of an in-memory one.
-    pub fn query_knn(&mut self, query: &[f32], k: usize, l_search: usize) -> Result<Vec<(Vec<u8>, f32)>> {
+    pub fn query_knn(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        l_search: usize,
+    ) -> Result<Vec<(Vec<u8>, f32)>> {
         anyhow::ensure!(
             query.len() == self.dim,
             "query dimension {} does not match index dimension {}",
@@ -213,8 +221,10 @@ impl DiskAnnIndex {
         let (medoid_vec, _) = self.read_record(self.medoid)?;
         let mut visited_dist: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut expanded: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut candidates: Vec<(usize, f32)> =
-            vec![(self.medoid, vamana::distance(&medoid_vec, query, self.metric))];
+        let mut candidates: Vec<(usize, f32)> = vec![(
+            self.medoid,
+            vamana::distance(&medoid_vec, query, self.metric),
+        )];
         visited_dist.insert(self.medoid);
 
         loop {
@@ -297,7 +307,11 @@ mod tests {
         let query = rows[10].1.clone();
         let hits = idx.query_knn(&query, 5, 48).unwrap();
         assert_eq!(hits.len(), 5);
-        assert!(hits[0].1.abs() < 1e-6, "expected an exact match, got {:?}", hits[0]);
+        assert!(
+            hits[0].1.abs() < 1e-6,
+            "expected an exact match, got {:?}",
+            hits[0]
+        );
         assert_eq!(hits[0].0, rows[10].0);
     }
 

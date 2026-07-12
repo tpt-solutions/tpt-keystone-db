@@ -28,10 +28,10 @@
 
 use anyhow::{bail, Result};
 
+use super::hnsw::Metric;
 use super::kmeans::{kmeans, nearest_centroid};
 use super::pq::ProductQuantizer;
 use super::vector::l2_distance_squared;
-use super::hnsw::Metric;
 
 struct ListEntry {
     id: u32,

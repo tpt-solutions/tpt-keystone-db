@@ -28,7 +28,9 @@ fn dispatch_tools_list_returns_seven_tools() {
     let tools = resp["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 7);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in ["tables", "columns", "schema", "query", "mutate", "explain", "related"] {
+    for expected in [
+        "tables", "columns", "schema", "query", "mutate", "explain", "related",
+    ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
 }

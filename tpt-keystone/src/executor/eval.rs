@@ -542,20 +542,17 @@ impl RowContext {
             BinOp::RegexMatch
             | BinOp::RegexNotMatch
             | BinOp::RegexMatchCI
-            | BinOp::RegexNotMatchCI => {
-                match (&l, &r) {
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-                    _ => {
-                        let subject = val_to_text(&l);
-                        let pattern = val_to_text(&r);
-                        let ci = matches!(op, BinOp::RegexMatchCI | BinOp::RegexNotMatchCI);
-                        let negated =
-                            matches!(op, BinOp::RegexNotMatch | BinOp::RegexNotMatchCI);
-                        let matched = regex_is_match(&subject, &pattern, ci)?;
-                        Ok(Value::Bool(if negated { !matched } else { matched }))
-                    }
+            | BinOp::RegexNotMatchCI => match (&l, &r) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                _ => {
+                    let subject = val_to_text(&l);
+                    let pattern = val_to_text(&r);
+                    let ci = matches!(op, BinOp::RegexMatchCI | BinOp::RegexNotMatchCI);
+                    let negated = matches!(op, BinOp::RegexNotMatch | BinOp::RegexNotMatchCI);
+                    let matched = regex_is_match(&subject, &pattern, ci)?;
+                    Ok(Value::Bool(if negated { !matched } else { matched }))
                 }
-            }
+            },
             BinOp::And | BinOp::Or => unreachable!(),
         }
     }
@@ -642,14 +639,12 @@ impl RowContext {
             // on the search path. Our search path is just `public`, so resolve
             // the OID back to a known public relation (table or index).
             "pg_table_is_visible" => {
-                let db = self
-                    .db
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("pg_table_is_visible() requires a database context"))?;
-                let oid = match self.eval(
-                    args.first()
-                        .ok_or_else(|| anyhow::anyhow!("pg_table_is_visible() requires 1 argument"))?,
-                )? {
+                let db = self.db.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("pg_table_is_visible() requires a database context")
+                })?;
+                let oid = match self.eval(args.first().ok_or_else(|| {
+                    anyhow::anyhow!("pg_table_is_visible() requires 1 argument")
+                })?)? {
                     Value::Int(n) => n,
                     other => anyhow::bail!(
                         "pg_table_is_visible() requires an integer oid, got {}",
@@ -659,7 +654,9 @@ impl RowContext {
                 let visible = {
                     let tables = db.list_tables().unwrap_or_default();
                     let indexes = db.list_indexes();
-                    tables.iter().any(|t| crate::executor::catalog::synthetic_oid(t) as i64 == oid)
+                    tables
+                        .iter()
+                        .any(|t| crate::executor::catalog::synthetic_oid(t) as i64 == oid)
                         || indexes.iter().any(|(t, c)| {
                             let idx = format!("{t}_{c}_idx");
                             crate::executor::catalog::synthetic_oid(&idx) as i64 == oid
@@ -670,16 +667,16 @@ impl RowContext {
             // `format_type(oid, typmod)` — psql's `\d` column-type display and
             // many other introspection queries. `typmod` (arg 2) is ignored.
             "format_type" => {
-                let oid = match self.eval(
-                    args.first()
-                        .ok_or_else(|| anyhow::anyhow!("format_type() requires 1 or 2 arguments"))?,
-                )? {
-                    Value::Int(n) => n,
-                    other => anyhow::bail!(
-                        "format_type() requires an integer type oid, got {}",
-                        other.type_name()
-                    ),
-                };
+                let oid =
+                    match self.eval(args.first().ok_or_else(|| {
+                        anyhow::anyhow!("format_type() requires 1 or 2 arguments")
+                    })?)? {
+                        Value::Int(n) => n,
+                        other => anyhow::bail!(
+                            "format_type() requires an integer type oid, got {}",
+                            other.type_name()
+                        ),
+                    };
                 Ok(Value::Text(
                     crate::executor::catalog::pg_type_name_by_oid(oid as i32).to_string(),
                 ))
@@ -1038,10 +1035,10 @@ impl RowContext {
             // (added while building the OGC conformance test suite, see
             // `executor/ogc_conformance_tests.rs`).
             "st_geometrytype" => {
-                let geom = self.eval_geom(
-                    args.first()
-                        .ok_or_else(|| anyhow::anyhow!("st_geometrytype() requires 1 argument"))?,
-                )?;
+                let geom = self
+                    .eval_geom(args.first().ok_or_else(|| {
+                        anyhow::anyhow!("st_geometrytype() requires 1 argument")
+                    })?)?;
                 Ok(Value::Text(
                     match geom {
                         Geometry::Point(_) => "ST_Point",
@@ -1182,8 +1179,7 @@ impl RowContext {
                     Some(e) => self.eval(e)?.as_f64()?,
                     None => 1.0,
                 };
-                let raster =
-                    Raster::rasterize(&geom, scale_x, scale_y, value, srid.unwrap_or(0))?;
+                let raster = Raster::rasterize(&geom, scale_x, scale_y, value, srid.unwrap_or(0))?;
                 Ok(Value::Text(raster.to_hex()))
             }
             // Prism: vector distance/similarity scalar functions (`3prismspec.txt`).

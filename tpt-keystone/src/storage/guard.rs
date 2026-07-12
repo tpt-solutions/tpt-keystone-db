@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::storage::objectstore::{CasError, ObjectMeta};
 use crate::metrics::Metrics;
+use crate::storage::objectstore::{CasError, ObjectMeta};
 
 const DEFAULT_MAX_INFLIGHT: usize = 64;
 const DEFAULT_FAILURE_THRESHOLD: u64 = 5;
@@ -183,7 +183,9 @@ impl GuardedObjectStore {
     /// reports failures as `CasError`, so the closure just forwards them.
     fn run<T, F>(&self, op: F) -> std::result::Result<T, CasError>
     where
-        F: FnOnce(&Arc<dyn crate::storage::objectstore::ObjectStore>) -> std::result::Result<T, CasError>,
+        F: FnOnce(
+            &Arc<dyn crate::storage::objectstore::ObjectStore>,
+        ) -> std::result::Result<T, CasError>,
     {
         let _guard = self.inflight.acquire();
         let result = match self.admit() {
@@ -270,10 +272,19 @@ mod tests {
                 *ft -= 1;
                 return Err(anyhow::anyhow!("flaky failure"));
             }
-            Ok(Some((b"ok".to_vec(), ObjectMeta { etag: "e".into(), size: 2 })))
+            Ok(Some((
+                b"ok".to_vec(),
+                ObjectMeta {
+                    etag: "e".into(),
+                    size: 2,
+                },
+            )))
         }
         fn put(&self, _key: &str, _data: &[u8]) -> anyhow::Result<ObjectMeta> {
-            Ok(ObjectMeta { etag: "e".into(), size: 0 })
+            Ok(ObjectMeta {
+                etag: "e".into(),
+                size: 0,
+            })
         }
         fn put_if_match(
             &self,
@@ -281,7 +292,10 @@ mod tests {
             _data: &[u8],
             _expected_etag: Option<&str>,
         ) -> std::result::Result<ObjectMeta, CasError> {
-            Ok(ObjectMeta { etag: "e".into(), size: 0 })
+            Ok(ObjectMeta {
+                etag: "e".into(),
+                size: 0,
+            })
         }
         fn delete(&self, _key: &str) -> anyhow::Result<()> {
             Ok(())
@@ -300,18 +314,28 @@ mod tests {
         std::env::set_var("TPT_OSS_CIRCUIT_OPEN_SECS", "60");
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner: Arc<dyn crate::storage::objectstore::ObjectStore> = Arc::new(FlakyStore::new(2, calls.clone()));
+        let inner: Arc<dyn crate::storage::objectstore::ObjectStore> =
+            Arc::new(FlakyStore::new(2, calls.clone()));
         let guarded = GuardedObjectStore::new(inner);
 
         // First call fails -> breaker opens.
         assert!(guarded.get("k").is_err());
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(Metrics::global().object_store_circuit_open.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            Metrics::global()
+                .object_store_circuit_open
+                .load(Ordering::Relaxed),
+            1
+        );
 
         // While open, subsequent calls are shed without touching the backend.
         assert!(guarded.get("k").is_err());
         assert!(guarded.get("k").is_err());
-        assert_eq!(calls.load(Ordering::Relaxed), 1, "backend not hit while open");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "backend not hit while open"
+        );
 
         std::env::remove_var("TPT_OSS_CIRCUIT_FAILURES");
         std::env::remove_var("TPT_OSS_CIRCUIT_OPEN_SECS");
@@ -325,12 +349,18 @@ mod tests {
         std::env::set_var("TPT_OSS_CIRCUIT_OPEN_SECS", "0");
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner: Arc<dyn crate::storage::objectstore::ObjectStore> = Arc::new(FlakyStore::new(1, calls.clone()));
+        let inner: Arc<dyn crate::storage::objectstore::ObjectStore> =
+            Arc::new(FlakyStore::new(1, calls.clone()));
         let guarded = GuardedObjectStore::new(inner);
 
         assert!(guarded.get("k").is_err()); // fail -> open
         assert!(guarded.get("k").is_ok()); // probe -> backend now succeeds -> closed
-        assert_eq!(Metrics::global().object_store_circuit_open.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            Metrics::global()
+                .object_store_circuit_open
+                .load(Ordering::Relaxed),
+            0
+        );
         assert!(guarded.get("k").is_ok()); // stays closed
 
         std::env::remove_var("TPT_OSS_CIRCUIT_FAILURES");
@@ -342,8 +372,10 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap();
         std::env::set_var("TPT_OSS_CIRCUIT_FAILURES", "1");
         let inner: Arc<dyn crate::storage::objectstore::ObjectStore> = Arc::new(
-            crate::storage::objectstore::LocalFsObjectStore::open(tempfile::tempdir().unwrap().path())
-                .unwrap(),
+            crate::storage::objectstore::LocalFsObjectStore::open(
+                tempfile::tempdir().unwrap().path(),
+            )
+            .unwrap(),
         );
         let guarded = GuardedObjectStore::new(inner);
 
@@ -355,7 +387,12 @@ mod tests {
         ));
         // And a real get still works (breaker stayed closed).
         assert!(guarded.get("k").unwrap().is_some());
-        assert_eq!(Metrics::global().object_store_circuit_open.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            Metrics::global()
+                .object_store_circuit_open
+                .load(Ordering::Relaxed),
+            0
+        );
 
         std::env::remove_var("TPT_OSS_CIRCUIT_FAILURES");
     }

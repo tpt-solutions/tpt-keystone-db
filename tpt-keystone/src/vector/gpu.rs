@@ -362,7 +362,9 @@ pub fn gpu_brute_force_knn(
     k: usize,
 ) -> Result<Vec<(u32, f32)>> {
     let dist = gpu_batch_similarity(query, base, dim, metric)?;
-    let mut scored: Vec<(u32, f32)> = (0..dist.len() as u32).map(|i| (i, dist[i as usize])).collect();
+    let mut scored: Vec<(u32, f32)> = (0..dist.len() as u32)
+        .map(|i| (i, dist[i as usize]))
+        .collect();
     scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     Ok(scored)

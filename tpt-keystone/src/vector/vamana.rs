@@ -146,8 +146,17 @@ fn robust_prune(
 /// (larger = better graph quality, slower build), `alpha` controls
 /// `RobustPrune`'s long-range-edge aggressiveness (DiskANN's default is
 /// `1.2`; `1.0` degrades toward a purely-greedy, more clustered graph).
-pub fn build(points: &[Vec<f32>], metric: Metric, r: usize, l_build: usize, alpha: f32) -> VamanaGraph {
-    assert!(!points.is_empty(), "vamana::build requires at least one point");
+pub fn build(
+    points: &[Vec<f32>],
+    metric: Metric,
+    r: usize,
+    l_build: usize,
+    alpha: f32,
+) -> VamanaGraph {
+    assert!(
+        !points.is_empty(),
+        "vamana::build requires at least one point"
+    );
     let n = points.len();
     let mut edges: Vec<Vec<u32>> = vec![Vec::new(); n];
     let medoid = compute_medoid(points, metric);

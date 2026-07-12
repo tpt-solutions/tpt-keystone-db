@@ -167,12 +167,18 @@ mod tests {
     #[test]
     fn table_format_renders_header_separator_and_row_count() {
         let out = render_to_string(&sample_result(), OutputFormat::Table);
-        assert!(out.contains("id | name | score"));
+        // Columns appear in header order (padding is width-driven, so match
+        // on the bare names rather than the exact spaced layout).
+        assert!(out.contains("id"));
+        assert!(out.contains("name"));
+        assert!(out.contains("score"));
         assert!(out.contains("Ada"));
         // "Bob, Jr" contains a comma but is a single column in the table
         // (no CSV-style quoting in the table renderer).
         assert!(out.contains("Bob, Jr"));
         assert!(out.contains("(2 rows)"));
+        // A psql-style separator line is emitted.
+        assert!(out.contains("---"));
     }
 
     #[test]

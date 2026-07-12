@@ -65,7 +65,8 @@ mod tests {
 
     #[test]
     fn len_and_is_empty_track_cell_count() {
-        let v = RowView::new(&buffer());
+        let buf = buffer();
+        let v = RowView::new(&buf);
         assert_eq!(v.len(), 3);
         assert!(!v.is_empty());
 
@@ -75,17 +76,21 @@ mod tests {
 
     #[test]
     fn get_returns_raw_bytes_and_null() {
-        let v = RowView::new(&buffer());
-        assert_eq!(v.get(0), Some(&b"1"[..]));
+        let one: &[u8] = b"1";
+        let hello: &[u8] = b"hello";
+        let buf = buffer();
+        let v = RowView::new(&buf);
+        assert_eq!(v.get(0), Some(one));
         assert_eq!(v.get(1), None);
-        assert_eq!(v.get(2), Some(&b"hello"[..]));
+        assert_eq!(v.get(2), Some(hello));
         // Out-of-bounds reads are None, mirroring SQL semantics.
         assert_eq!(v.get(3), None);
     }
 
     #[test]
     fn get_str_decodes_utf8_and_skips_invalid() {
-        let v = RowView::new(&buffer());
+        let buf = buffer();
+        let v = RowView::new(&buf);
         assert_eq!(v.get_str(0), Some("1"));
         assert_eq!(v.get_str(1), None);
         assert_eq!(v.get_str(2), Some("hello"));
@@ -96,9 +101,12 @@ mod tests {
 
     #[test]
     fn iter_yields_each_cell_as_option() {
-        let v = RowView::new(&buffer());
+        let one: &[u8] = b"1";
+        let hello: &[u8] = b"hello";
+        let buf = buffer();
+        let v = RowView::new(&buf);
         let collected: Vec<Option<&[u8]>> = v.iter().collect();
-        assert_eq!(collected, vec![Some(&b"1"[..]), None, Some(&b"hello"[..])]);
+        assert_eq!(collected, vec![Some(one), None, Some(hello)]);
     }
 
     #[test]

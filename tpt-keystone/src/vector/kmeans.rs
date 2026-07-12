@@ -63,8 +63,7 @@ pub fn kmeans(points: &[Vec<f32>], k: usize, max_iters: usize) -> Vec<Vec<f32>> 
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        let d = l2_distance_squared(p, &centroids[assignments[i]])
-                            .unwrap_or(0.0);
+                        let d = l2_distance_squared(p, &centroids[assignments[i]]).unwrap_or(0.0);
                         (i, d)
                     })
                     .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))

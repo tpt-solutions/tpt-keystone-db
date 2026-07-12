@@ -14,7 +14,11 @@ fn split(bytes: &[u8]) -> (u8, i32, &[u8]) {
     let len = i32::from_be_bytes(bytes[1..5].try_into().unwrap());
     let body = &bytes[5..];
     // Declared length includes itself (4 bytes) but not the tag byte.
-    assert_eq!(len as usize, body.len() + 4, "declared length must match body");
+    assert_eq!(
+        len as usize,
+        body.len() + 4,
+        "declared length must match body"
+    );
     (tag, len, body)
 }
 
@@ -28,7 +32,9 @@ fn encodes_authentication_ok() {
 
 #[test]
 fn encodes_authentication_sasl() {
-    let bytes = encode_to_vec(&BackendMessage::AuthenticationSASL(vec!["SCRAM-SHA-256".into()]));
+    let bytes = encode_to_vec(&BackendMessage::AuthenticationSASL(vec![
+        "SCRAM-SHA-256".into()
+    ]));
     let (tag, _, body) = split(&bytes);
     assert_eq!(tag, b'R');
     let mut expected = 10i32.to_be_bytes().to_vec();
@@ -39,7 +45,9 @@ fn encodes_authentication_sasl() {
 
 #[test]
 fn encodes_authentication_sasl_continue_and_final() {
-    let bytes = encode_to_vec(&BackendMessage::AuthenticationSASLContinue(b"srv-first".to_vec()));
+    let bytes = encode_to_vec(&BackendMessage::AuthenticationSASLContinue(
+        b"srv-first".to_vec(),
+    ));
     let (tag, _, body) = split(&bytes);
     assert_eq!(tag, b'R');
     let mut expected = 11i32.to_be_bytes().to_vec();
@@ -66,7 +74,10 @@ fn encodes_parameter_status_and_backend_key_data() {
     expected.extend_from_slice(b"16.0\0");
     assert_eq!(body, expected.as_slice());
 
-    let bytes = encode_to_vec(&BackendMessage::BackendKeyData { pid: 42, secret: 99 });
+    let bytes = encode_to_vec(&BackendMessage::BackendKeyData {
+        pid: 42,
+        secret: 99,
+    });
     let (tag, _, body) = split(&bytes);
     assert_eq!(tag, b'K');
     let mut expected = 42i32.to_be_bytes().to_vec();
@@ -214,7 +225,10 @@ fn encodes_no_data_and_portal_suspended() {
 
 #[test]
 fn encodes_parameter_description_types() {
-    let bytes = encode_to_vec(&BackendMessage::ParameterDescription(vec![oid::INT8, oid::TEXT]));
+    let bytes = encode_to_vec(&BackendMessage::ParameterDescription(vec![
+        oid::INT8,
+        oid::TEXT,
+    ]));
     let (tag, _, body) = split(&bytes);
     assert_eq!(tag, b't');
     assert_eq!(&body[0..2], &2i16.to_be_bytes());

@@ -27,7 +27,7 @@ jobs:
           workspaces: tpt-keystone
       - name: Run tests
         working-directory: tpt-keystone
-        run: cargo test --release
+        run: cargo test
 
   # ---------------------------------------------------------------------------
   # Library crates: build + test each independently (no shared workspace).
@@ -51,6 +51,10 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.crate }}
         run: cargo test
+      - name: Test (ffi feature)
+        if: matrix.crate == 'tpt-sdk'
+        working-directory: ${{ matrix.crate }}
+        run: cargo test --features ffi
 
   # ---------------------------------------------------------------------------
   # Canvas: WASM build only (no meaningful native test path).

@@ -82,7 +82,6 @@ func TestWriteBindEncodesNullsAsNegativeLength(t *testing.T) {
 
 	w := newWireConn(client)
 	p1 := []byte("a")
-	var p2 []byte // nil => NULL
 	w.writeBind("", "", []*[]byte{&p1, nil})
 	if err := w.flush(); err != nil {
 		t.Fatalf("flush: %v", err)
@@ -99,6 +98,15 @@ func TestWriteBindEncodesNullsAsNegativeLength(t *testing.T) {
 
 // --- response (backend) decoding -----------------------------------------
 
+func mustDecode(t *testing.T, tag byte, body []byte) kindAndPayload {
+	t.Helper()
+	msg, err := decodeBody(tag, body)
+	if err != nil {
+		t.Fatalf("decodeBody(%q) unexpected error: %v", tag, err)
+	}
+	return msg
+}
+
 func TestDecodeRowDescription(t *testing.T) {
 	var b []byte
 	b = putI16(b, 1)
@@ -109,7 +117,7 @@ func TestDecodeRowDescription(t *testing.T) {
 	b = append(b, 0, 0)       // type size
 	b = append(b, 0, 0, 0, 0) // type modifier
 	b = append(b, 0, 0)       // format
-	msg := decodeBody('T', b)
+	msg := mustDecode(t, 'T', b)
 	if msg.Kind != msgRowDescription {
 		t.Fatalf("kind = %v, want msgRowDescription", msg.Kind)
 	}
@@ -124,7 +132,7 @@ func TestDecodeDataRowWithNull(t *testing.T) {
 	b = putI32(b, 3)
 	b = append(b, "abc"...)
 	b = putI32(b, -1) // NULL
-	msg := decodeBody('D', b)
+	msg := mustDecode(t, 'D', b)
 	if len(msg.Row) != 2 {
 		t.Fatalf("got %d cols, want 2", len(msg.Row))
 	}
@@ -137,23 +145,23 @@ func TestDecodeDataRowWithNull(t *testing.T) {
 }
 
 func TestDecodeTerminalMessages(t *testing.T) {
-	if decodeBody('C', []byte("INSERT 0 1\x00")).Kind != msgCommandComplete {
+	if mustDecode(t, 'C', []byte("INSERT 0 1\x00")).Kind != msgCommandComplete {
 		t.Fatal("CommandComplete")
 	}
-	if decodeBody('I', nil).Kind != msgEmptyQueryResponse {
+	if mustDecode(t, 'I', nil).Kind != msgEmptyQueryResponse {
 		t.Fatal("EmptyQueryResponse")
 	}
-	if decodeBody('n', nil).Kind != msgNoData {
+	if mustDecode(t, 'n', nil).Kind != msgNoData {
 		t.Fatal("NoData")
 	}
-	if decodeBody('1', nil).Kind != msgParseComplete {
+	if mustDecode(t, '1', nil).Kind != msgParseComplete {
 		t.Fatal("ParseComplete")
 	}
-	rf := decodeBody('E', []byte{'M', 'b', 'o', 'o', 'm', 0, 0})
+	rf := mustDecode(t, 'E', []byte{'M', 'b', 'o', 'o', 'm', 0, 0})
 	if rf.Kind != msgErrorResponse || rf.ErrMsg != "boom" {
 		t.Fatalf("ErrorResponse = %+v", rf)
 	}
-	rq := decodeBody('Z', []byte{'T'})
+	rq := mustDecode(t, 'Z', []byte{'T'})
 	if rq.Kind != msgReadyForQuery || rq.ReadyStatus != 'T' {
 		t.Fatalf("ReadyForQuery = %+v", rq)
 	}
@@ -161,9 +169,10 @@ func TestDecodeTerminalMessages(t *testing.T) {
 
 func TestReadCStrAndParseErrorFields(t *testing.T) {
 	buf := []byte("ab\x00cd")
-	s, off := readCStr(buf, 0)
-	if s != "ab" || off != 3 {
-		t.Fatalf("readCStr = (%q,%d), want (ab,3)", s, off)
+	pos := 0
+	s := readCStr(buf, &pos)
+	if s != "ab" || pos != 3 {
+		t.Fatalf("readCStr = (%q,%d), want (ab,3)", s, pos)
 	}
 	body := []byte{'S', 's', 'e', 'v', 0, 'M', 'b', 'o', 'o', 'm', 0, 0}
 	if got := parseErrorFields(body); got != "boom" {
@@ -227,23 +236,27 @@ func TestConnClosedAndErrConnClosedAreDistinct(t *testing.T) {
 // --- scan mapping ---------------------------------------------------------
 
 func TestScanOneMapsTextToDestinations(t *testing.T) {
+	hi := []byte("hi")
 	var s string
-	if err := scanOne([]byte("hi"), &s); err != nil || s != "hi" {
+	if err := scanOne(&hi, &s); err != nil || s != "hi" {
 		t.Fatalf("scan *string: err=%v s=%q", err, s)
 	}
 
+	idBytes := []byte("123")
 	var id int64
-	if err := scanOne([]byte("123"), &id); err != nil || id != 123 {
+	if err := scanOne(&idBytes, &id); err != nil || id != 123 {
 		t.Fatalf("scan *int64: err=%v id=%v", err, id)
 	}
 
+	tBytes := []byte("t")
 	var ok bool
-	if err := scanOne([]byte("t"), &ok); err != nil || !ok {
+	if err := scanOne(&tBytes, &ok); err != nil || !ok {
 		t.Fatalf("scan *bool: err=%v ok=%v", err, ok)
 	}
 
+	fortyTwo := []byte("42")
 	var anyVal any
-	if err := scanOne([]byte("42"), &anyVal); err != nil {
+	if err := scanOne(&fortyTwo, &anyVal); err != nil {
 		t.Fatalf("scan *any: %v", err)
 	}
 	if anyVal != int64(42) {

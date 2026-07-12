@@ -150,7 +150,10 @@ fn conformance_st_dimension_matches_topological_dimension() {
 fn conformance_st_astext_round_trips_wkt() {
     let (db, _b, _l) = test_db();
     assert_eq!(
-        scalar(&db, "SELECT ST_AsText(ST_GeomFromText('POINT(-71.064544 42.28787)'))"),
+        scalar(
+            &db,
+            "SELECT ST_AsText(ST_GeomFromText('POINT(-71.064544 42.28787)'))"
+        ),
         "POINT(-71.064544 42.28787)"
     );
 }
@@ -175,7 +178,10 @@ fn conformance_st_asbinary_and_geomfromwkb_round_trip() {
 fn conformance_st_isempty_true_only_for_empty_linestrings_and_polygons() {
     let (db, _b, _l) = test_db();
     assert_eq!(
-        scalar(&db, "SELECT ST_IsEmpty(ST_GeomFromText('LINESTRING EMPTY'))"),
+        scalar(
+            &db,
+            "SELECT ST_IsEmpty(ST_GeomFromText('LINESTRING EMPTY'))"
+        ),
         "t"
     );
     assert_eq!(
@@ -216,11 +222,17 @@ fn conformance_st_envelope_of_a_linestring_is_its_bbox_rectangle() {
 fn conformance_st_x_and_st_y_read_back_a_points_ordinates() {
     let (db, _b, _l) = test_db();
     assert_eq!(
-        scalar(&db, "SELECT ST_X(ST_GeomFromText('POINT(-71.064544 42.28787)'))"),
+        scalar(
+            &db,
+            "SELECT ST_X(ST_GeomFromText('POINT(-71.064544 42.28787)'))"
+        ),
         "-71.064544"
     );
     assert_eq!(
-        scalar(&db, "SELECT ST_Y(ST_GeomFromText('POINT(-71.064544 42.28787)'))"),
+        scalar(
+            &db,
+            "SELECT ST_Y(ST_GeomFromText('POINT(-71.064544 42.28787)'))"
+        ),
         "42.28787"
     );
 }
@@ -232,9 +244,12 @@ fn conformance_st_length_sums_linestring_segment_distances() {
     let (db, _b, _l) = test_db();
     // A 1-degree-of-longitude segment on the equator: haversine distance
     // should be close to 111.32 km (WGS84-ish great-circle length).
-    let len = scalar(&db, "SELECT ST_Length(ST_GeomFromText('LINESTRING(0 0, 1 0)'))")
-        .parse::<f64>()
-        .unwrap();
+    let len = scalar(
+        &db,
+        "SELECT ST_Length(ST_GeomFromText('LINESTRING(0 0, 1 0)'))",
+    )
+    .parse::<f64>()
+    .unwrap();
     assert!(
         (len - 111_195.0).abs() < 2_000.0,
         "expected ~111.2km, got {len}m"

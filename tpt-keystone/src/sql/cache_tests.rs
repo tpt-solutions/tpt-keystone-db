@@ -47,7 +47,11 @@ fn cache_reuses_entry_on_reaccess() {
     let (_, hits_before, misses_before) = cache.stats();
     cache.parse("SELECT 1").unwrap();
     let (_, hits_after, misses_after) = cache.stats();
-    assert_eq!(hits_after, hits_before + 1, "SELECT 1 should still be cached");
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "SELECT 1 should still be cached"
+    );
     assert_eq!(misses_after, misses_before);
 }
 

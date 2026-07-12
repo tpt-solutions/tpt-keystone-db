@@ -30,15 +30,14 @@ impl Row {
     /// tests and for SDK consumers that decode rows out-of-band (e.g. the
     /// FFI layer) without going through [`KeystoneClient::query`].
     pub fn new(
-        columns: impl Into<Vec<String>>,
-        cells: impl Into<Vec<Option<Vec<u8>>>>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+        cells: impl IntoIterator<Item = Option<impl Into<Vec<u8>>>>,
     ) -> Self {
         Row {
-            columns: std::sync::Arc::new(columns.into()),
+            columns: std::sync::Arc::new(columns.into_iter().map(|c| c.into()).collect()),
             cells: cells
-                .into()
                 .into_iter()
-                .map(|c| c.map(|v| v.into_boxed_slice()))
+                .map(|c| c.map(|v| v.into().into_boxed_slice()))
                 .collect(),
         }
     }
@@ -302,7 +301,8 @@ mod tests {
         assert_eq!(row.get_str(0), Some("1"));
         assert_eq!(row.get_str(1), Some("Ada"));
         assert_eq!(row.get_str(2), None);
-        assert_eq!(row.get_by_name("name"), Some(&b"Ada"[..]));
+        let ada: &[u8] = b"Ada";
+        assert_eq!(row.get_by_name("name"), Some(ada));
         assert_eq!(row.get_by_name("missing"), None);
         assert_eq!(row.get_value(0), Value::Int(1));
         assert_eq!(row.get_value(2), Value::Null);

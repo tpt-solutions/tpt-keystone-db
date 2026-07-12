@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(cli.port, 6543);
         match cli.command {
             Some(Command::Query { sql, .. }) => assert_eq!(sql, "SELECT 1"),
-            other => panic!("expected query, got {other:?}"),
+            _ => panic!("expected query command"),
         }
     }
 
@@ -178,7 +178,7 @@ mod tests {
                 assert_eq!(format, OutputFormat::Csv);
                 assert!(output.is_none());
             }
-            other => panic!("expected export, got {other:?}"),
+            _ => panic!("expected export command"),
         }
     }
 
@@ -189,7 +189,7 @@ mod tests {
             Some(Command::Migrate { action: MigrateAction::Status { dir } }) => {
                 assert_eq!(dir, PathBuf::from("migrations"));
             }
-            other => panic!("expected migrate status, got {other:?}"),
+            _ => panic!("expected migrate status command"),
         }
     }
 }

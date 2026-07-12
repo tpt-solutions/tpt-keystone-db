@@ -289,14 +289,26 @@ async fn read_message_sync_flush_terminate_copy_variants() {
     fail_body.push(0);
     client.write_all(&message(b'f', &fail_body)).await.unwrap();
 
-    assert!(matches!(conn.read_message().await.unwrap(), FrontendMessage::Sync));
-    assert!(matches!(conn.read_message().await.unwrap(), FrontendMessage::Flush));
-    assert!(matches!(conn.read_message().await.unwrap(), FrontendMessage::Terminate));
+    assert!(matches!(
+        conn.read_message().await.unwrap(),
+        FrontendMessage::Sync
+    ));
+    assert!(matches!(
+        conn.read_message().await.unwrap(),
+        FrontendMessage::Flush
+    ));
+    assert!(matches!(
+        conn.read_message().await.unwrap(),
+        FrontendMessage::Terminate
+    ));
     match conn.read_message().await.unwrap() {
         FrontendMessage::CopyData(d) => assert_eq!(d, b"payload"),
         other => panic!("expected CopyData, got {other:?}"),
     }
-    assert!(matches!(conn.read_message().await.unwrap(), FrontendMessage::CopyDone));
+    assert!(matches!(
+        conn.read_message().await.unwrap(),
+        FrontendMessage::CopyDone
+    ));
     match conn.read_message().await.unwrap() {
         FrontendMessage::CopyFail(msg) => assert_eq!(msg, "oops"),
         other => panic!("expected CopyFail, got {other:?}"),
@@ -307,7 +319,10 @@ async fn read_message_sync_flush_terminate_copy_variants() {
 async fn read_message_unknown_tag_falls_back_to_sync() {
     let (mut conn, mut client) = conn_pair();
     client.write_all(&message(b'?', &[])).await.unwrap();
-    assert!(matches!(conn.read_message().await.unwrap(), FrontendMessage::Sync));
+    assert!(matches!(
+        conn.read_message().await.unwrap(),
+        FrontendMessage::Sync
+    ));
 }
 
 #[tokio::test]
