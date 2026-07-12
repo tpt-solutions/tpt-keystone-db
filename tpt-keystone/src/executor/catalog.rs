@@ -104,6 +104,8 @@ pub fn resolve_virtual_table(
         "pg_constraint" => Some(pg_constraint(db)),
         "pg_am" => Some(Ok(pg_am())),
         "pg_sequence" => Some(Ok(pg_sequence(db))),
+        "pg_roles" => Some(pg_roles(db)),
+        "pg_auth_members" => Some(pg_auth_members(db)),
         "tables" if is_information_schema(name) => Some(information_schema_tables(db)),
         "columns" if is_information_schema(name) => Some(information_schema_columns(db)),
         _ => None,
@@ -524,4 +526,81 @@ pub(crate) fn pg_type_name_by_oid(oid: i32) -> &'static str {
         17 => "bytea",
         _ => "text",
     }
+}
+
+/// `pg_catalog.pg_roles` — one row per role in `_tpt_roles`, with the OID,
+/// superuser flag, and login privilege Postgres exposes.
+fn pg_roles(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
+    let s = schema(
+        "pg_roles",
+        vec![
+            col("oid", ColumnType::Int4),
+            col("rolname", ColumnType::Text),
+            col("rolsuper", ColumnType::Bool),
+            col("rolcanlogin", ColumnType::Bool),
+        ],
+    );
+    let mut rows = Vec::new();
+    for kv in db.scan("_tpt_roles")? {
+        let rolname = match crate::synapse::decode_cell(&kv.value, 0) {
+            Some(b) => match String::from_utf8(b) {
+                Ok(s) => s,
+                Err(_) => continue,
+            },
+            None => continue,
+        };
+        let superuser = crate::synapse::decode_cell(&kv.value, 6)
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s == "t")
+            .unwrap_or(false);
+        let can_login = crate::synapse::decode_cell(&kv.value, 7)
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s == "t")
+            .unwrap_or(true);
+        rows.push(vec![
+            int(synthetic_oid(&rolname)),
+            text(rolname),
+            boolean(superuser),
+            boolean(can_login),
+        ]);
+    }
+    Ok((s, rows))
+}
+
+/// `pg_catalog.pg_auth_members` — one row per `member → group` edge in
+/// `_tpt_role_members`, with both ends resolved to their synthetic OIDs.
+fn pg_auth_members(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
+    let s = schema(
+        "pg_auth_members",
+        vec![
+            col("oid", ColumnType::Int4),
+            col("roleid", ColumnType::Int4),
+            col("member", ColumnType::Int4),
+            col("admin_option", ColumnType::Bool),
+        ],
+    );
+    let mut rows = Vec::new();
+    for kv in db.scan("_tpt_role_members")? {
+        let member = match crate::synapse::decode_cell(&kv.value, 1) {
+            Some(b) => match String::from_utf8(b) {
+                Ok(s) => s,
+                Err(_) => continue,
+            },
+            None => continue,
+        };
+        let group = match crate::synapse::decode_cell(&kv.value, 2) {
+            Some(b) => match String::from_utf8(b) {
+                Ok(s) => s,
+                Err(_) => continue,
+            },
+            None => continue,
+        };
+        rows.push(vec![
+            int(synthetic_oid(&format!("{member}\u{0}{group}"))),
+            int(synthetic_oid(&group)),
+            int(synthetic_oid(&member)),
+            boolean(false),
+        ]);
+    }
+    Ok((s, rows))
 }

@@ -10,6 +10,12 @@ mod messages_tests;
 pub mod roles;
 #[cfg(test)]
 mod roles_tests;
+pub mod privileges;
+pub mod role_members;
+#[cfg(test)]
+mod privileges_tests;
+#[cfg(test)]
+mod role_members_tests;
 pub mod scram;
 pub mod session;
 pub mod tls;

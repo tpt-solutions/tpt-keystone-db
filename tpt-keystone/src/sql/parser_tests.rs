@@ -544,3 +544,157 @@ fn match_return_of_unknown_variable_errors() {
 fn match_where_on_non_first_variable_errors() {
     assert!(parse("MATCH (a)-[]->(b) ON t(col) WHERE b = 'x' RETURN a, b").is_err());
 }
+
+// --- RBAC DDL (Phase 2 §9) -------------------------------------------------
+
+#[test]
+fn parses_create_role_with_all_clauses() {
+    let stmt = parse_ok(
+        "CREATE ROLE admin SUPERUSER LOGIN PASSWORD 'secret' IN ROLE ops, dba",
+    );
+    match stmt {
+        Stmt::CreateRole(r) => {
+            assert_eq!(r.name, "admin");
+            assert!(r.superuser);
+            assert!(r.can_login);
+            assert_eq!(r.password.as_deref(), Some("secret"));
+            assert_eq!(r.in_role, vec!["ops".to_string(), "dba".to_string()]);
+        }
+        other => panic!("expected Stmt::CreateRole, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_create_role_defaults() {
+    let stmt = parse_ok("CREATE ROLE readonly NOSUPERUSER NOLOGIN");
+    match stmt {
+        Stmt::CreateRole(r) => {
+            assert_eq!(r.name, "readonly");
+            assert!(!r.superuser);
+            assert!(!r.can_login);
+            assert!(r.password.is_none());
+            assert!(r.in_role.is_empty());
+        }
+        other => panic!("expected Stmt::CreateRole, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_create_role_if_not_exists() {
+    let stmt = parse_ok("CREATE ROLE IF NOT EXISTS app PASSWORD 'pw'");
+    match stmt {
+        Stmt::CreateRole(r) => {
+            assert_eq!(r.name, "app");
+            assert_eq!(r.password.as_deref(), Some("pw"));
+        }
+        other => panic!("expected Stmt::CreateRole, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_alter_role_independent_clauses() {
+    let stmt = parse_ok("ALTER ROLE admin NOSUPERUSER PASSWORD 'new'");
+    match stmt {
+        Stmt::AlterRole(r) => {
+            assert_eq!(r.name, "admin");
+            assert_eq!(r.superuser, Some(false));
+            assert_eq!(r.can_login, None);
+            assert_eq!(r.password.as_deref(), Some("new"));
+        }
+        other => panic!("expected Stmt::AlterRole, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_drop_role_if_exists() {
+    let stmt = parse_ok("DROP ROLE IF EXISTS old");
+    match stmt {
+        Stmt::DropRole(r) => {
+            assert!(r.if_exists);
+            assert_eq!(r.name, "old");
+        }
+        other => panic!("expected Stmt::DropRole, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_grant_privileges_on_table() {
+    let stmt = parse_ok("GRANT SELECT, INSERT ON TABLE users TO alice, bob");
+    match stmt {
+        Stmt::Grant(g) => {
+            assert!(!g.is_role_grant);
+            assert_eq!(g.privileges, vec![Privilege::Select, Privilege::Insert]);
+            assert_eq!(g.object, GrantObject::Table("users".to_string()));
+            assert_eq!(g.grantees, vec!["alice".to_string(), "bob".to_string()]);
+        }
+        other => panic!("expected Stmt::Grant, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_grant_all_on_database() {
+    let stmt = parse_ok("GRANT ALL ON DATABASE TO admin");
+    match stmt {
+        Stmt::Grant(g) => {
+            assert!(!g.is_role_grant);
+            assert_eq!(g.privileges.len(), 7);
+            assert_eq!(g.object, GrantObject::Database);
+            assert_eq!(g.grantees, vec!["admin".to_string()]);
+        }
+        other => panic!("expected Stmt::Grant, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_grant_role_membership() {
+    let stmt = parse_ok("GRANT ops TO alice");
+    match stmt {
+        Stmt::Grant(g) => {
+            assert!(g.is_role_grant);
+            assert_eq!(g.roles, vec!["ops".to_string()]);
+            assert_eq!(g.grantees, vec!["alice".to_string()]);
+        }
+        other => panic!("expected Stmt::Grant, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_revoke_privileges_from_role() {
+    let stmt = parse_ok("REVOKE SELECT, UPDATE ON users FROM alice");
+    match stmt {
+        Stmt::Revoke(r) => {
+            assert!(!r.is_role_grant);
+            assert_eq!(r.privileges, vec![Privilege::Select, Privilege::Update]);
+            assert_eq!(r.object, GrantObject::Table("users".to_string()));
+            assert_eq!(r.grantees, vec!["alice".to_string()]);
+        }
+        other => panic!("expected Stmt::Revoke, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_revoke_role_membership() {
+    let stmt = parse_ok("REVOKE ops FROM alice");
+    match stmt {
+        Stmt::Revoke(r) => {
+            assert!(r.is_role_grant);
+            assert_eq!(r.roles, vec!["ops".to_string()]);
+            assert_eq!(r.grantees, vec!["alice".to_string()]);
+        }
+        other => panic!("expected Stmt::Revoke, got {other:?}"),
+    }
+}
+
+#[test]
+fn grant_privileges_without_object_fails() {
+    assert!(parse("GRANT SELECT TO alice").is_err());
+}
+
+#[test]
+fn grant_with_optional_privileges_keyword() {
+    let stmt = parse_ok("GRANT SELECT PRIVILEGES ON TABLE t TO u");
+    match stmt {
+        Stmt::Grant(g) => assert_eq!(g.privileges, vec![Privilege::Select]),
+        other => panic!("expected Stmt::Grant, got {other:?}"),
+    }
+}

@@ -614,6 +614,7 @@ impl Parser {
             self.advance();
             self.expect(&Token::Exists)?;
         }
+        let name = self.parse_ident_string()?;
         let mut superuser = false;
         let mut can_login = true;
         let mut password = None;
@@ -828,6 +829,8 @@ impl Parser {
         }
         Ok(names)
     }
+    /// `(ident, ident, ...)`.
+    fn parse_paren_ident_list(&mut self) -> anyhow::Result<Vec<String>> {
         self.expect(&Token::LParen)?;
         let mut names = vec![self.parse_ident_string()?];
         while self.eat(&Token::Comma) {

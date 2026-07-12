@@ -1259,43 +1259,49 @@ a Postgres-style DAC layer (role catalog, membership/inheritance, GRANT/REVOKE o
 superuser bypass), not the Zanzibar-style ReBAC tuple model CLAUDE.md separately anticipates pairing
 with it later (ReBAC itself stays out of scope here).
 
-- [ ] Role-attribute catalog — extend `_tpt_roles` (`wire/roles.rs`) with `rolsuper`/`rolcanlogin`
-  columns (append-only, with an internal `ALTER TABLE ADD COLUMN` migration in `ensure_schema` for
-  existing installs); `bootstrap_if_empty` marks the env-var-seeded first role superuser.
-- [ ] Role membership — new `_tpt_role_members` system table + `wire/role_members.rs::RoleMemberStore`
-  (`grant_membership`/`revoke_membership`/`direct_memberships`/`all_memberships` transitive closure,
-  cycle rejection on grant). Scope cut: no `WITH ADMIN OPTION`, no `NOINHERIT` roles.
-- [ ] Object privileges — new `_tpt_privileges` system table + `wire/privileges.rs::PrivilegeStore`
-  (`Privilege` enum: Select/Insert/Update/Delete/Create/Drop/Usage; `GrantObject`: `Table`/`Database`).
-  Scope cuts: no column-level privileges, no `WITH GRANT OPTION` re-delegation, no
-  `ALTER DEFAULT PRIVILEGES`, no object-ownership model (a non-superuser's own `CREATE TABLE` grants no
-  implicit privileges on it — must be separately `GRANT`ed or be superuser), no `SET ROLE`/
-  `SET SESSION AUTHORIZATION`.
-- [ ] Parser/AST — `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` (`sql/ast.rs`, `sql/lexer.rs`,
+- [x] Role-attribute catalog — extended `_tpt_roles` (`wire/roles.rs`) with `rolsuper`/`rolcanlogin`
+  columns, with `migrate_legacy_rows` normalizing any pre-Phase-20 row (at most one — the bootstrap role)
+  to `SUPERUSER LOGIN` in place, matching what `bootstrap_if_empty` would have created; `bootstrap_if_empty`
+  marks the env-var-seeded first role superuser via `upsert_with_attrs`.
+- [x] Role membership — new `_tpt_role_members` system table + `wire/role_members.rs::RoleMemberStore`
+  (`grant_membership`/`revoke_membership`/`revoke_all`/`direct_memberships`/`all_memberships` transitive
+  closure via BFS, cycle rejection on grant checked in both directions). Scope cut: no `WITH ADMIN OPTION`,
+  no `NOINHERIT` roles.
+- [x] Object privileges — new `_tpt_privileges` system table + `wire/privileges.rs::PrivilegeStore`
+  (`PrivilegeRepr`: Select/Insert/Update/Delete/Create/Drop/Usage/All; `GrantObjectRepr`: `Table`/`Database`;
+  `has_privilege` walks the requesting role's transitive memberships too). Scope cuts: no column-level
+  privileges, no `WITH GRANT OPTION` re-delegation, no `ALTER DEFAULT PRIVILEGES`, no object-ownership model
+  (a non-superuser's own `CREATE TABLE` grants no implicit privileges on it — must be separately `GRANT`ed
+  or be superuser), no `SET ROLE`/`SET SESSION AUTHORIZATION`.
+- [x] Parser/AST — `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` (`sql/ast.rs`, `sql/lexer.rs`,
   `sql/parser.rs`), including `GRANT role TO role` vs. `GRANT priv ON obj TO role` disambiguation. Scope
   cut: no `GRANT ... ON ALL TABLES IN SCHEMA ...` (no schema/namespace concept in this codebase —
   `ON DATABASE` is the only whole-instance granularity).
-- [ ] Session identity threading — `executor/rbac.rs::Actor` (rolname/superuser/transitive memberships),
+- [x] Session identity threading — `executor/rbac.rs::Actor` (rolname/superuser/transitive memberships),
   built once per connection right after the SCRAM handshake in `wire/session.rs::run()` (or
-  `Actor::unrestricted()` when `_tpt_roles` is empty, preserving the zero-config default), threaded
-  through `run_query_loop`/`execute_simple`/`execute_parsed`/`execute_parsed_inner`.
-- [ ] Enforcement — `executor/rbac.rs::check()` (superuser/no-rolname short-circuit, direct privilege,
-  then per-membership privilege, else deny with SQLSTATE `42501` via a downcastable marker error type
-  rather than the generic `42601` every other executor error currently reports); per-`Stmt`-arm checks in
-  `execute_parsed_inner`; `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` are superuser-only, no
-  delegation model this pass. Plus a dedicated guard rejecting direct DML/DDL against reserved `_tpt_*`
-  system-catalog tables for non-superusers, so `INSERT INTO _tpt_roles ...` can't bypass `CREATE ROLE`.
-- [ ] `pg_catalog` surface (optional/droppable) — `pg_roles`/`pg_auth_members` virtual tables in
-  `executor/catalog.rs`, following the existing synthesized-OID virtual-table pattern.
-- [ ] Tests — store-level round-trips (`wire/role_members_tests.rs`, `wire/privileges_tests.rs`),
-  integration enforcement suite (`executor/rbac_tests.rs`: per-statement allow/deny, superuser bypass,
-  membership inheritance, the `_tpt_roles`-empty no-op regression across every statement kind,
-  system-catalog write protection, admin-only role/grant DDL), parser `Stmt`-shape tests, and one
-  wire-level end-to-end test asserting a denied query's `ErrorInfo` carries SQLSTATE `42501`.
+  `Actor::unrestricted()` when `_tpt_roles` is empty, preserving the zero-config default), threaded through
+  `run_query_loop`/`execute_simple`/the new `executor::execute_parsed_as` (the old `execute_parsed` now
+  delegates to it with an unrestricted actor, for trusted in-process/internal/test callers).
+- [x] Enforcement — `executor/rbac.rs::Actor::check()` (superuser/unrestricted short-circuit, reserved
+  `_tpt_*` system-catalog guard, then per-`Stmt`-arm privilege checks via `PrivilegeStore::has_privilege`,
+  which also walks membership); denial returns `InsufficientPrivilege`, a downcastable marker error that
+  `wire/session.rs::sqlstate_for` maps to SQLSTATE `42501` (vs. the generic `42601` for everything else).
+  `CREATE ROLE`/`ALTER ROLE`/`DROP ROLE`/`GRANT`/`REVOKE` are superuser-only, no delegation model this
+  pass. A role without `LOGIN` is also rejected at `authenticate()`, before any SCRAM exchange.
+- [x] `pg_catalog` surface — `pg_roles`/`pg_auth_members` virtual tables added to
+  `executor/catalog.rs::resolve_virtual_table`, following the existing synthesized-OID virtual-table
+  pattern.
+- [~] Tests — `sql/parser_tests.rs` has `Stmt`-shape coverage for all five statement kinds (154 new lines).
+  **Still missing:** store-level round-trip tests for `RoleMemberStore`/`PrivilegeStore` (no
+  `wire/role_members_tests.rs`/`wire/privileges_tests.rs` yet — zero `#[test]`s in either new file), an
+  `executor/rbac_tests.rs` integration suite (per-statement allow/deny, superuser bypass, membership
+  inheritance, the `_tpt_roles`-empty no-op regression, system-catalog write protection, admin-only DDL),
+  and a wire-level end-to-end test asserting a denied query's `ErrorInfo` carries SQLSTATE `42501`.
 
-**Milestone:** a bootstrapped superuser can `CREATE ROLE`/`GRANT` a restricted role via SQL alone (no
-further env-var dependency), that role is denied access to tables/statements it hasn't been granted, and
-the zero-config (`_tpt_roles` empty) quickstart remains behaviorally unchanged.
+**Milestone:** met functionally — a bootstrapped superuser can `CREATE ROLE`/`GRANT` a restricted role via
+SQL alone (no further env-var dependency), that role is denied access to tables/statements it hasn't been
+granted (SQLSTATE `42501`), and the zero-config (`_tpt_roles` empty) quickstart remains behaviorally
+unchanged. Not yet verified by an automated integration/e2e test — see the Tests bullet above.
 
 ---
 
@@ -1380,10 +1386,14 @@ environment doesn't have, not just more engineering time)
 > verifying this were fixed along the way (see the follow-up note above for exactly what).
 
 ### Authorization — buildable here, no external infra needed
-- **Phase 20 — RBAC Authorization Layer:** entirely unbuilt as of this pass — see Phase 20 above for the
-  full checklist (catalog tables, parser/AST, session threading, enforcement, `pg_catalog` surface,
-  tests). Unlike the gaps below, this is pure in-repo engineering with no external dependency; it's
-  listed as remaining, not scope-cut.
+- **Phase 20 — RBAC Authorization Layer:** functionally complete — role catalog (`rolsuper`/`rolcanlogin`
+  + legacy-row migration), role membership with transitive closure, object privileges, `CREATE`/`ALTER`/
+  `DROP ROLE`/`GRANT`/`REVOKE` parsing and execution, per-connection `Actor` enforcement (SQLSTATE
+  `42501` on denial), and a `pg_roles`/`pg_auth_members` `pg_catalog` surface are all wired up — see
+  Phase 20 above. **Remaining:** only the test suite — no store-level round-trip tests for
+  `RoleMemberStore`/`PrivilegeStore`, no `executor/rbac_tests.rs` integration suite, no wire-level e2e
+  test for the `42501` SQLSTATE. Parser shape tests exist; enforcement itself is unverified by automated
+  tests. Pure in-repo engineering with no external dependency.
 
 **Remaining:** 1 engine gap needing infrastructure this environment lacks (gRPC), 3 follow-ups needing
 real external systems (cross-engine benchmarks, Harbor at scale, and the release-publishing decision

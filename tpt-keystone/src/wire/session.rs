@@ -8,7 +8,8 @@ use super::messages::{oid, BackendMessage, ErrorInfo, FieldDescription, Transact
 use super::roles::RoleStore;
 use super::scram;
 use crate::executor::eval::Value;
-use crate::executor::{describe_select, execute_parsed, max_param_index, QueryResult};
+use crate::executor::rbac::{Actor, InsufficientPrivilege};
+use crate::executor::{describe_select, execute_parsed, execute_parsed_as, max_param_index, QueryResult};
 use crate::sql::ast::{CopyStmt, FetchCount, Stmt};
 use crate::storage::database::Database;
 use crate::storage::StorageEngine;
@@ -78,21 +79,23 @@ async fn run(
     let startup = conn.read_startup().await?;
     debug!(%peer, version = startup.protocol_version, "startup received");
 
+    // The role this connection authenticates as (empty string on the
+    // zero-config path). Captured up front so the `Actor` can be built once
+    // regardless of which auth branch runs.
+    let user = startup
+        .params
+        .iter()
+        .find(|(k, _)| k == "user")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+
     // Wire-level auth is opt-in: an empty `_tpt_roles` catalog (the default
     // on a fresh node with no `TPT_AUTH_BOOTSTRAP_USER`/`_PASSWORD` set)
     // preserves today's unconditional `AuthenticationOk`, so the documented
     // zero-config quickstart (`psql -h localhost -p 5432`, no flags) keeps
     // working unchanged. Once at least one role exists, every connecting
     // user must complete a real SCRAM-SHA-256 exchange.
-    if roles.is_empty()? {
-        conn.send(&BackendMessage::AuthenticationOk);
-    } else {
-        let user = startup
-            .params
-            .iter()
-            .find(|(k, _)| k == "user")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
+    if !roles.is_empty()? {
         if let Err(e) = authenticate(conn, &roles, &user).await {
             debug!(%peer, %user, error = %e, "authentication failed");
             conn.send_error(ErrorInfo::fatal(
@@ -103,6 +106,15 @@ async fn run(
             return Ok(());
         }
     }
+
+    // Build the per-connection `Actor` (RBAC identity) once, after auth. On
+    // the zero-config path `_tpt_roles` is empty and the actor is fully
+    // unrestricted — the quickstart is behaviorally unchanged.
+    let actor = if roles.is_empty()? {
+        Actor::unrestricted()
+    } else {
+        Actor::for_role(&db, &user)?
+    };
     for (name, value) in [
         ("server_version", "16.0 (TPT Keystone 0.1.0)"),
         ("server_encoding", "UTF8"),
@@ -120,7 +132,18 @@ async fn run(
     conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
     conn.flush().await?;
 
-    run_query_loop(conn, peer, db).await
+    run_query_loop(conn, peer, db, actor).await
+}
+
+/// Map an executor error to the SQLSTATE reported on the wire. A denied
+/// RBAC check downcasts to `42501` (insufficient_privilege); everything else
+/// keeps the generic `42601`.
+fn sqlstate_for(e: &anyhow::Error) -> &'static str {
+    if e.downcast_ref::<InsufficientPrivilege>().is_some() {
+        "42501"
+    } else {
+        "42601"
+    }
 }
 
 /// Runs the SCRAM-SHA-256 exchange (`AuthenticationSASL` →
@@ -131,6 +154,12 @@ async fn run(
 /// "password authentication failed" error either way — same as real
 /// Postgres, a client can't tell "no such user" from "wrong password".
 async fn authenticate(conn: &mut Conn, roles: &RoleStore, user: &str) -> anyhow::Result<()> {
+    // A role without LOGIN privilege may not authenticate at all.
+    if let Some(attrs) = roles.find_role(user)? {
+        if !attrs.can_login {
+            anyhow::bail!("role \"{user}\" is not permitted to log in");
+        }
+    }
     let cred = roles
         .find(user)?
         .ok_or_else(|| anyhow::anyhow!("no such role \"{user}\""))?;
@@ -192,6 +221,7 @@ async fn run_query_loop(
     conn: &mut Conn,
     peer: std::net::SocketAddr,
     db: Arc<Database>,
+    actor: Actor,
 ) -> anyhow::Result<()> {
     let mut ext = ExtendedState::default();
     let mut notify_rx = db.subscribe_notifications();
@@ -220,7 +250,7 @@ async fn run_query_loop(
             FrontendMessage::Query(sql) => {
                 let sql = sql.trim().to_string();
                 debug!(%peer, %sql, "query received");
-                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening)
+                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening, &actor)
                     .await?;
             }
 
@@ -321,7 +351,7 @@ async fn run_query_loop(
 
             FrontendMessage::Execute { portal, max_rows } => {
                 match ext.portals.get(&portal) {
-                    Some(p) => match execute_parsed(p.stmt.clone(), db.clone(), &p.params) {
+                    Some(p) => match execute_parsed_as(p.stmt.clone(), db.clone(), &p.params, &actor) {
                         Ok(result) => {
                             let total = result.rows.len();
                             let limited = max_rows > 0 && (max_rows as usize) < total;
@@ -341,7 +371,7 @@ async fn run_query_loop(
                         }
                         Err(e) => {
                             error!("execute error: {e}");
-                            conn.send_error(ErrorInfo::new("42601", e.to_string()));
+                            conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
                         }
                     },
                     None => {
@@ -400,6 +430,7 @@ async fn handle_simple_query(
     db: Arc<Database>,
     cursors: &mut HashMap<String, CursorState>,
     listening: &mut HashSet<String>,
+    actor: &Actor,
 ) -> anyhow::Result<()> {
     if sql.is_empty() {
         conn.send(&BackendMessage::EmptyQueryResponse);
@@ -427,7 +458,7 @@ async fn handle_simple_query(
         _ => {}
     }
 
-    match execute_simple(stmt, db, cursors, listening) {
+    match execute_simple(stmt, db, cursors, listening, actor) {
         Ok(result) => {
             conn.send(&BackendMessage::RowDescription(result.fields));
             for row in result.rows {
@@ -437,7 +468,7 @@ async fn handle_simple_query(
         }
         Err(e) => {
             error!("query error: {e}");
-            conn.send_error(ErrorInfo::new("42601", e.to_string()));
+            conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
         }
     }
     conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
@@ -454,6 +485,7 @@ fn execute_simple(
     db: Arc<Database>,
     cursors: &mut HashMap<String, CursorState>,
     listening: &mut HashSet<String>,
+    actor: &Actor,
 ) -> anyhow::Result<QueryResult> {
     match stmt {
         Stmt::Listen(channel) => {
@@ -477,7 +509,7 @@ fn execute_simple(
             })
         }
         Stmt::DeclareCursor(d) => {
-            let result = execute_parsed(Stmt::Select(d.query), db, &[])?;
+            let result = execute_parsed_as(Stmt::Select(d.query), db, &[], actor)?;
             cursors.insert(
                 d.name,
                 CursorState {
@@ -532,7 +564,7 @@ fn execute_simple(
                 tag: "CLOSE CURSOR".into(),
             })
         }
-        other => execute_parsed(other, db, &[]),
+        other => execute_parsed_as(other, db, &[], actor),
     }
 }
 
@@ -732,7 +764,13 @@ mod tests {
         cursors: &mut HashMap<String, CursorState>,
         listening: &mut HashSet<String>,
     ) -> anyhow::Result<QueryResult> {
-        execute_simple(crate::sql::parse(sql).unwrap(), db, cursors, listening)
+        execute_simple(
+            crate::sql::parse(sql).unwrap(),
+            db,
+            cursors,
+            listening,
+            &crate::executor::rbac::Actor::unrestricted(),
+        )
     }
 
     #[test]

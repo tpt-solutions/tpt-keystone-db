@@ -26,6 +26,7 @@ mod pg_dump_tests;
 #[cfg(test)]
 mod phase4_tests;
 mod planner;
+pub mod rbac;
 #[cfg(test)]
 mod plexus_tests;
 #[cfg(test)]
@@ -98,8 +99,28 @@ pub fn execute_parsed(
     db: Arc<Database>,
     params: &[Value],
 ) -> anyhow::Result<QueryResult> {
+    // Trusted/internal callers (in-process server code, catalog maintenance,
+    // the test suite) run unrestricted: authorization is enforced at the wire
+    // layer via `execute_parsed_as`, which supplies the authenticated `Actor`.
+    execute_parsed_as(stmt, db, params, &rbac::Actor::unrestricted())
+}
+
+/// Execute an already-parsed statement on behalf of an authenticated
+/// connection. Runs the RBAC `Actor::check` predicate first; on denial the
+/// returned error downcasts to `rbac::InsufficientPrivilege` so the wire
+/// layer can emit SQLSTATE `42501`.
+#[tracing::instrument(skip_all)]
+pub fn execute_parsed_as(
+    stmt: Stmt,
+    db: Arc<Database>,
+    params: &[Value],
+    actor: &rbac::Actor,
+) -> anyhow::Result<QueryResult> {
     let start = std::time::Instant::now();
-    let result = execute_parsed_inner(stmt, db, params);
+    let result = actor
+        .check(&db, &stmt)
+        .map_err(|e| anyhow::Error::new(e))
+        .and_then(|()| execute_parsed_inner(stmt, db, params));
     crate::metrics::Metrics::global().record_query(start.elapsed(), result.is_err());
     result
 }
@@ -173,13 +194,21 @@ fn execute_parsed_inner(
         Stmt::CopyIn(_) | Stmt::CopyOut(_) => {
             anyhow::bail!("COPY is only supported over the simple query protocol")
         }
-        Stmt::CreateRole(_) | Stmt::AlterRole(_) | Stmt::DropRole(_) | Stmt::Grant(_)
-        | Stmt::Revoke(_) => {
-            anyhow::bail!(
-                "RBAC DDL (CREATE/ALTER/DROP ROLE, GRANT, REVOKE) is parsed but not yet executable; \
-                 enforcement is tracked in TODO.md Phase 20"
-            )
-        }
+        Stmt::CreateRole(c) => rbac::execute_create_role(&db, &c).map(|_| ok_tag("CREATE ROLE")),
+        Stmt::AlterRole(a) => rbac::execute_alter_role(&db, &a).map(|_| ok_tag("ALTER ROLE")),
+        Stmt::DropRole(d) => rbac::execute_drop_role(&db, &d).map(|_| ok_tag("DROP ROLE")),
+        Stmt::Grant(g) => rbac::execute_grant(&db, &g).map(|_| ok_tag("GRANT")),
+        Stmt::Revoke(r) => rbac::execute_revoke(&db, &r).map(|_| ok_tag("REVOKE")),
+    }
+}
+
+/// An empty `QueryResult` tagged with `tag` (used by statements that perform
+/// an action but return no rows — RBAC DDL, etc.).
+fn ok_tag(tag: &str) -> QueryResult {
+    QueryResult {
+        fields: vec![],
+        rows: vec![],
+        tag: tag.to_string(),
     }
 }
 
