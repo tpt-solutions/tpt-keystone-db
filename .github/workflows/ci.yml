@@ -11,6 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -22,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tpt-keystone
@@ -42,6 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.crate }}
@@ -67,6 +70,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tpt-canvas
@@ -107,6 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tpt-keystone
