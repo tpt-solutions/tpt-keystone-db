@@ -15,6 +15,12 @@ pub enum Value {
     Text(String),
     Bool(bool),
     Null,
+    /// A `float8[]` value — a contiguous vector of `f64` (little-endian on the
+    /// wire). Powers in-DB array work such as a UDF receiving a signal window
+    /// for FFT-style processing.
+    FloatArray(Vec<f64>),
+    /// A `bytea` value — an opaque byte string (hex `\x..` on the wire).
+    Bytea(Vec<u8>),
 }
 
 impl Value {
@@ -25,6 +31,8 @@ impl Value {
             Self::Text(_) => "text",
             Self::Bool(_) => "bool",
             Self::Null => "null",
+            Self::FloatArray(_) => "float8[]",
+            Self::Bytea(_) => "bytea",
         }
     }
 
@@ -36,6 +44,11 @@ impl Value {
             Self::Float(f) => Some(format!("{f}").into_bytes()),
             Self::Text(s) => Some(s.as_bytes().to_vec()),
             Self::Bool(b) => Some(if *b { b"t".to_vec() } else { b"f".to_vec() }),
+            Self::FloatArray(a) => Some(
+                format!("{{{}}}", a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+                    .into_bytes(),
+            ),
+            Self::Bytea(b) => Some(format!("\\x{}", hex::encode(b)).into_bytes()),
         }
     }
 
@@ -47,6 +60,9 @@ impl Value {
             Self::Text(_) => oid::TEXT,
             Self::Bool(_) => oid::BOOL,
             Self::Null => oid::TEXT,
+            // `float8[]` array OID (Postgres 1022); `bytea` OID is 17.
+            Self::FloatArray(_) => 1022,
+            Self::Bytea(_) => 17,
         }
     }
 
@@ -67,6 +83,8 @@ impl Value {
             Self::Int(n) => *n != 0,
             Self::Float(f) => *f != 0.0,
             Self::Text(s) => !s.is_empty(),
+            Self::FloatArray(a) => !a.is_empty(),
+            Self::Bytea(b) => !b.is_empty(),
         }
     }
 
@@ -227,6 +245,7 @@ impl RowContext {
                 Literal::Text(s) => Value::Text(s.clone()),
                 Literal::Bool(b) => Value::Bool(*b),
                 Literal::Null => Value::Null,
+                Literal::FloatArray(a) => Value::FloatArray(a.clone()),
             }),
 
             Expr::Ident(name) => self.resolve_column(None, name),
@@ -1737,6 +1756,12 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::Text(s) => serde_json::Value::String(s.clone()),
+        Value::FloatArray(a) => serde_json::Value::Array(
+            a.iter()
+                .map(|x| serde_json::Number::from_f64(*x).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        ),
+        Value::Bytea(b) => serde_json::Value::String(format!("\\x{}", hex::encode(b))),
     }
 }
 
@@ -1865,6 +1890,11 @@ fn val_to_text(v: &Value) -> String {
         Value::Text(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
+        Value::FloatArray(a) => format!(
+            "{{{}}}",
+            a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        ),
+        Value::Bytea(b) => format!("\\x{}", hex::encode(b)),
     }
 }
 

@@ -26,6 +26,10 @@ pub(super) fn default_expr_to_text(e: &Expr) -> anyhow::Result<String> {
         Expr::Literal(Literal::Text(s)) => Ok(format!("'{}'", s.replace('\'', "''"))),
         Expr::Literal(Literal::Bool(b)) => Ok(b.to_string()),
         Expr::Literal(Literal::Null) => Ok("NULL".to_string()),
+        Expr::Literal(Literal::FloatArray(a)) => Ok(format!(
+            "'{{{}}}'",
+            a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        )),
         Expr::UnaryOp { op: UnOp::Neg, expr } => Ok(format!("-{}", default_expr_to_text(expr)?)),
         Expr::Function { name, args, .. } => {
             let arg_texts: Vec<String> = args.iter().map(default_expr_to_text).collect::<anyhow::Result<_>>()?;
@@ -403,8 +407,10 @@ fn udf_column_type(name: &str) -> anyhow::Result<ColumnType> {
         "int8" | "bigint" => Ok(ColumnType::Int8),
         "float8" | "double" | "double precision" => Ok(ColumnType::Float8),
         "bool" | "boolean" => Ok(ColumnType::Bool),
+        "float8[]" | "double precision[]" | "double[]" | "float[]" => Ok(ColumnType::Float8Array),
+        "bytea" | "blob" => Ok(ColumnType::Bytea),
         other => anyhow::bail!(
-            "WASM UDFs only support int8, float8, and bool argument/return types, got \"{other}\""
+            "WASM UDFs only support int8, float8, bool, float8[], and bytea argument/return types, got \"{other}\""
         ),
     }
 }

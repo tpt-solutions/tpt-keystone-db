@@ -37,6 +37,10 @@ pub enum BackendMessage {
     NoData,
     PortalSuspended,
     EmptyQueryResponse,
+    /// Server is ready to receive `CopyData` for a `COPY ... FROM STDIN`.
+    CopyInResponse { columns: usize },
+    /// Server is about to stream `CopyData` for a `COPY ... TO STDOUT`.
+    CopyOutResponse { columns: usize },
     Unknown(u8),
 }
 
@@ -145,6 +149,28 @@ impl Conn {
         self.write_msg(b'X', |_| {});
     }
 
+    /// Drive the `COPY ... FROM STDIN` sub-protocol: one row of text-format
+    /// COPY data (tab-delimited, `\n`-terminated) per call. The server keeps
+    /// reading `CopyData` until it sees `CopyDone`.
+    pub fn write_copy_data(&mut self, data: &[u8]) {
+        self.write_msg(b'd', |b| b.put_slice(data));
+    }
+
+    /// End a `COPY ... FROM STDIN` stream, telling the server to commit the
+    /// buffered rows.
+    pub fn write_copy_done(&mut self) {
+        self.write_msg(b'c', |_| {});
+    }
+
+    /// Abort a `COPY ... FROM STDIN` stream, asking the server to discard the
+    /// buffered rows and report `msg` as the failure reason.
+    pub fn write_copy_fail(&mut self, msg: &str) {
+        self.write_msg(b'f', |b| {
+            b.put_slice(msg.as_bytes());
+            b.put_u8(0);
+        });
+    }
+
     fn write_msg(&mut self, tag: u8, body: impl FnOnce(&mut BytesMut)) {
         let mut b = BytesMut::new();
         body(&mut b);
@@ -235,6 +261,12 @@ impl Conn {
             b'n' => BackendMessage::NoData,
             b's' => BackendMessage::PortalSuspended,
             b'I' => BackendMessage::EmptyQueryResponse,
+            b'G' => BackendMessage::CopyInResponse {
+                columns: read_copy_response(&mut data),
+            },
+            b'H' => BackendMessage::CopyOutResponse {
+                columns: read_copy_response(&mut data),
+            },
             other => BackendMessage::Unknown(other),
         };
         Ok(msg)
@@ -276,4 +308,25 @@ fn parse_error_fields(data: &mut BytesMut) -> String {
         }
     }
     message.unwrap_or_else(|| "unknown server error".to_string())
+}
+
+/// Decode a `CopyInResponse`/`CopyOutResponse` body: an overall format byte
+/// (0 = text), a column count, and one format code per column. We only care
+/// about the column count here (everything is text format).
+fn read_copy_response(data: &mut BytesMut) -> usize {
+    if !data.has_remaining() {
+        return 0;
+    }
+    let _overall = data.get_u8();
+    let columns = if data.remaining() >= 2 {
+        data.get_i16() as usize
+    } else {
+        0
+    };
+    for _ in 0..columns {
+        if data.remaining() >= 2 {
+            let _fmt = data.get_i16();
+        }
+    }
+    columns
 }

@@ -502,6 +502,7 @@ fn type_name(ty: &ColumnType) -> &'static str {
         ColumnType::Geography => "geography",
         ColumnType::Vector => "vector",
         ColumnType::Raster => "raster",
+        ColumnType::Float8Array => "double precision[]",
     }
 }
 

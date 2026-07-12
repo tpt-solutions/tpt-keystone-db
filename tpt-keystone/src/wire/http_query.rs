@@ -140,6 +140,7 @@ fn column_type_name(ty: &crate::storage::ColumnType) -> &'static str {
         Geography => "geography",
         Vector => "vector",
         Raster => "raster",
+        Float8Array => "double precision[]",
     }
 }
 

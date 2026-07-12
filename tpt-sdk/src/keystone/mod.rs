@@ -135,6 +135,47 @@ impl From<bool> for Value {
     }
 }
 
+/// Encode one `Value` as a single COPY text-format cell (mirroring
+/// `tpt-keystone`'s `executor::copy::encode_copy_line`): `\N` for NULL,
+/// `\t`/`\n`/`\r`/`\\` backslash-escaped text, otherwise the same text
+/// rendering used on the wire.
+fn encode_copy_cell(out: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => out.extend_from_slice(b"\\N"),
+        Value::Bool(b) => out.extend_from_slice(if *b { b"t" } else { b"f" }),
+        Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
+        Value::Float(f) => out.extend_from_slice(f.to_string().as_bytes()),
+        Value::Text(s) => {
+            for c in s.chars() {
+                match c {
+                    '\t' => out.extend_from_slice(b"\\t"),
+                    '\n' => out.extend_from_slice(b"\\n"),
+                    '\r' => out.extend_from_slice(b"\\r"),
+                    '\\' => out.extend_from_slice(b"\\\\"),
+                    _ => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode a row as a COPY text-format line: tab-delimited cells,
+/// `\n`-terminated — exactly what `COPY table FROM STDIN` expects.
+pub fn encode_copy_line(values: &[Value]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\t');
+        }
+        encode_copy_cell(&mut out, v);
+    }
+    out.push(b'\n');
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
@@ -168,6 +209,7 @@ impl KeystoneClient {
     }
 
     /// Run `sql` over the simple query protocol. Supports multi-statement
+
     /// SQL text but only the last statement's rows are returned, matching
     /// the simple query protocol's semantics (each statement gets its own
     /// `CommandComplete`, only the final `ReadyForQuery` ends the exchange).
@@ -253,6 +295,90 @@ impl KeystoneClient {
         Ok(QueryResult { columns, rows, command_tag })
     }
 
+    /// Bulk-load `rows` into `table` via the server's `COPY table FROM STDIN`
+    /// path — one sub-protocol exchange for the whole batch instead of one
+    /// `query`/`query_params` round trip per row. This is the high-throughput
+    /// ingest path for time-series / high-frequency pipelines (e.g. a
+    /// `tpt-fluxstream`-style consumer) where per-row round trips would
+    /// otherwise dominate.
+    ///
+    /// `columns` lists the target columns in the order the `rows`' cells line
+    /// up with; pass an empty slice to use every column in schema order. Each
+    /// inner `Vec<Value>` must have one cell per named column.
+    ///
+    /// Returns the number of rows the server actually committed.
+    pub async fn copy_in(
+        &mut self,
+        table: &str,
+        columns: &[&str],
+        rows: &[Vec<Value>],
+    ) -> Result<u64, KeystoneError> {
+        let col_list = if columns.is_empty() {
+            String::new()
+        } else {
+            let list = columns
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" ({list})")
+        };
+        let sql = format!("COPY {table}{col_list} FROM STDIN");
+        self.conn.write_query(&sql);
+        self.conn.flush().await?;
+
+        // The server either accepts the COPY (CopyInResponse) or rejects it
+        // up front with an ErrorResponse + ReadyForQuery.
+        let expected_cols = columns.len();
+        loop {
+            match self.conn.read_message().await? {
+                BackendMessage::CopyInResponse { columns: n } => {
+                    if expected_cols != 0 && n != expected_cols {
+                        return Err(KeystoneError::Server(format!(
+                            "COPY expected {expected_cols} columns but server reported {n}"
+                        )));
+                    }
+                    break;
+                }
+                BackendMessage::ErrorResponse(msg) => return Err(KeystoneError::Server(msg)),
+                BackendMessage::NoticeResponse(_) => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Err(KeystoneError::Server(
+                        "COPY was not accepted by the server".into(),
+                    ))
+                }
+                _ => {}
+            }
+        }
+
+        // Stream every row as a text-format COPY line, then end the copy.
+        for row in rows {
+            let line = encode_copy_line(row);
+            self.conn.write_copy_data(&line);
+        }
+        self.conn.write_copy_done();
+        self.conn.flush().await?;
+
+        // The server replies with CommandComplete ("COPY n") or an
+        // ErrorResponse if any buffered row failed, then ReadyForQuery.
+        let mut row_count = 0u64;
+        loop {
+            match self.conn.read_message().await? {
+                BackendMessage::CommandComplete(tag) => {
+                    if let Some(n) = tag.strip_prefix("COPY ") {
+                        if let Ok(c) = n.trim().parse::<u64>() {
+                            row_count = c;
+                        }
+                    }
+                }
+                BackendMessage::ErrorResponse(msg) => return Err(KeystoneError::Server(msg)),
+                BackendMessage::ReadyForQuery(_) => break,
+                _ => {}
+            }
+        }
+        Ok(row_count)
+    }
+
     pub async fn close(mut self) -> Result<(), KeystoneError> {
         self.conn.write_terminate();
         self.conn.flush().await?;
@@ -319,5 +445,32 @@ mod tests {
     #[test]
     fn keystone_error_formats_human_readable() {
         assert_eq!(KeystoneError::Server("boom".into()).to_string(), "server error: boom");
+    }
+
+    #[test]
+    fn encode_copy_line_escapes_and_round_trips() {
+        // Mirrors `tpt-keystone`'s COPY text format: tab-delimited,
+        // `\N` for NULL, `\t`/`\n`/`\r`/`\\` escaped.
+        let row = vec![
+            Value::Int(1),
+            Value::Text("Ada".into()),
+            Value::Null,
+            Value::Text("tab\there\nand\\back".into()),
+            Value::Float(2.5),
+            Value::Bool(true),
+        ];
+        let line = String::from_utf8(encode_copy_line(&row)).unwrap();
+        assert_eq!(
+            line,
+            "1\tAda\t\\N\ttab\\there\\nand\\\\back\t2.5\tt\n"
+        );
+    }
+
+    #[test]
+    fn encode_copy_line_single_cell() {
+        assert_eq!(
+            String::from_utf8(encode_copy_line(&[Value::Text("x".into())])).unwrap(),
+            "x\n"
+        );
     }
 }

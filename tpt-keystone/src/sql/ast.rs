@@ -557,6 +557,9 @@ pub enum Literal {
     Text(String),
     Bool(bool),
     Null,
+    /// A `float8[]` literal, e.g. `[1.0, 2.0, 3.0]` — usable as a WASM UDF
+    /// argument for in-DB array processing.
+    FloatArray(Vec<f64>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

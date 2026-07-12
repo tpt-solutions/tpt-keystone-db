@@ -28,4 +28,13 @@ impl Client {
     pub fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<QueryResult, KeystoneError> {
         self.rt.block_on(self.inner.query_params(sql, params))
     }
+
+    pub fn copy_in(
+        &mut self,
+        table: &str,
+        columns: &[&str],
+        rows: &[Vec<Value>],
+    ) -> Result<u64, KeystoneError> {
+        self.rt.block_on(self.inner.copy_in(table, columns, rows))
+    }
 }

@@ -132,6 +132,11 @@ pub enum ColumnType {
     /// as its own variant purely for DDL/catalog reporting, same reasoning
     /// as `Geometry`/`Geography`.
     Raster,
+    /// `float8[]` — a vector of `f64`. Not a stored-column type (DDL table
+    /// columns stay scalar); exists solely so WASM UDF signatures can declare
+    /// array arguments/returns that are marshaled through the UDF's linear
+    /// memory via a `(ptr, len)` pointer ABI (see `executor::udf`).
+    Float8Array,
 }
 
 impl ColumnType {
@@ -160,6 +165,9 @@ impl ColumnType {
             Self::Vector => oid::TEXT,
             // Same reasoning as Geometry: no real Postgres raster OID here.
             Self::Raster => oid::TEXT,
+            // `float8[]` array OID (Postgres 1022). Marshaled as a `(ptr, len)`
+            // pair in the WASM UDF ABI, not as a scalar cell.
+            Self::Float8Array => 1022,
         }
     }
 

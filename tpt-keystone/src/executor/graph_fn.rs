@@ -780,6 +780,12 @@ fn value_to_json(v: &Value, col_type: &ColumnType) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::Text(s) => serde_json::Value::String(s.clone()),
+        Value::FloatArray(a) => serde_json::Value::Array(
+            a.iter()
+                .map(|x| serde_json::Number::from_f64(*x).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        ),
+        Value::Bytea(b) => serde_json::Value::String(format!("\\x{}", hex::encode(b))),
     }
 }
 

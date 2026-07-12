@@ -326,7 +326,7 @@ impl Parser {
         if self.peek() != &Token::RParen {
             loop {
                 let arg_name = self.parse_ident_string()?;
-                let arg_type = self.parse_ident_string()?;
+                let arg_type = self.parse_type_name()?;
                 args.push((arg_name, arg_type));
                 if !self.eat(&Token::Comma) {
                     break;
@@ -335,7 +335,7 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         self.expect(&Token::Returns)?;
-        let return_type = self.parse_ident_string()?;
+        let return_type = self.parse_type_name()?;
         self.expect(&Token::Language)?;
         let language = self.parse_ident_string()?;
         self.expect(&Token::As)?;
@@ -1371,6 +1371,45 @@ impl Parser {
         }
     }
 
+    /// Parse a SQL type name for a `CREATE FUNCTION` signature, allowing a
+    /// trailing `[]` to denote an array type (e.g. `float8[]`).
+    fn parse_type_name(&mut self) -> anyhow::Result<String> {
+        let mut name = self.parse_ident_string()?;
+        if self.peek() == &Token::LBracket && self.peek2() == &Token::RBracket {
+            self.advance();
+            self.advance();
+            name.push_str("[]");
+        }
+        Ok(name)
+    }
+
+    /// Parse a `[f0, f1, ...]` float-array literal into `Literal::FloatArray`.
+    fn parse_float_array_literal(&mut self) -> anyhow::Result<Expr> {
+        self.expect(&Token::LBracket)?;
+        let mut items = Vec::new();
+        if self.peek() != &Token::RBracket {
+            loop {
+                match self.peek().clone() {
+                    Token::FloatLiteral(f) => {
+                        self.advance();
+                        items.push(f);
+                    }
+                    Token::IntLiteral(n) => {
+                        self.advance();
+                        items.push(n as f64);
+                    }
+                    other => anyhow::bail!("expected numeric element in float array literal, got {:?}", other),
+                }
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(Expr::Literal(Literal::FloatArray(items)))
+    }
+
+
     /// `[:REL]` or `[]` (untyped edge) — the relationship-type bracket in a
     /// `MATCH` pattern hop, after the leading `-`/`<-` has already been
     /// consumed by the caller.
@@ -1749,6 +1788,7 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Literal(Literal::Null))
             }
+            Token::LBracket => self.parse_float_array_literal(),
             Token::Dollar(n) => {
                 self.advance();
                 Ok(Expr::Param(n))
