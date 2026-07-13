@@ -15,6 +15,11 @@ Thumbs.db
 
 # Keystone runtime data (local object-store emulation, NVMe cache, WAL/indexes)
 **/tpt-data/
+**/tpt-data-*/
+
+# Python
+__pycache__/
+*.pyc
 
 # Node / JS packages
 node_modules/

@@ -19,18 +19,21 @@ Keystone (`tpt-keystone/`) is the only engine every other piece in this repo is 
 cloud-native, PostgreSQL-wire-compatible database, built from scratch with no `pgwire` or
 `sqlparser-rs` dependency (the wire protocol codec and the SQL lexer/parser are hand-written). It now
 also hosts every other engine's SQL-extension surface (see below) as additional modules in the same
-binary, plus an MCP server, an HTTP/JSON bridge for browsers, and a WebSocket streaming bridge.
+binary, plus an MCP server, an HTTP/JSON bridge for browsers, and WebSocket + gRPC streaming bridges.
 
 Implemented (Phases 0–4, 12): full `SELECT`/`JOIN`/subqueries/CTEs/window functions/DDL, a
 write-ahead-logged LSM storage engine (MemTable → SSTables with bloom filters, levelled compaction),
 MVCC with a transaction manager and local B-Tree indexes, disaggregated cloud-native storage
 (`ObjectStore` trait over S3 or a local-fs emulation, NVMe cache-aside, shared manifest, CAS-based write
-lease with fencing), WASM UDFs (sandboxed via `wasmtime`), `pg_catalog`/`information_schema`, COPY/
-cursors/LISTEN-NOTIFY, a connection admission limiter + statement cache, `pg_dump`-plain-compatible DDL
-(sequences, SERIAL, UNIQUE/FOREIGN KEY), a Kubernetes operator, Prometheus metrics, and OpenTelemetry
-tracing, plus opt-in wire-level SCRAM-SHA-256 auth and TLS (Phase 18 — no-op until `_tpt_roles` is
-populated or `TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set, so the zero-config quickstart below is
-unchanged). See `TODO.md` Phase 4/12/18 for exact scope cuts (no `ALTER TABLE ADD/DROP COLUMN`, etc.).
+lease with fencing), WASM UDFs (sandboxed via `wasmtime`, scalar `int8`/`float8`/`bool` plus
+`float8[]`/`bytea` args and returns via a `(ptr, len)` linear-memory ABI), `pg_catalog`/
+`information_schema`, COPY/cursors/LISTEN-NOTIFY, binary-format result/parameter encoding on the
+extended query protocol (per-column, opt-in via `result_formats`; text remains the default), a
+connection admission limiter + statement cache, `pg_dump`-plain-compatible DDL (sequences, SERIAL,
+UNIQUE/FOREIGN KEY), a Kubernetes operator, Prometheus metrics, and OpenTelemetry tracing, plus opt-in
+wire-level SCRAM-SHA-256 auth and TLS (Phase 18 — no-op until `_tpt_roles` is populated or
+`TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set, so the zero-config quickstart below is unchanged). See
+`TODO.md` Phase 4/12/18 for exact scope cuts (no `ALTER TABLE ADD/DROP COLUMN`, etc.).
 
 ## The other six engines (SQL extensions over Keystone, same binary)
 
@@ -54,7 +57,8 @@ Keystone's existing row storage — a `USING SPATIAL`/`USING VECTOR`/`USING GRAP
 - POSIX regex match operators (`~`/`!~`/`~*`/`!~*`) are also available on any text column.
 - **Flux** (event streaming) — `storage/flux.rs`: append-only partitioned logs, consumer groups,
   automatic per-table CDC, tumbling/sliding/session windowing, a hand-rolled WebSocket push bridge
-  (`wire/websocket.rs`).
+  (`wire/websocket.rs`) and a hand-rolled gRPC streaming endpoint (`wire/grpc/` — own HTTP/2 h2c + HPACK
+  + protobuf stack, no `h2`/`tonic`).
 
 Plus two agent-facing layers built the same way — **Synapse** (`synapse/`: actor runtime, tiered agent
 memory over Chronos/Prism, tool registry, task delegation over Flux) and **Mirror** (`mirror/`: agent
@@ -69,8 +73,14 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
 - **`packages/sdk-web`**, **`packages/sdk-server`**, **`packages/sdk-edge`** — TypeScript SDKs for
   browsers, Node/Deno/Bun, and edge/Workers runtimes, each with a hand-written Postgres-wire or
   HTTP/JSON client (no `pg`/`postgres` deps).
-- **`tpt-sdk/`** — the Rust native SDK (sync + async clients, FFI/C ABI, zero-copy row views).
+- **`tpt-sdk/`** — the Rust native SDK (sync + async clients, FFI/C ABI, zero-copy row views, a
+  `copy_in` bulk-ingest path driving `COPY table FROM STDIN` instead of one round trip per row).
 - **`sdk-go/`**, **`sdk-python/`** — Go and Python clients, both hand-written wire-protocol codecs.
+- **`packages/sdk-react-native`**, **`tpt_sdk` (Flutter)**, **`tpt-sdk-android` (Kotlin)** — mobile SDKs:
+  an offline-first Canvas HTTP/JSON client plus a Flux WebSocket subscriber, each with a pluggable
+  cache-with-TTL storage adapter. Not a native Postgres-wire bridge — Canvas is the bridge, by design.
+  React Native and Flutter are test-verified in this repo (`node --test`, `flutter test`); the Kotlin
+  SDK is unverified here (no `gradle`/`kotlinc` on this machine). Swift/iOS remains unbuilt (no Xcode).
 - **`tpt-cli/`** — the `tpt` binary: REPL, `query`/`export`/`import`/`schema`/`stream`/`migrate`
   subcommands.
 - **`tpt-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
@@ -96,7 +106,8 @@ cargo test                     # unit tests + the Phase 3 multi-node cloud-stora
 Once running, connect with any Postgres client, e.g. `psql -h localhost -p 55432`, or use the `tpt` CLI
 (`cd tpt-cli && cargo run -- query "SELECT 1"`). Other services on the same node: MCP on `:5433`
 (`TPT_MCP_ADDR`), the HTTP/JSON bridge for browsers on `:5435` (`TPT_HTTP_ADDR`), the Flux WebSocket
-bridge on `:5434` (`TPT_FLUX_WS_ADDR`), and Prometheus metrics on `:9187` (`TPT_METRICS_ADDR`).
+bridge on `:5434` (`TPT_FLUX_WS_ADDR`), the Flux gRPC streaming endpoint on `:5436`
+(`TPT_FLUX_GRPC_ADDR`), and Prometheus metrics on `:9187` (`TPT_METRICS_ADDR`).
 
 Compute nodes are configured entirely through environment variables (storage backend, node role, cache
 sizing, lease TTL, etc.) — see `tpt-keystone/src/storage/config.rs` for the full list, or
@@ -119,6 +130,7 @@ This starts a single-node writer and maps the following host ports:
 | 5433 | MCP server (JSON-RPC 2.0 for AI agents) |
 | 5434 | Flux WebSocket streaming bridge |
 | 5435 | Canvas HTTP/JSON query bridge |
+| 5436 | Flux gRPC streaming endpoint |
 | 9187 | Prometheus metrics |
 
 > Note: the engine defaults its Postgres-wire listener to `55432`; the
@@ -130,11 +142,12 @@ This starts a single-node writer and maps the following host ports:
 
 - `tpt-keystone/` — the core engine crate: relational storage/SQL/wire protocol, plus every other
   engine's SQL-extension modules (`geo/`, `vector/`, `graph/`, `synapse/`, `mirror/`), the MCP server,
-  and the HTTP/WebSocket bridges
+  and the HTTP/WebSocket/gRPC bridges
 - `tpt-canvas/` — the WASM frontend framework
 - `tpt-harbor/` — the migration platform crate
 - `tpt-cli/`, `tpt-sdk/`, `tpt-operator/` — the CLI, Rust SDK, and Kubernetes operator crates
-- `sdk-go/`, `sdk-python/`, `packages/` — the Go, Python, and TypeScript (web/server/edge) SDKs
+- `sdk-go/`, `sdk-python/`, `packages/` — the Go, Python, and TypeScript (web/server/edge/react-native) SDKs
+- `tpt_sdk/` (Flutter), `tpt-sdk-android/` (Kotlin) — mobile SDKs
 - `docs/formats/` — versioned, language-independent on-disk format specs (SSTable, WAL, manifest/lease,
   and each engine's index format) for reimplementing a reader outside this codebase
 - `TODO.md` — the authoritative, phase-by-phase build roadmap and status for the whole platform
@@ -149,7 +162,9 @@ critically, the per-item honesty notes on what's verified vs. stubbed vs. explic
 open gaps across the whole platform: wire-level auth/TLS is opt-in, not mandatory, and off by default;
 no distributed (multi-node) secondary indexes for any of the six extension engines (all
 local/single-node); no benchmark harness (every throughput/latency figure in the specs is unverified);
-and SDK-mobile targets remain stubs (Harbor's source connectors are no longer stubs — see above).
+and the SDK-mobile targets are scaffolded but partially unverified — React Native and Flutter are
+test-verified in this repo, Kotlin/Android is unverified (no `gradle`/`kotlinc` here), and Swift/iOS is
+still blocked on platform availability (Harbor's source connectors are no longer stubs — see above).
 
 ## License
 

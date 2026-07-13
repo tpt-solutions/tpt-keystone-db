@@ -13,12 +13,16 @@ checking `TODO.md` first.
   SQL-extension modules *inside the same binary* rather than separate storage engines — Meridian/geo
   (`src/geo/`), Prism/vector (`src/vector/`), Chronos/time-series (`src/storage/ts_index.rs`,
   `compress.rs`), Plexus/graph (`src/graph/`), Canopy/document (JSON operators + indexes, no separate
-  module), Flux/streaming (`src/storage/flux.rs`, `src/wire/websocket.rs`) — plus two agent-facing
+  module), Flux/streaming (`src/storage/flux.rs`, `src/wire/websocket.rs`, `src/wire/grpc/`) — plus two agent-facing
   layers, Synapse (`src/synapse/`) and Mirror (`src/mirror/`), and an MCP server (`src/mcp/`).
 - **`tpt-canvas/`** (WASM frontend), **`tpt-harbor/`** (migration platform), **`tpt-cli/`**, **`tpt-sdk/`**
-  (Rust SDK), **`tpt-operator/`** (Kubernetes operator), **`sdk-go/`**, **`sdk-python/`**, **`packages/`**
-  (`sdk-web`/`sdk-server`/`sdk-edge` TypeScript SDKs) are separate crates/packages, each building
-  independently (no root Cargo workspace).
+  (Rust SDK, incl. a `copy_in` bulk-ingest path over `COPY ... FROM STDIN`), **`tpt-operator/`**
+  (Kubernetes operator), **`sdk-go/`**, **`sdk-python/`**, **`packages/`** (`sdk-web`/`sdk-server`/
+  `sdk-edge`/`sdk-react-native` TypeScript SDKs), **`tpt_sdk/`** (Flutter/Dart), **`tpt-sdk-android/`**
+  (Kotlin) are separate crates/packages, each building independently (no root Cargo workspace). The three
+  mobile SDKs are an offline-first Canvas HTTP/JSON client + Flux WebSocket subscriber, not a native
+  Postgres-wire bridge; React Native and Flutter are test-verified in this repo, Kotlin/Android is not
+  (no `gradle`/`kotlinc` here), and Swift/iOS is unbuilt (no Xcode).
 
 Every "implemented" item has real, scoped caveats — wire-level SCRAM-SHA-256 auth and TLS exist but are
 opt-in (empty `_tpt_roles`/no `TPT_TLS_CERT_PATH`+`TPT_TLS_KEY_PATH` keeps the old no-auth/no-TLS
@@ -56,8 +60,10 @@ psql -h localhost -p 55432     # connect once running (no auth by default; SCRAM
 
 Other listeners `cargo run` starts on the same node: MCP (`TPT_MCP_ADDR`, default `:5433`), the HTTP/JSON
 bridge for browsers/edge SDKs (`TPT_HTTP_ADDR`, default `:5435`, `src/wire/http_query.rs`), the Flux
-WebSocket push bridge (`TPT_FLUX_WS_ADDR`, default `:5434`, `src/wire/websocket.rs`), and Prometheus
-metrics (`TPT_METRICS_ADDR`, default `:9187`, `src/metrics.rs`).
+WebSocket push bridge (`TPT_FLUX_WS_ADDR`, default `:5434`, `src/wire/websocket.rs`), the Flux gRPC
+streaming endpoint (`TPT_FLUX_GRPC_ADDR`, default `:5436`, `src/wire/grpc/` — hand-rolled HTTP/2 h2c +
+HPACK + protobuf + gRPC framing, no `h2`/`tonic` crate, same from-scratch-wire-protocol rule as
+everything else), and Prometheus metrics (`TPT_METRICS_ADDR`, default `:9187`, `src/metrics.rs`).
 
 Other crates build/test the same way (`cd <dir> && cargo build`/`cargo test`); `tpt-canvas` additionally
 targets `wasm32-unknown-unknown` (`cargo build --target wasm32-unknown-unknown`) and has no meaningful
@@ -97,11 +103,15 @@ manifest-refresh loop if this node is a reader → accept TCP connections and ha
 Four top-level modules, each a thin layer over the one below:
 
 - **`src/wire/`** — Postgres wire protocol v3, hand-written. `codec.rs` frames raw bytes into
-  `FrontendMessage`/`BackendMessage`; `messages.rs` defines the message types and type OIDs;
-  `session.rs` drives one client connection through startup handshake → simple query loop and the
-  extended query protocol (Parse/Bind/Describe/Execute/Sync/Close, tracked per-connection via
-  `ExtendedState`: prepared statements, bound portals, and `DECLARE CURSOR` state — cursors and
-  LISTEN/NOTIFY only work over the simple query protocol, not extended).
+  `FrontendMessage`/`BackendMessage`; `messages.rs` defines the message types, type OIDs, and the
+  binary-format cell codec (`text_cell_to_binary`/`decode_param`, keyed on OID: int2/int4/int8,
+  float4/float8, bool, text, bytea — everything else stays text); `session.rs` drives one client
+  connection through startup handshake → simple query loop and the extended query protocol
+  (Parse/Bind/Describe/Execute/Sync/Close, tracked per-connection via `ExtendedState`: prepared
+  statements, bound portals, and `DECLARE CURSOR` state — cursors and LISTEN/NOTIFY only work over the
+  simple query protocol, not extended). `Bind`'s `result_formats` selects binary vs. text per result
+  column (opt-in, text remains the default); binary applies to result columns and `Bind` parameters only,
+  not `Parse` args or the simple-query path.
 - **`src/sql/`** — hand-written lexer → recursive-descent parser → `ast.rs` node types. `sql::parse()`
   is the single entry point, producing a `Stmt`.
 - **`src/executor/`** — turns a parsed `Stmt` into a `QueryResult` (`mod.rs`), evaluating expressions
