@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+// Flux event-streaming service over gRPC (cleartext h2c).
+//
+// This is the authoritative wire contract for the Flux gRPC endpoint
+// implemented from scratch in `tpt-keystone/src/wire/grpc/`. It is kept here so
+// other languages can independently implement a client (the Rust side has no
+// `prost`/codegen dependency — see that module's docs).
+service Flux {
+  // Server-streaming subscribe: opens a stream and pushes each record published
+  // to `topic` from the moment of subscription onward.
+  rpc Subscribe(SubscribeRequest) returns (stream Record);
+  // Unary publish: posts one record.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  // Unary poll: fetches a consumer group's unread tail.
+  rpc Poll(PollRequest) returns (PollResponse);
+  // Unary create-topic: provisions a topic (1 partition, no retention) so
+  // Publish/Subscribe have something to act on. Idempotent: an existing topic
+  // is left untouched.
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse);
+}
+
+message CreateTopicRequest {
+  string name = 1;
+}
+
+message CreateTopicResponse {}
+
+message SubscribeRequest {
+  string topic = 1;
+}
+
+message Record {
+  uint64 offset = 1;
+  bytes key = 2;
+  bytes value = 3;
+  int64 timestamp_ms = 4;
+  string topic = 5;
+}
+
+message PublishRequest {
+  string topic = 1;
+  bytes key = 2;
+  bytes value = 3;
+  bool has_partition = 4;
+  uint32 partition = 5;
+}
+
+message PublishResponse {
+  uint32 partition = 1;
+  uint64 offset = 2;
+}
+
+message PollRequest {
+  string topic = 1;
+  uint32 partition = 2;
+  string group = 3;
+  uint32 max = 4;
+}
+
+message PollResponse {
+  repeated Record records = 1;
+}

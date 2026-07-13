@@ -20,3 +20,4 @@ pub mod scram;
 pub mod session;
 pub mod tls;
 pub mod websocket;
+pub mod grpc;

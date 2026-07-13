@@ -185,6 +185,31 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Flux (Phase 11) gRPC streaming endpoint — the high-throughput consumer
+    // protocol counterpart to the Flux WebSocket bridge above. Own port, own
+    // accept loop, same "own TCP listener" shape as MCP/Flux-WS/Canvas HTTP.
+    // Speaks cleartext HTTP/2 (h2c, prior knowledge) with a hand-rolled frame
+    // + HPACK + protobuf + gRPC-framing stack (`wire::grpc`) — no `h2`/`tonic`
+    // crate, consistent with this repo's from-scratch wire-protocol rule.
+    let flux_grpc_addr =
+        std::env::var("TPT_FLUX_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:5436".to_string());
+    let flux_grpc_listener = TcpListener::bind(&flux_grpc_addr).await?;
+    info!("TPT Keystone Flux gRPC endpoint listening on {flux_grpc_addr}");
+    let flux_grpc_db = db.clone();
+    tokio::spawn(async move {
+        loop {
+            match flux_grpc_listener.accept().await {
+                Ok((stream, peer)) => {
+                    let db = flux_grpc_db.clone();
+                    tokio::spawn(async move {
+                        wire::grpc::handle(stream, peer, db).await;
+                    });
+                }
+                Err(e) => error!(error = %e, "Flux gRPC listener accept failed"),
+            }
+        }
+    });
+
     // Canvas (Phase 13) HTTP/JSON query endpoint, alongside the other
     // auxiliary listeners — browsers can't speak the Postgres wire protocol
     // directly, so this is the bridge `tpt-canvas`'s `useKeystoneQuery` hits.
