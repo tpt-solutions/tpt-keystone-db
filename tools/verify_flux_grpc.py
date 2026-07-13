@@ -122,15 +122,18 @@ def main():
         assert resp.offset == 0, "expected first publish at offset 0"
 
         # 2) Subscribe (server-streaming) and observe the live publish.
-        # grpcio's generic `stream_stream` request-iterator path is finicky; we
-        # send the single SubscribeRequest via the unary entrypoint and iterate
-        # the returned response generator (server-streaming output).
+        # grpcio's generic `stream_stream(method, req_ser, resp_deser)` returns a
+        # callable taking an *iterable of request messages* (client-streaming
+        # shape) and yielding response messages. For server-streaming we pass a
+        # one-element request iterable; the iterator then yields each streamed
+        # Record as it arrives.
         sub_req = pb.SubscribeRequest(topic="greetings")
-        stream = channel.unary_unary(
+        stream_call = channel.stream_stream(
             f"/{SERVICE}/Subscribe",
             request_serializer=serialize,
             response_deserializer=deserialize_record,
-        )(sub_req, timeout=30)
+        )
+        stream = stream_call([sub_req], timeout=30)
         # Give the subscription time to register server-side before publishing
         # the record we expect to be streamed back (a too-short delay lets the
         # publish race ahead of the subscribe registration).
