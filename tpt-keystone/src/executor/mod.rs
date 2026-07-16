@@ -25,6 +25,8 @@ mod ogc_conformance_tests;
 mod pg_dump_tests;
 #[cfg(test)]
 mod phase4_tests;
+#[cfg(test)]
+mod ddl_tests;
 mod planner;
 pub mod rbac;
 #[cfg(test)]

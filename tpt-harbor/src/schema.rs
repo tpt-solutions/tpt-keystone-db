@@ -212,6 +212,32 @@ pub fn from_oracle_type(oracle_type: &str) -> String {
     }
 }
 
+/// Map an ODBC `SQLColumns` `DATA_TYPE` value (a standard numeric SQL type
+/// code, not a vendor type-name string — see
+/// <https://learn.microsoft.com/sql/odbc/reference/appendixes/sql-data-types>)
+/// to Keystone. Unlike this module's other `from_<vendor>_type` functions,
+/// ODBC's catalog reports type as this fixed, cross-vendor numeric code
+/// rather than a driver-specific name string, since ODBC is generic over
+/// whichever database the driver targets.
+pub fn from_odbc_sql_type(sql_type: i16) -> String {
+    match sql_type {
+        1 | 12 | -1 | -8 | -9 | -10 => "TEXT".to_string(), // CHAR/VARCHAR/LONGVARCHAR(+wide variants)
+        2 | 3 => "NUMERIC".to_string(),                    // NUMERIC/DECIMAL
+        4 => "INTEGER".to_string(),
+        5 | -6 => "SMALLINT".to_string(), // SMALLINT/TINYINT
+        -5 => "BIGINT".to_string(),       // BIGINT
+        7 => "REAL".to_string(),
+        6 | 8 => "DOUBLE PRECISION".to_string(), // FLOAT/DOUBLE
+        -7 => "BOOLEAN".to_string(),             // BIT
+        -2 | -3 | -4 => "BYTEA".to_string(),      // BINARY/VARBINARY/LONGVARBINARY
+        91 => "DATE".to_string(),
+        92 => "TIME".to_string(),
+        9 | 93 => "TIMESTAMP".to_string(), // DATETIME/TIMESTAMP
+        -11 => "UUID".to_string(),         // GUID
+        _ => "TEXT".to_string(),
+    }
+}
+
 /// Map a Postgres `pg_type.typname` (as returned by
 /// `format_type()`/`pg_catalog.pg_type` lookups during discovery) to the
 /// closest Keystone SQL column type. Falls back to `TEXT` for anything
@@ -267,6 +293,17 @@ mod tests {
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS \"users\""));
         assert!(ddl.contains("\"id\" INTEGER NOT NULL"));
         assert!(ddl.contains("PRIMARY KEY (\"id\")"));
+    }
+
+    #[test]
+    fn maps_common_odbc_sql_types() {
+        assert_eq!(from_odbc_sql_type(4), "INTEGER");
+        assert_eq!(from_odbc_sql_type(12), "TEXT");
+        assert_eq!(from_odbc_sql_type(-5), "BIGINT");
+        assert_eq!(from_odbc_sql_type(93), "TIMESTAMP");
+        assert_eq!(from_odbc_sql_type(-7), "BOOLEAN");
+        assert_eq!(from_odbc_sql_type(-3), "BYTEA");
+        assert_eq!(from_odbc_sql_type(12345), "TEXT");
     }
 
     #[test]

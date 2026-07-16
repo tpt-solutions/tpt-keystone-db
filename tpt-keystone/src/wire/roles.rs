@@ -145,6 +145,36 @@ impl RoleStore {
         }))
     }
 
+    /// Verify a plaintext password for `rolname` against the stored SCRAM
+    /// credential (constant-comparison of the derived `StoredKey`). Returns
+    /// `false` for an unknown role, a `NOLOGIN` role (no credential), or a
+    /// wrong password — callers must treat all of those as "not authorized".
+    pub fn verify_password(&self, rolname: &str, password: &str) -> anyhow::Result<bool> {
+        let Some(cred) = self.find(rolname)? else {
+            return Ok(false);
+        };
+        let candidate = super::scram::derive_credential(password, &cred.salt, cred.iterations);
+        Ok(candidate.stored_key == cred.stored_key && candidate.server_key == cred.server_key)
+    }
+
+    /// List every role name with its attributes — used by the MCP auth helper
+    /// to resolve the superuser role that the `X-TPT-Token` gate authorizes.
+    pub fn db_scan_roles(&self) -> anyhow::Result<Vec<(String, RoleAttributes)>> {
+        let mut out = Vec::new();
+        for kv in self.db.scan(TABLE)? {
+            if let Some(name) = decode_cell(&kv.value, 0).and_then(|b| String::from_utf8(b).ok()) {
+                out.push((
+                    name,
+                    RoleAttributes {
+                        superuser: cell_str(&kv.value, 6).map(|s| s == "t").unwrap_or(false),
+                        can_login: cell_str(&kv.value, 7).map(|s| s == "t").unwrap_or(true),
+                    },
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// Creates or replaces a role's credential with default attributes
     /// (`NOSUPERUSER LOGIN`). Iteration count matches real Postgres's SCRAM
     /// default (4096).

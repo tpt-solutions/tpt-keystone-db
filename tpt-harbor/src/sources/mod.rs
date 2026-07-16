@@ -13,6 +13,7 @@ pub mod mongodb;
 pub mod mssql;
 pub mod mysql;
 pub mod neo4j;
+pub mod odbc;
 pub mod oracle;
 pub mod postgres;
 pub mod postgis;
@@ -31,6 +32,7 @@ pub enum SourceKind {
     MySql,
     Search,
     MsSql,
+    Odbc,
 }
 
 impl SourceKind {
@@ -43,6 +45,12 @@ impl SourceKind {
             SourceKind::Stream => "Flux",
             SourceKind::Vector => "Prism",
             SourceKind::Gis => "Meridian",
+            // ODBC is vendor-agnostic — the "real" target depends on the
+            // underlying database behind the DSN, which this registry has
+            // no way to know. Keystone (the relational engine) is the sane
+            // default since ODBC's primary use case here is other
+            // relational databases without their own connector.
+            SourceKind::Odbc => "Keystone",
         }
     }
 }

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as Json};
 
 use crate::storage::database::Database;
+use crate::executor::rbac::Actor;
 
 use super::tools;
 
@@ -24,7 +25,10 @@ struct JsonRpcRequest {
 
 /// Parses `body` as a JSON-RPC request and returns the JSON-RPC response
 /// (never errors itself — malformed input becomes a JSON-RPC error object).
-pub fn dispatch(db: &Arc<Database>, body: &[u8]) -> Json {
+/// `actor` is the authenticated identity (resolved by `mcp::server::handle`
+/// from the `X-TPT-Token` gate) threaded into tool execution for per-table
+/// RBAC on the SQL-executing tools.
+pub fn dispatch(db: &Arc<Database>, actor: &Actor, body: &[u8]) -> Json {
     let request: JsonRpcRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return error_response(Json::Null, -32700, &format!("Parse error: {e}")),
@@ -41,18 +45,18 @@ pub fn dispatch(db: &Arc<Database>, body: &[u8]) -> Json {
             }),
         ),
         "tools/list" => success_response(id, json!({"tools": tool_descriptors()})),
-        "tools/call" => handle_tools_call(db, id, &request.params),
+        "tools/call" => handle_tools_call(db, actor, id, &request.params),
         other => error_response(id, -32601, &format!("Method not found: {other}")),
     }
 }
 
-fn handle_tools_call(db: &Arc<Database>, id: Json, params: &Json) -> Json {
+fn handle_tools_call(db: &Arc<Database>, actor: &Actor, id: Json, params: &Json) -> Json {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    match tools::call(db, name, &args) {
+    match tools::call(db, actor, name, &args) {
         Ok(value) => success_response(
             id,
             json!({"content": [{"type": "text", "text": value.to_string()}]}),

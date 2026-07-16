@@ -15,43 +15,67 @@
 //!
 //! Two routes:
 //! - `POST /query` — body `{"sql": "...", "params": [...]}"`, runs it
-//!   through the same `executor::execute_query`/`execute_parsed` entry
-//!   points the Postgres wire protocol uses, returns
-//!   `{"columns": [...], "rows": [[...]]}`. Row cells are decoded as UTF-8
-//!   text and emitted as JSON strings (or `null`) regardless of the
-//!   underlying column type — a documented scope cut; `GET /schema` is how a
-//!   client learns the real type to parse a cell into.
+//!   through the same `executor::execute_parsed_as` entry point the Postgres
+//!   wire protocol uses, returns `{"columns": [...], "rows": [[...]]}`. Row
+//!   cells are decoded as UTF-8 text and emitted as JSON strings (or `null`)
+//!   regardless of the underlying column type — a documented scope cut;
+//!   `GET /schema` is how a client learns the real type to parse a cell into.
 //! - `GET /schema` — introspects `Database::list_tables`/`get_table` and
 //!   returns `{"tables": [{"name":..., "columns":[{"name":..., "type":...}]}]}`,
 //!   consumed by `tpt-canvas`'s `tsgen` binary for TypeScript codegen.
+//!
+//! Auth: when `_tpt_roles` is non-empty, `POST /query` requires
+//! `Authorization: Basic <base64(user:pass)>` (verified via
+//! `wire::bridge_auth`); the resolved `Actor` is threaded into
+//! `execute_parsed_as` for per-table RBAC. `GET /schema` and `OPTIONS` stay
+//! unauthenticated so a browser canvas can still discover the schema.
+//! Zero-config (`_tpt_roles` empty) preserves today's no-auth behavior.
 
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 use crate::executor::eval::Value;
-use crate::executor::{execute_parsed, execute_query};
+use crate::executor::rbac::Actor;
+use crate::executor::execute_parsed_as;
 use crate::storage::database::Database;
 use crate::storage::StorageEngine;
+use crate::wire::bridge_auth::authenticate_basic;
+use crate::wire::roles::RoleStore;
 
-pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Database>) {
-    if let Err(e) = run(stream, db).await {
+pub async fn handle(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+    roles: Arc<RoleStore>,
+    guard: Arc<Semaphore>,
+) {
+    // Admission-control backpressure: hold a permit for the connection's life.
+    let _permit = match guard.acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Err(e) = run(stream, db, roles).await {
         debug!(%peer, "http query session ended: {e}");
     }
 }
 
-async fn run(mut stream: TcpStream, db: Arc<Database>) -> anyhow::Result<()> {
-    let Some((method, path, body)) = read_request(&mut stream).await? else {
+async fn run(mut stream: TcpStream, db: Arc<Database>, roles: Arc<RoleStore>) -> anyhow::Result<()> {
+    let Some((method, path, body, authorization)) = read_request(&mut stream).await? else {
         return Ok(());
     };
 
     let response = match (method.as_str(), path.as_str()) {
         ("OPTIONS", _) => json_response(204, &json!(null)),
-        ("POST", "/query") => handle_query(&db, &body),
         ("GET", "/schema") => handle_schema(&db),
+        ("POST", "/query") => match authenticate_basic(&roles, &db, authorization.as_deref()) {
+            Ok(actor) => handle_query(&db, &body, &actor),
+            Err(e) => json_response(401, &json!({"error": format!("unauthorized: {e}")})),
+        },
         _ => json_response(404, &json!({"error": "not found"})),
     };
 
@@ -59,7 +83,7 @@ async fn run(mut stream: TcpStream, db: Arc<Database>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_query(db: &Arc<Database>, body: &[u8]) -> Vec<u8> {
+fn handle_query(db: &Arc<Database>, body: &[u8], actor: &Actor) -> Vec<u8> {
     let req: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return json_response(400, &json!({"error": format!("invalid JSON body: {e}")})),
@@ -75,10 +99,12 @@ fn handle_query(db: &Arc<Database>, body: &[u8]) -> Vec<u8> {
         .unwrap_or_default();
 
     let result = if params.is_empty() {
-        execute_query(sql, db.clone())
+        // Reuse the trusted path but still authorize via the actor.
+        db.parse_cached(sql)
+            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &[], actor))
     } else {
         db.parse_cached(sql)
-            .and_then(|stmt| execute_parsed(stmt, db.clone(), &params))
+            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &params, actor))
     };
 
     match result {
@@ -165,7 +191,9 @@ fn json_to_value(v: &serde_json::Value) -> Value {
 /// framing-by-length isn't needed for the header portion), then reads
 /// exactly `Content-Length` body bytes if present. Returns `None` on a clean
 /// close before any bytes arrive.
-async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Option<(String, String, Vec<u8>)>> {
+async fn read_request(
+    stream: &mut TcpStream,
+) -> anyhow::Result<Option<(String, String, Vec<u8>, Option<String>)>> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -201,11 +229,16 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Option<(String, 
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
 
+    let authorization: Option<String> = lines
+        .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+        .and_then(|line| line.splitn(2, ':').nth(1))
+        .map(|v| v.trim().to_string());
+
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         stream.read_exact(&mut body).await?;
     }
-    Ok(Some((method, path, body)))
+    Ok(Some((method, path, body, authorization)))
 }
 
 fn json_response(status: u16, body: &serde_json::Value) -> Vec<u8> {

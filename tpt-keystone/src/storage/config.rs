@@ -82,6 +82,18 @@ pub struct StorageConfig {
     /// (port 5433). Unset means no auth — matches the Postgres listener's
     /// existing no-auth dev-mode default.
     pub mcp_token: Option<String>,
+    /// Max concurrent connections to the Canvas HTTP query bridge
+    /// (port 5435). Default 1000. Admission-control backpressure — past the
+    /// limit new connections queue rather than error.
+    pub http_max_connections: usize,
+    /// Max concurrent connections to the Flux WebSocket streaming bridge
+    /// (port 5434). Default 1000.
+    pub flux_ws_max_connections: usize,
+    /// Max concurrent connections to the Flux gRPC streaming bridge
+    /// (port 5436). Default 1000.
+    pub flux_grpc_max_connections: usize,
+    /// Max concurrent connections to the MCP server (port 5433). Default 1000.
+    pub mcp_max_connections: usize,
     /// Seeds `_tpt_roles` with a first SCRAM credential if the catalog is
     /// still empty at startup — solves "how do you create the first role
     /// with no SQL access yet." Unset (either var missing) means wire auth
@@ -163,6 +175,22 @@ impl StorageConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
             mcp_token: env::var("TPT_MCP_TOKEN").ok(),
+            http_max_connections: env::var("TPT_HTTP_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+            flux_ws_max_connections: env::var("TPT_FLUX_WS_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+            flux_grpc_max_connections: env::var("TPT_FLUX_GRPC_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+            mcp_max_connections: env::var("TPT_MCP_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
             auth_bootstrap_user: env::var("TPT_AUTH_BOOTSTRAP_USER").ok(),
             auth_bootstrap_password: env::var("TPT_AUTH_BOOTSTRAP_PASSWORD").ok(),
             tls_cert_path: env::var("TPT_TLS_CERT_PATH").ok(),

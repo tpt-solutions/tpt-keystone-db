@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use base64::Engine;
 use super::http_query;
 use crate::storage::config::NodeRole;
 use crate::storage::database::Database;
@@ -63,11 +64,15 @@ async fn test_server() -> (std::net::SocketAddr, tempfile::TempDir, tempfile::Te
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let roles = Arc::new(crate::wire::roles::RoleStore::new(db.clone()).unwrap());
+    let guard = Arc::new(tokio::sync::Semaphore::new(1000));
     tokio::spawn(async move {
         loop {
             let (stream, peer) = listener.accept().await.unwrap();
             let db = db.clone();
-            tokio::spawn(http_query::handle(stream, peer, db));
+            let roles = roles.clone();
+            let guard = guard.clone();
+            tokio::spawn(http_query::handle(stream, peer, db, roles, guard));
         }
     });
     (addr, bucket, local)
@@ -134,4 +139,97 @@ async fn schema_endpoint_reports_columns() {
     assert!(columns
         .iter()
         .any(|c| c["name"] == "name" && c["type"] == "text"));
+}
+
+/// A server whose `_tpt_roles` catalog has been seeded with one role, so the
+/// HTTP bridge must require `Authorization: Basic`. Returns the seeded
+/// `(user, password)` alongside the address.
+async fn auth_test_server(
+) -> (std::net::SocketAddr, String, String, tempfile::TempDir, tempfile::TempDir) {
+    let bucket = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
+    let lease = Arc::new(LeaseManager::new(
+        store.clone(),
+        "db",
+        "node-1".into(),
+        Duration::from_secs(30),
+    ));
+    lease.try_acquire().unwrap();
+    let db = Arc::new(
+        Database::open(
+            local.path(),
+            store,
+            lease.handle(),
+            NodeRole::Writer,
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let roles = Arc::new(crate::wire::roles::RoleStore::new(db.clone()).unwrap());
+    roles.bootstrap_if_empty("alice", "secret").unwrap();
+    db.create_table(
+        "widgets",
+        &[ColumnDef {
+            name: "id".into(),
+            col_type: ColumnType::Int4,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let guard = Arc::new(tokio::sync::Semaphore::new(1000));
+    tokio::spawn(async move {
+        loop {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let db = db.clone();
+            let roles = roles.clone();
+            let guard = guard.clone();
+            tokio::spawn(http_query::handle(stream, peer, db, roles, guard));
+        }
+    });
+    (addr, "alice".to_string(), "secret".to_string(), bucket, local)
+}
+
+#[tokio::test]
+async fn query_requires_basic_auth_when_roles_configured() {
+    let (addr, user, pass, _b, _l) = auth_test_server().await;
+
+    // No Authorization header -> 401.
+    let response = raw_request(
+        addr,
+        "POST /query HTTP/1.1\r\nContent-Length: 31\r\n\r\n{\"sql\": \"select 1 as ok\"}",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 401"), "got: {response}");
+
+    // Wrong password -> 401.
+    let bad = format!("{}:wrong", user);
+    let bad_b64 = base64::engine::general_purpose::STANDARD.encode(bad);
+    let response = raw_request(
+        addr,
+        &format!(
+            "POST /query HTTP/1.1\r\nAuthorization: Basic {bad_b64}\r\nContent-Length: 31\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
+        ),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 401"), "got: {response}");
+
+    // Correct Basic auth -> 200.
+    let good = format!("{user}:{pass}");
+    let good_b64 = base64::engine::general_purpose::STANDARD.encode(good);
+    let response = raw_request(
+        addr,
+        &format!(
+            "POST /query HTTP/1.1\r\nAuthorization: Basic {good_b64}\r\nContent-Length: 31\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
+        ),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
+    let body: serde_json::Value = serde_json::from_str(body_of(&response)).unwrap();
+    assert_eq!(body["rows"], serde_json::json!([["1"]]));
 }

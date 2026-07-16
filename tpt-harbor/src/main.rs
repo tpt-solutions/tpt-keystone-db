@@ -12,7 +12,7 @@ use tpt_harbor::engine::MigrationEngine;
 use tpt_harbor::sources::{
     elasticsearch::ElasticsearchSource, influxdb::InfluxDbSource, kafka::KafkaSource,
     mongodb::MongoSource, mssql::MsSqlSource, mysql::MySqlSource, neo4j::Neo4jSource,
-    oracle::OracleSource, postgres::PostgresSource, postgis::PostGisSource,
+    odbc::OdbcSource, oracle::OracleSource, postgres::PostgresSource, postgis::PostGisSource,
     vector::VectorSource, SourceKind,
 };
 use tpt_harbor::target::keystone::KeystoneTarget;
@@ -37,6 +37,13 @@ struct SourceArgs {
     source_user: String,
     #[arg(long, default_value = "postgres")]
     source_db: String,
+    /// Full ODBC connection string, e.g. `Driver={ODBC Driver 18 for SQL
+    /// Server};Server=localhost;UID=sa;PWD=...;Database=mydb`. Required (and
+    /// only used) when `--source odbc` is chosen — ODBC drivers vary too
+    /// widely for the shared `--source-addr`/`--source-user`/`--source-db`
+    /// fields to express connection config generically.
+    #[arg(long)]
+    source_conn_str: Option<String>,
 }
 
 #[derive(Args)]
@@ -177,6 +184,13 @@ async fn open_source(args: &SourceArgs) -> anyhow::Result<Box<dyn SourceConnecto
         }
         SourceKind::Oracle => {
             Ok(Box::new(OracleSource::connect(&args.source_addr, &args.source_user, &args.source_db).await?))
+        }
+        SourceKind::Odbc => {
+            let conn_str = args
+                .source_conn_str
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--source-conn-str is required when --source odbc is chosen"))?;
+            Ok(Box::new(OdbcSource::connect(conn_str).await?))
         }
     }
 }

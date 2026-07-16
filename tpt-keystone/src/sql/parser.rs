@@ -566,11 +566,30 @@ impl Parser {
                 self.eat(&Token::Column);
                 let name = self.parse_ident_string()?;
                 let col_type = self.parse_ident_string()?;
+                // Parse trailing `DEFAULT expr` and/or `NOT NULL` (both
+                // optional, in either order) so `ALTER TABLE ... ADD COLUMN`
+                // round-trips the same column attributes `CREATE TABLE` does.
+                let mut default = None;
+                let mut nullable = true;
+                loop {
+                    match self.peek() {
+                        Token::Default => {
+                            self.advance();
+                            default = Some(self.parse_expr(0)?);
+                        }
+                        Token::Not => {
+                            self.advance();
+                            self.expect(&Token::Null)?;
+                            nullable = false;
+                        }
+                        _ => break,
+                    }
+                }
                 AlterTableAction::AddColumn(ColumnDef {
                     name,
                     col_type,
-                    nullable: true,
-                    default: None,
+                    nullable,
+                    default,
                     is_pk: false,
                     is_unique: false,
                     references: None,
@@ -875,11 +894,14 @@ impl Parser {
     /// emits (`NO MINVALUE`, `CACHE 1`, `OWNED BY ...`, etc.) up to the
     /// statement terminator.
     fn parse_create_sequence(&mut self) -> anyhow::Result<Stmt> {
-        if self.peek() == &Token::If && self.peek2() == &Token::Not {
+        let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
             self.advance();
             self.advance();
             self.expect(&Token::Exists)?;
-        }
+            true
+        } else {
+            false
+        };
         let name = self.parse_object_name()?;
         let mut start = 1i64;
         let mut increment = 1i64;
@@ -904,6 +926,7 @@ impl Parser {
         }
 
         Ok(Stmt::CreateSequence(CreateSequenceStmt {
+            if_not_exists,
             name,
             start,
             increment,

@@ -56,9 +56,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 use crate::storage::database::Database;
+use crate::wire::bridge_auth::authenticate_basic;
+use crate::wire::roles::RoleStore;
 
 // HTTP/2 flow-control default initial window size (RFC 7540 §6.9.2) and our
 // own hard parse guard.
@@ -69,22 +72,37 @@ const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const GRPC_OK: u8 = 0;
 const GRPC_UNIMPLEMENTED: u8 = 12;
 const GRPC_INTERNAL: u8 = 13;
+/// gRPC `UNAUTHENTICATED` — sent when `_tpt_roles` is non-empty and the
+/// request's `authorization` metadata header is missing/invalid.
+const GRPC_UNAUTHENTICATED: u8 = 16;
 
 /// Drive one client TCP connection from the h2c preface through the request
-/// loop until it closes or errors.
-pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Database>) {
-    if let Err(e) = run(stream, db).await {
+/// loop until it closes or errors. `roles`/```guard`` enable optional Basic
+/// auth (via the `authorization` metadata header, when `_tpt_roles` is
+/// non-empty) and connection-rate admission control.
+pub async fn handle(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+    roles: Arc<RoleStore>,
+    guard: Arc<Semaphore>,
+) {
+    let _permit = match guard.acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Err(e) = run(stream, db, roles).await {
         debug!(%peer, "flux grpc session ended: {e}");
     }
 }
 
-async fn run(stream: TcpStream, db: Arc<Database>) -> Result<()> {
+async fn run(stream: TcpStream, db: Arc<Database>, roles: Arc<RoleStore>) -> Result<()> {
     stream.set_nodelay(true).ok();
     // Splitting the stream lets the read loop and concurrent write loop each
     // own one half (a single `TcpStream` isn't `Sync`, so sharing it across
     // select arms is awkward).
     let (mut read_half, write_half) = tokio::io::split(stream);
-    let mut conn = Conn::new(db, write_half);
+    let mut conn = Conn::new(db, roles, write_half);
 
     conn.handshake(&mut read_half).await?;
     conn.serve(&mut read_half).await
@@ -128,6 +146,7 @@ impl Stream {
 
 struct Conn<W: AsyncWrite + Unpin> {
     db: Arc<Database>,
+    roles: Arc<RoleStore>,
     write: BufWriter<W>,
     hpack: hpack::Decoder,
     /// `true` after the peer acks our settings (only needed for the preface
@@ -146,9 +165,10 @@ struct Conn<W: AsyncWrite + Unpin> {
 }
 
 impl<W: AsyncWrite + Unpin> Conn<W> {
-    fn new(db: Arc<Database>, write: W) -> Self {
+    fn new(db: Arc<Database>, roles: Arc<RoleStore>, write: W) -> Self {
         Conn {
             db: db.clone(),
+            roles,
             write: BufWriter::new(write),
             hpack: hpack::Decoder::new(),
             peer_settings_acked: false,
@@ -385,6 +405,20 @@ impl<W: AsyncWrite + Unpin> Conn<W> {
             // capture what we need first.
             let body = std::mem::take(&mut st.body);
             let path = st.path.clone().unwrap_or_default();
+            let authorization = st
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+                .map(|(_, v)| v.clone());
+            // Authenticate via the shared bridge helper. Zero-config
+            // (`_tpt_roles` empty) skips this; otherwise a valid
+            // `Authorization: Basic` metadata header is required.
+            if let Err(e) = authenticate_basic(&self.roles, &self.db, authorization.as_deref()) {
+                self.send_error(frame.stream_id, GRPC_UNAUTHENTICATED, &format!("unauthorized: {e}"))
+                    .await?;
+                self.streams.remove(&frame.stream_id);
+                return Ok(());
+            }
             let dispatch = dispatch(&path, &body, &self.db);
             drop(st);
             match dispatch {

@@ -107,6 +107,7 @@ pub struct CreateTopicStmt {
 /// modeled — sequences here are just a monotonic counter.
 #[derive(Debug, Clone)]
 pub struct CreateSequenceStmt {
+    pub if_not_exists: bool,
     pub name: String,
     pub start: i64,
     pub increment: i64,

@@ -146,15 +146,19 @@ async fn main() -> anyhow::Result<()> {
     let mcp_listener = TcpListener::bind(&mcp_addr).await?;
     info!("TPT Keystone MCP server listening on {mcp_addr}");
     let mcp_db = db.clone();
+    let mcp_roles = roles.clone();
     let mcp_token = config.mcp_token.clone();
+    let mcp_guard = Arc::new(tokio::sync::Semaphore::new(config.mcp_max_connections));
     tokio::spawn(async move {
         loop {
             match mcp_listener.accept().await {
                 Ok((stream, peer)) => {
                     let db = mcp_db.clone();
+                    let roles = mcp_roles.clone();
                     let token = mcp_token.clone();
+                    let guard = mcp_guard.clone();
                     tokio::spawn(async move {
-                        mcp::handle(stream, peer, db, token).await;
+                        mcp::handle(stream, peer, db, roles, token, guard).await;
                     });
                 }
                 Err(e) => error!(error = %e, "MCP listener accept failed"),
@@ -171,13 +175,17 @@ async fn main() -> anyhow::Result<()> {
     let flux_ws_listener = TcpListener::bind(&flux_ws_addr).await?;
     info!("TPT Keystone Flux WebSocket endpoint listening on {flux_ws_addr}");
     let flux_ws_db = db.clone();
+    let flux_ws_roles = roles.clone();
+    let flux_ws_guard = Arc::new(tokio::sync::Semaphore::new(config.flux_ws_max_connections));
     tokio::spawn(async move {
         loop {
             match flux_ws_listener.accept().await {
                 Ok((stream, peer)) => {
                     let db = flux_ws_db.clone();
+                    let roles = flux_ws_roles.clone();
+                    let guard = flux_ws_guard.clone();
                     tokio::spawn(async move {
-                        wire::websocket::handle(stream, peer, db).await;
+                        wire::websocket::handle(stream, peer, db, roles, guard).await;
                     });
                 }
                 Err(e) => error!(error = %e, "Flux WebSocket listener accept failed"),
@@ -196,13 +204,17 @@ async fn main() -> anyhow::Result<()> {
     let flux_grpc_listener = TcpListener::bind(&flux_grpc_addr).await?;
     info!("TPT Keystone Flux gRPC endpoint listening on {flux_grpc_addr}");
     let flux_grpc_db = db.clone();
+    let flux_grpc_roles = roles.clone();
+    let flux_grpc_guard = Arc::new(tokio::sync::Semaphore::new(config.flux_grpc_max_connections));
     tokio::spawn(async move {
         loop {
             match flux_grpc_listener.accept().await {
                 Ok((stream, peer)) => {
                     let db = flux_grpc_db.clone();
+                    let roles = flux_grpc_roles.clone();
+                    let guard = flux_grpc_guard.clone();
                     tokio::spawn(async move {
-                        wire::grpc::handle(stream, peer, db).await;
+                        wire::grpc::handle(stream, peer, db, roles, guard).await;
                     });
                 }
                 Err(e) => error!(error = %e, "Flux gRPC listener accept failed"),
@@ -217,13 +229,17 @@ async fn main() -> anyhow::Result<()> {
     let http_listener = TcpListener::bind(&http_addr).await?;
     info!("TPT Keystone Canvas HTTP query endpoint listening on {http_addr}");
     let http_db = db.clone();
+    let http_roles = roles.clone();
+    let http_guard = Arc::new(tokio::sync::Semaphore::new(config.http_max_connections));
     tokio::spawn(async move {
         loop {
             match http_listener.accept().await {
                 Ok((stream, peer)) => {
                     let db = http_db.clone();
+                    let roles = http_roles.clone();
+                    let guard = http_guard.clone();
                     tokio::spawn(async move {
-                        wire::http_query::handle(stream, peer, db).await;
+                        wire::http_query::handle(stream, peer, db, roles, guard).await;
                     });
                 }
                 Err(e) => error!(error = %e, "Canvas HTTP listener accept failed"),

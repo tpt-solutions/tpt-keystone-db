@@ -3,4 +3,4 @@ linker = "rust-lld.exe"
 rustflags = ["-C", "linker-flavor=lld-link"]
 
 [build]
-rustc-wrapper = "sccache"
+rustc-wrapper = ""

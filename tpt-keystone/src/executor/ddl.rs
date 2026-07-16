@@ -175,10 +175,10 @@ pub(super) fn execute_create_table(
 }
 
 pub(super) fn execute_drop_table(
-    _dt: crate::sql::ast::DropTableStmt,
-    _db: Arc<Database>,
+    dt: crate::sql::ast::DropTableStmt,
+    db: Arc<Database>,
 ) -> anyhow::Result<QueryResult> {
-    // For now, just return success
+    db.drop_table(&dt.table, dt.if_exists)?;
     Ok(QueryResult {
         fields: vec![],
         rows: vec![],
@@ -301,6 +301,13 @@ pub(super) fn execute_create_sequence(
     cs: crate::sql::ast::CreateSequenceStmt,
     db: Arc<Database>,
 ) -> anyhow::Result<QueryResult> {
+    if cs.if_not_exists && db.list_sequences().iter().any(|s| s.name == cs.name) {
+        return Ok(QueryResult {
+            fields: vec![],
+            rows: vec![],
+            tag: "CREATE SEQUENCE".into(),
+        });
+    }
     db.create_sequence(&cs.name, cs.start, cs.increment)?;
     Ok(QueryResult {
         fields: vec![],
@@ -385,10 +392,35 @@ pub(super) fn execute_alter_table(
             }
             db.update_table_schema(schema)?;
         }
-        AlterTableAction::AddColumn(_) | AlterTableAction::DropColumn(_) => {
-            // Pre-existing gap (row width/encoding change needs a backfill
-            // pass this version doesn't implement) — accepted syntactically,
-            // no-op, same as before this change.
+        AlterTableAction::AddColumn(cd) => {
+            let col_type = ColumnType::from_name(&cd.col_type).unwrap_or(ColumnType::Text);
+            let default = cd.default.as_ref().map(default_expr_to_text).transpose()?;
+            let storage_col = crate::storage::ColumnDef {
+                name: cd.name,
+                col_type,
+                nullable: cd.nullable,
+                default,
+                is_pk: false,
+            };
+            let default_cell = if storage_col.nullable && storage_col.default.is_none() {
+                None
+            } else if let Some(default_text) = &storage_col.default {
+                let expr = crate::sql::parse_expr_text(default_text)?;
+                eval::eval_expr_with_db(&expr, db.clone(), &[])?.to_wire_bytes()
+            } else if !storage_col.nullable {
+                // NOT NULL with no default: existing rows would violate the
+                // constraint. Reject rather than silently writing NULL.
+                anyhow::bail!(
+                    "column \"{}\" is NOT NULL and has no default; existing rows cannot be backfilled",
+                    storage_col.name
+                );
+            } else {
+                None
+            };
+            db.alter_table_add_column(&at.table, storage_col, default_cell)?;
+        }
+        AlterTableAction::DropColumn(column) => {
+            db.alter_table_drop_column(&at.table, &column)?;
         }
     }
     Ok(QueryResult {

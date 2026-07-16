@@ -30,7 +30,7 @@ fn create_users_posts(db: &std::sync::Arc<crate::storage::database::Database>) {
 fn tables_lists_created_tables() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "tables", &json!({})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "tables", &json!({})).unwrap();
     let names: Vec<String> = result
         .as_array()
         .unwrap()
@@ -45,7 +45,7 @@ fn tables_lists_created_tables() {
 fn columns_reports_schema() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "columns", &json!({"table": "users"})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "columns", &json!({"table": "users"})).unwrap();
     let cols = result.as_array().unwrap();
     assert_eq!(cols.len(), 2);
 }
@@ -54,7 +54,7 @@ fn columns_reports_schema() {
 fn schema_combines_tables_and_columns() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "schema", &json!({})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "schema", &json!({})).unwrap();
     let tables = result["tables"].as_array().unwrap();
     assert!(tables.iter().any(|t| t["name"] == "users"));
     let edges = result["relationship_graph"]["edges"].as_array().unwrap();
@@ -66,7 +66,7 @@ fn query_rejects_non_select_show() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
     let err = call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "query",
         &json!({"sql": "INSERT INTO users (id, name) VALUES (3, 'x')"}),
     )
@@ -78,7 +78,7 @@ fn query_rejects_non_select_show() {
 fn query_returns_rows_columns_row_count() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "query", &json!({"sql": "SELECT * FROM users"})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "query", &json!({"sql": "SELECT * FROM users"})).unwrap();
     assert_eq!(result["row_count"], 2);
     assert!(result["columns"].as_array().unwrap().len() >= 2);
     assert_eq!(result["rows"].as_array().unwrap().len(), 2);
@@ -89,7 +89,7 @@ fn mutate_parses_insert_rows_affected_tag() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
     let result = call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "mutate",
         &json!({"sql": "INSERT INTO users (id, name) VALUES (3, 'carol')"}),
     )
@@ -101,7 +101,7 @@ fn mutate_parses_insert_rows_affected_tag() {
 fn mutate_parses_ddl_with_no_count_tag() {
     let (db, _bucket, _local) = test_db();
     let result = call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "mutate",
         &json!({"sql": "CREATE TABLE t (id int PRIMARY KEY)"}),
     )
@@ -115,7 +115,7 @@ fn explain_returns_plan_shape() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
     let result = call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "explain",
         &json!({"sql": "SELECT * FROM users WHERE id = 1"}),
     )
@@ -129,7 +129,7 @@ fn explain_returns_plan_shape() {
 fn related_nonexistent_table_returns_empty_not_error() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "related", &json!({"table": "nope", "id": "1"})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "related", &json!({"table": "nope", "id": "1"})).unwrap();
     assert!(result["facts"].as_array().unwrap().is_empty());
 }
 
@@ -137,7 +137,7 @@ fn related_nonexistent_table_returns_empty_not_error() {
 fn related_walks_fk_graph() {
     let (db, _bucket, _local) = test_db();
     create_users_posts(&db);
-    let result = call(&db, "related", &json!({"table": "users", "id": "1"})).unwrap();
+    let result = call(&db, &crate::executor::rbac::Actor::unrestricted(), "related", &json!({"table": "users", "id": "1"})).unwrap();
     let facts = result["facts"].as_array().unwrap();
     // user 1 has two posts pointing at it (incoming FK relation).
     assert!(facts.iter().any(|f| f["direction"] == "incoming"));
@@ -149,13 +149,13 @@ fn related_respects_limit_clamp() {
     create_users_posts(&db);
     // limit 0 clamps up to 1, limit 1000 clamps down to 100 — neither should error.
     assert!(call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "related",
         &json!({"table": "users", "id": "1", "limit": 0})
     )
     .is_ok());
     assert!(call(
-        &db,
+        &db, &crate::executor::rbac::Actor::unrestricted(),
         "related",
         &json!({"table": "users", "id": "1", "limit": 1000})
     )
@@ -165,16 +165,16 @@ fn related_respects_limit_clamp() {
 #[test]
 fn call_missing_required_args_returns_clear_error() {
     let (db, _bucket, _local) = test_db();
-    let err = call(&db, "query", &json!({})).unwrap_err();
+    let err = call(&db, &crate::executor::rbac::Actor::unrestricted(), "query", &json!({})).unwrap_err();
     assert!(err.to_string().contains("sql"));
 
-    let err = call(&db, "columns", &json!({})).unwrap_err();
+    let err = call(&db, &crate::executor::rbac::Actor::unrestricted(), "columns", &json!({})).unwrap_err();
     assert!(err.to_string().contains("table"));
 }
 
 #[test]
 fn call_unknown_tool_returns_error() {
     let (db, _bucket, _local) = test_db();
-    let err = call(&db, "nonexistent", &json!({})).unwrap_err();
+    let err = call(&db, &crate::executor::rbac::Actor::unrestricted(), "nonexistent", &json!({})).unwrap_err();
     assert!(err.to_string().contains("unknown tool"));
 }

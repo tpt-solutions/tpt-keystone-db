@@ -32,22 +32,46 @@ use base64::Engine as _;
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 use crate::storage::database::Database;
+use crate::wire::bridge_auth::authenticate_basic;
+use crate::wire::roles::RoleStore;
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Drive one client connection from the HTTP Upgrade handshake through the
-/// subscribe/push loop until it disconnects.
-pub async fn handle(stream: TcpStream, peer: std::net::SocketAddr, db: Arc<Database>) {
-    if let Err(e) = run(stream, db).await {
+/// subscribe/push loop until it disconnects. `roles`/``guard`` enable optional
+/// Basic auth (when `_tpt_roles` is non-empty) and connection-rate admission
+/// control.
+pub async fn handle(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    db: Arc<Database>,
+    roles: Arc<RoleStore>,
+    guard: Arc<Semaphore>,
+) {
+    let _permit = match guard.acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Err(e) = run(stream, db, roles).await {
         debug!(%peer, "flux websocket session ended: {e}");
     }
 }
 
-async fn run(mut stream: TcpStream, db: Arc<Database>) -> anyhow::Result<()> {
-    let key = read_handshake(&mut stream).await?;
+async fn run(mut stream: TcpStream, db: Arc<Database>, roles: Arc<RoleStore>) -> anyhow::Result<()> {
+    let (key, authorization) = read_handshake(&mut stream).await?;
+
+    // Authenticate at Upgrade time. Zero-config (`_tpt_roles` empty) skips
+    // this; otherwise a valid `Authorization: Basic` is required.
+    if let Err(e) = authenticate_basic(&roles, &db, authorization.as_deref()) {
+        let body = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nWWW-Authenticate: Basic\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(body.as_bytes()).await;
+        anyhow::bail!("{e}");
+    }
+
     let accept = accept_key(&key);
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
@@ -90,8 +114,12 @@ async fn run(mut stream: TcpStream, db: Arc<Database>) -> anyhow::Result<()> {
 
 /// Reads (byte-by-byte, since the request is small and there's no framing
 /// to know its length in advance) the HTTP Upgrade request up to the blank
-/// line terminating its headers, and extracts `Sec-WebSocket-Key`.
-async fn read_handshake(stream: &mut TcpStream) -> anyhow::Result<String> {
+/// line terminating its headers, extracting `Sec-WebSocket-Key` and the
+/// `Authorization` header (if present) so the caller can authenticate at
+/// Upgrade time.
+async fn read_handshake(
+    stream: &mut TcpStream,
+) -> anyhow::Result<(String, Option<String>)> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -104,12 +132,18 @@ async fn read_handshake(stream: &mut TcpStream) -> anyhow::Result<String> {
         anyhow::ensure!(buf.len() <= 16_384, "WebSocket handshake request too large");
     }
     let request = String::from_utf8_lossy(&buf);
-    request
-        .lines()
+    let mut lines = request.lines();
+    let key = lines
         .find(|line| line.to_ascii_lowercase().starts_with("sec-websocket-key:"))
         .and_then(|line| line.splitn(2, ':').nth(1))
         .map(|v| v.trim().to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing Sec-WebSocket-Key header"))
+        .ok_or_else(|| anyhow::anyhow!("missing Sec-WebSocket-Key header"))?;
+    let authorization = request
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+        .and_then(|line| line.splitn(2, ':').nth(1))
+        .map(|v| v.trim().to_string());
+    Ok((key, authorization))
 }
 
 fn accept_key(client_key: &str) -> String {

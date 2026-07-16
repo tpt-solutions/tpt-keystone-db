@@ -31,10 +31,12 @@ CREATE TABLE [IF NOT EXISTS] t (
   [FOREIGN KEY (col, ...) REFERENCES other_table(col, ...)]
 ) [WITH (json_schema_col = '...', json_schema = '...', json_schema_mode = 'strict'|'relaxed'|'off')];
 
-DROP TABLE t;
+DROP TABLE [IF EXISTS] t;  -- purges rows + per-table secondary indexes
+ALTER TABLE t ADD COLUMN col type [DEFAULT expr] [NOT NULL];
+ALTER TABLE t DROP COLUMN col;  -- rejected if PK/UNIQUE/FOREIGN KEY/indexed
 ALTER TABLE t ALTER COLUMN col SET DEFAULT expr;
 ALTER TABLE t ALTER COLUMN col SET/DROP NOT NULL;
-CREATE SEQUENCE [IF NOT EXISTS] seq;  -- IF NOT EXISTS parses but isn't enforced (known bug, see TODO.md Phase 14)
+CREATE SEQUENCE [IF NOT EXISTS] seq;  -- IF NOT EXISTS is enforced (no-op if exists)
 CREATE INDEX ON t (col);                                   -- plain B-Tree
 CREATE INDEX ON t USING SPATIAL (col);                     -- Meridian
 CREATE INDEX ON t USING TIME(ts_col) WITH (interval = '1 hour', retention = '30 days');  -- Chronos
@@ -46,9 +48,13 @@ CREATE TOPIC t WITH (partitions = n, retention = '...', retention_bytes = n);  -
 CREATE FUNCTION name(args) RETURNS type LANGUAGE wasm AS '<base64>';  -- WASM UDF (int8/float8/bool only)
 ```
 
-`ALTER TABLE ADD/DROP COLUMN` are parsed but are no-ops (would need a
-row-backfill pass — not implemented). Composite primary keys only use the
-first column as the physical row key (a pre-existing engine limitation).
+`ALTER TABLE ADD/DROP COLUMN` backfill every existing row (non-crash-atomic
+pass held under the global LSM lock); `DROP COLUMN` is rejected on
+PK/UNIQUE/FOREIGN KEY/indexed columns. `DROP TABLE` purges rows and all
+per-table secondary indexes; a reader node may still serve a dropped table
+until it refreshes its catalog (a known convergence gap tracked in
+`TODO.md`). Composite primary keys only use the first column as the physical
+row key (a pre-existing engine limitation).
 
 ## DML
 

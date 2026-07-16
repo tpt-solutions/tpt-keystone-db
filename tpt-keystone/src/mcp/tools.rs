@@ -10,20 +10,26 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value as Json};
 
 use crate::executor::eval::Value;
-use crate::executor::{self, QueryResult};
+use crate::executor::rbac::Actor;
+use crate::executor::{self, execute_parsed_as, QueryResult};
 use crate::sql::ast::{SelectStmt, Stmt};
 use crate::storage::database::Database;
 use crate::storage::{ColumnType, StorageEngine, TableSchema};
 
-pub fn call(db: &Arc<Database>, name: &str, args: &Json) -> Result<Json> {
+/// Dispatch an MCP tool call. `actor` is the authenticated identity, threaded
+/// into the SQL-executing tools (`query`/`mutate`) for per-table RBAC; the
+/// pure catalog-introspection tools (`tables`/`columns`/`schema`/`related`)
+/// read schema shape (an `X-TPT-Token`-gated surface) and don't execute
+/// user-authored SQL against arbitrary tables.
+pub fn call(db: &Arc<Database>, actor: &Actor, name: &str, args: &Json) -> Result<Json> {
     match name {
         "tables" => tables(db),
         "columns" => columns(db, args),
         "schema" => schema(db),
-        "query" => query(db, args),
-        "mutate" => mutate(db, args),
+        "query" => query(db, actor, args),
+        "mutate" => mutate(db, actor, args),
         "explain" => explain(db, args),
-        "related" => related(db, args),
+        "related" => related(db, actor, args),
         other => bail!("unknown tool: {other}"),
     }
 }
@@ -157,7 +163,7 @@ fn column_histograms(
 
 /// Read-only execution: only `SELECT`/`SHOW` are accepted. Anything else
 /// (including DDL) must go through `mutate`.
-fn query(db: &Arc<Database>, args: &Json) -> Result<Json> {
+fn query(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
     let sql = arg_sql(args)?;
     let stmt = db.parse_cached(sql)?;
     if !matches!(stmt, Stmt::Select(_) | Stmt::Show(_)) {
@@ -165,13 +171,14 @@ fn query(db: &Arc<Database>, args: &Json) -> Result<Json> {
             "query() only accepts read-only statements (SELECT/SHOW) — use mutate() for writes/DDL"
         );
     }
-    let result = executor::execute_parsed(stmt, db.clone(), &[])?;
+    let result = execute_parsed_as(stmt, db.clone(), &[], actor)?;
     Ok(rows_to_json(&result))
 }
 
-fn mutate(db: &Arc<Database>, args: &Json) -> Result<Json> {
+fn mutate(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
     let sql = arg_sql(args)?;
-    let result = executor::execute_query(sql, db.clone())?;
+    let stmt = db.parse_cached(sql)?;
+    let result = execute_parsed_as(stmt, db.clone(), &[], actor)?;
     // DML tags are "INSERT 0 <n>" / "UPDATE <n>" / "DELETE <n>"; DDL tags
     // (e.g. "CREATE TABLE") have no trailing count.
     let rows_affected = result
@@ -200,7 +207,7 @@ const RELATED_FACT_CAP: usize = 200;
 /// the FKs it declares and the FKs other tables declare against it) and
 /// returns compact `{subject, relation, object}` triples with human-readable
 /// labels — never raw rows or unfiltered subgraphs.
-fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
+fn related(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
     let table = arg_table(args)?.to_string();
     let id = match args.get("id") {
         Some(Json::String(s)) => s.clone(),
@@ -240,7 +247,7 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
                 continue;
             };
             let pk_value = typed_value(&pk_col.col_type, &id_val);
-            let Some(row) = select_one_by_column(db, &tbl, &pk_col.name, pk_value)? else {
+            let Some(row) = select_one_by_column(db, actor, &tbl, &pk_col.name, pk_value)? else {
                 continue;
             };
             let subject_label = label_for_row(&schema, &row);
@@ -265,6 +272,7 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
                     .unwrap_or(ColumnType::Text);
                 let ref_row = select_one_by_column(
                     db,
+                    actor,
                     &fk.ref_table,
                     &fk.ref_column,
                     typed_value(&ref_col_type, &fk_val),
@@ -297,6 +305,7 @@ fn related(db: &Arc<Database>, args: &Json) -> Result<Json> {
                     let fk_col_name = other_schema.columns[fk.column].name.clone();
                     let rows = select_many_by_column(
                         db,
+                        actor,
                         &other_name,
                         &fk_col_name,
                         typed_value(&pk_col.col_type, &id_val),
@@ -377,18 +386,20 @@ fn label_for_row(schema: &TableSchema, row: &[Option<Vec<u8>>]) -> String {
 
 fn select_one_by_column(
     db: &Arc<Database>,
+    actor: &Actor,
     table: &str,
     column: &str,
     value: Value,
 ) -> Result<Option<Vec<Option<Vec<u8>>>>> {
     let sql = format!("SELECT * FROM {table} WHERE {column} = $1 LIMIT 1");
     let stmt = db.parse_cached(&sql)?;
-    let result = executor::execute_parsed(stmt, db.clone(), &[value])?;
+    let result = execute_parsed_as(stmt, db.clone(), &[value], actor)?;
     Ok(result.rows.into_iter().next())
 }
 
 fn select_many_by_column(
     db: &Arc<Database>,
+    actor: &Actor,
     table: &str,
     column: &str,
     value: Value,
@@ -396,7 +407,7 @@ fn select_many_by_column(
 ) -> Result<Vec<Vec<Option<Vec<u8>>>>> {
     let sql = format!("SELECT * FROM {table} WHERE {column} = $1 LIMIT {limit}");
     let stmt = db.parse_cached(&sql)?;
-    let result = executor::execute_parsed(stmt, db.clone(), &[value])?;
+    let result = execute_parsed_as(stmt, db.clone(), &[value], actor)?;
     Ok(result.rows)
 }
 

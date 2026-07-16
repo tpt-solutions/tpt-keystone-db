@@ -10,6 +10,9 @@ mod messages_tests;
 pub mod roles;
 #[cfg(test)]
 mod roles_tests;
+pub mod bridge_auth;
+#[cfg(test)]
+mod bridge_auth_tests;
 pub mod privileges;
 pub mod role_members;
 #[cfg(test)]
@@ -20,4 +23,6 @@ pub mod scram;
 pub mod session;
 pub mod tls;
 pub mod websocket;
+#[cfg(test)]
+mod websocket_tests;
 pub mod grpc;

@@ -44,8 +44,13 @@ async fn spawn_mcp(db: Arc<Database>, token: Option<String>) -> std::net::Socket
             let (stream, peer) = listener.accept().await.unwrap();
             let db = db.clone();
             let token = token.clone();
+            let roles = crate::wire::roles::RoleStore::new(db.clone()).ok().map(Arc::new);
+            let guard = Arc::new(tokio::sync::Semaphore::new(1000));
             tokio::spawn(async move {
-                super::handle(stream, peer, db, token).await;
+                match roles {
+                    Some(roles) => super::handle(stream, peer, db, roles, token, guard).await,
+                    None => {}
+                }
             });
         }
     });

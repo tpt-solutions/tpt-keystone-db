@@ -65,7 +65,7 @@ pub fn invoke_mcp_tool(
     name: &str,
     args: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    crate::mcp::call_tool(db, name, args)
+    crate::mcp::call_tool(db, &crate::executor::rbac::Actor::unrestricted(), name, args)
 }
 
 /// Encodes a row's cells into the same length-prefixed wire format
