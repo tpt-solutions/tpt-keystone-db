@@ -3,7 +3,7 @@ name = "tpt-keystone"
 version = "0.1.0"
 edition = "2021"
 description = "TPT Keystone — cloud-native relational database engine"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "tpt_keystone"

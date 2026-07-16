@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Python client SDK for TPT Keystone, a hand-written Postgres-wire-compatible database engine"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "TPT" }]
 classifiers = [
     "Programming Language :: Python :: 3",

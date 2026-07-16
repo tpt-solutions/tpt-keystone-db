@@ -3,7 +3,7 @@ name = "tpt-cli"
 version = "0.1.0"
 edition = "2021"
 description = "tpt — single-binary CLI for TPT Keystone: interactive REPL, query execution, export/import, schema introspection, Flux stream tailing, and schema migrations."
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "tpt"

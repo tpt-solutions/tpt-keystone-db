@@ -3,7 +3,7 @@ name = "tpt-sdk"
 version = "0.1.0"
 edition = "2021"
 description = "TPT SDK/Rust — native desktop & server access to TPT Keystone and TPT Canvas"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "tpt_sdk"

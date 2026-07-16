@@ -168,4 +168,6 @@ still blocked on platform availability (Harbor's source connectors are no longer
 
 ## License
 
-Apache License 2.0, Copyright 2026 TPT Solutions. See [`LICENSE`](LICENSE).
+Dual-licensed under MIT ([`LICENSE-MIT`](LICENSE-MIT)) or Apache License 2.0
+([`LICENSE-APACHE`](LICENSE-APACHE)), Copyright 2026 TPT Solutions, at your option. See
+[`LICENSE`](LICENSE) for details.

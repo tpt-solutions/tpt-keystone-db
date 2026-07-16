@@ -3,7 +3,7 @@ name = "tpt-canvas"
 version = "0.1.0"
 edition = "2021"
 description = "TPT Canvas — the data-aware frontend framework for TPT Keystone (Rust -> WASM)"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

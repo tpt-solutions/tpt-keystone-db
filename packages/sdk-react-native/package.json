@@ -2,7 +2,7 @@
   "name": "@tpt/sdk-react-native",
   "version": "0.1.0",
   "description": "TPT SDK/React Native — TypeScript client for TPT Keystone's Canvas HTTP/JSON query bridge and Flux WebSocket stream, with offline-first caching and Flux push notifications for React Native / Expo apps (Phase 14).",
-  "license": "Apache-2.0",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

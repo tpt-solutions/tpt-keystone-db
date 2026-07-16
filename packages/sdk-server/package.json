@@ -2,7 +2,7 @@
   "name": "@tpt/sdk-server",
   "version": "0.1.0",
   "description": "TPT SDK/Server — Node.js backend client for TPT Keystone speaking the Postgres wire protocol v3 directly over TCP (no pg/postgres/pg-protocol dependency), plus a hand-rolled Flux WebSocket re-broadcaster (Phase 14).",
-  "license": "Apache-2.0",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -14,6 +14,15 @@
 # The engine defaults its Postgres-wire listener to 55432; we relocate it to
 # 5432 via TPT_PG_ADDR so the standard Postgres tooling port works out of the
 # box. State lives under ./tpt-data (mounted so it survives container restarts).
+#
+# SECURITY: this compose file exposes all six listeners on every interface, so
+# it requires bootstrap credentials rather than defaulting to the engine's
+# unauthenticated zero-config mode (fine for a local `cargo run`, not fine for
+# something that binds 0.0.0.0 in a container). Copy .env.example to .env and
+# set TPT_AUTH_BOOTSTRAP_USER/TPT_AUTH_BOOTSTRAP_PASSWORD before running
+# `docker compose up` — compose will refuse to start otherwise. Once a
+# bootstrap role exists, every wire-protocol connection (Postgres, HTTP,
+# WebSocket, gRPC, MCP) requires real SCRAM-SHA-256 auth; see README Security.
 services:
   keystone:
     build:
@@ -37,6 +46,8 @@ services:
       TPT_METRICS_ADDR: "0.0.0.0:9187"
       TPT_STORAGE_BACKEND: "local"
       TPT_LOCAL_STORE_DIR: "/data/store"
+      TPT_AUTH_BOOTSTRAP_USER: "${TPT_AUTH_BOOTSTRAP_USER:?Set TPT_AUTH_BOOTSTRAP_USER in a .env file (see .env.example) — this compose file no longer starts unauthenticated by default.}"
+      TPT_AUTH_BOOTSTRAP_PASSWORD: "${TPT_AUTH_BOOTSTRAP_PASSWORD:?Set TPT_AUTH_BOOTSTRAP_PASSWORD in a .env file (see .env.example) — this compose file no longer starts unauthenticated by default.}"
     volumes:
       - ./tpt-data:/data/store
     restart: unless-stopped
