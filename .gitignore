@@ -35,3 +35,4 @@ npm-debug.log*
 build/
 
 .mimocode/.cron-lock
+.kilo/plans/1784172865949-production-platform-gap-analysis.md
