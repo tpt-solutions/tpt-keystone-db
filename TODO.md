@@ -171,6 +171,16 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       name. Non-Rust packages (`sdk-go`, `sdk-python`, `packages/*`, `tpt_sdk` Flutter,
       `tpt-sdk-android`) are out of scope — they don't publish to crates.io and have their own
       registries/naming conventions.
+- [x] Re-ran `cargo publish --dry-run` per crate under the new `tpt-keystone-` names: `tpt-keystone`,
+      `tpt-keystone-canvas`, and `tpt-keystone-operator` all pass cleanly (warnings only — the operator
+      gets a harmless "readme outside package" warning since it ships its own `README.md` alongside the
+      `readme = "../README.md"` pointer). `tpt-keystone-sdk`/`tpt-keystone-cli` fail dry-run only on
+      their not-yet-published path deps (`tpt-keystone-canvas`/`tpt-keystone-sdk` respectively, now
+      referenced via the `package =` alias) — same expected first-publish failure as before the rename,
+      resolves once published in dependency order. `tpt-keystone-harbor`'s dry-run fails to link in
+      this sandbox because `libodbc` (unixODBC) isn't installed here — an environment gap unrelated to
+      the rename; its lib compiles and packages fine, only the final verification build of the `odbc-api`
+      dependency's system library link fails.
 
 ## Done outside this list (`cfdafce`)
 
