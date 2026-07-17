@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Canvas (Phase 13) HTTP/JSON query endpoint, alongside the other
     // auxiliary listeners — browsers can't speak the Postgres wire protocol
-    // directly, so this is the bridge `tpt-canvas`'s `useKeystoneQuery` hits.
+    // directly, so this is the bridge `tpt-keystone-canvas`'s `useKeystoneQuery` hits.
     let http_addr = std::env::var("TPT_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:5435".to_string());
     let http_listener = TcpListener::bind(&http_addr).await?;
     info!("TPT Keystone Canvas HTTP query endpoint listening on {http_addr}");

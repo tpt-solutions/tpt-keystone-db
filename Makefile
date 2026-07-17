@@ -2,7 +2,7 @@
 # no root Cargo workspace — see CLAUDE.md — so each crate normally needs its own
 # `cd`). Run `make help` for a list of targets.
 
-RUST_CRATES := tpt-keystone tpt-cli tpt-sdk tpt-harbor tpt-operator
+RUST_CRATES := tpt-keystone tpt-keystone-cli tpt-keystone-sdk tpt-keystone-harbor tpt-keystone-operator
 TS_PACKAGES := packages/sdk-web packages/sdk-server packages/sdk-edge packages/sdk-react-native
 
 .PHONY: help build test build-all test-all fmt clippy canvas run clean
@@ -14,7 +14,7 @@ help:
 	@echo "  make test         - cargo test for tpt-keystone only"
 	@echo "  make build-all    - cargo build for every Rust crate"
 	@echo "  make test-all     - cargo test for every Rust crate + npm test for every TS package"
-	@echo "  make canvas       - build tpt-canvas for wasm32-unknown-unknown"
+	@echo "  make canvas       - build tpt-keystone-canvas for wasm32-unknown-unknown"
 	@echo "  make fmt          - cargo fmt across every Rust crate"
 	@echo "  make clippy       - cargo clippy across every Rust crate"
 	@echo "  make clean        - cargo clean across every Rust crate"
@@ -45,13 +45,13 @@ test-all:
 	done
 
 canvas:
-	cd tpt-canvas && cargo build --target wasm32-unknown-unknown
+	cd tpt-keystone-canvas && cargo build --target wasm32-unknown-unknown
 
 fmt:
-	@for c in $(RUST_CRATES) tpt-canvas; do (cd $$c && cargo fmt); done
+	@for c in $(RUST_CRATES) tpt-keystone-canvas; do (cd $$c && cargo fmt); done
 
 clippy:
-	@for c in $(RUST_CRATES) tpt-canvas; do (cd $$c && cargo clippy) || exit 1; done
+	@for c in $(RUST_CRATES) tpt-keystone-canvas; do (cd $$c && cargo clippy) || exit 1; done
 
 clean:
-	@for c in $(RUST_CRATES) tpt-canvas; do (cd $$c && cargo clean); done
+	@for c in $(RUST_CRATES) tpt-keystone-canvas; do (cd $$c && cargo clean); done

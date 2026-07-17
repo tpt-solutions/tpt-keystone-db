@@ -40,7 +40,7 @@ a Zanzibar-style ReBAC model, once access control is built).
 - `http_query.rs` (Phase 13) is a second, much smaller entry point: a plain
   HTTP/JSON bridge (`POST /query`, `GET /schema`) so a browser — which can't
   speak the Postgres wire protocol directly — can still run SQL. Backs
-  `tpt-canvas` and every browser-facing SDK package.
+  `tpt-keystone-canvas` and every browser-facing SDK package.
 - `websocket.rs` (Phase 11) is a third entry point: a hand-rolled RFC 6455
   server that pushes Flux topic records to subscribed clients in real time.
 

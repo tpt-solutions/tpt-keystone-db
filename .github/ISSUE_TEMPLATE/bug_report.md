@@ -5,7 +5,7 @@ title: ""
 labels: bug
 ---
 
-**Which crate/package?** (e.g. `tpt-keystone`, `tpt-canvas`, `sdk-python`, `packages/sdk-web`, ...)
+**Which crate/package?** (e.g. `tpt-keystone`, `tpt-keystone-canvas`, `sdk-python`, `packages/sdk-web`, ...)
 
 **Describe the bug**
 A clear, concise description of what went wrong.

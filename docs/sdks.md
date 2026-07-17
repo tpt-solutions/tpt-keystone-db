@@ -8,20 +8,20 @@ for full detail; this is an index of what exists and where.
 
 | SDK | Path | Language/runtime | Notes |
 |---|---|---|---|
-| `tpt-sdk` | `tpt-sdk/` | Rust | `keystone`/`canvas`/`ffi` feature flags; sync + async clients; C ABI for FFI |
+| `tpt-keystone-sdk` | `tpt-keystone-sdk/` | Rust | `keystone`/`canvas`/`ffi` feature flags; sync + async clients; C ABI for FFI |
 | `@tpt/sdk-web` | `packages/sdk-web/` | Browser (TS) | HTTP/JSON bridge + Flux WebSocket; React hooks; Canvas plugin API |
 | `@tpt/sdk-server` | `packages/sdk-server/` | Node/Deno/Bun (TS) | Full Postgres wire client incl. streaming queries; Flux broadcast server |
 | `@tpt/sdk-edge` | `packages/sdk-edge/` | Cloudflare/Fastly/Vercel/Lambda@Edge (TS) | Zero-dependency, ~4.6KB; same HTTP/JSON bridge as sdk-web |
 | `tpt-sdk` (Python) | `sdk-python/` | Python 3 | `asyncio`; `to_pandas()`; Jupyter `_repr_html_` |
 | `sdk-go` | `sdk-go/` | Go | `context.Context` cancellation; connection pooling |
-| `tpt` CLI | `tpt-cli/` | — | REPL, `query`/`export`/`import`/`migrate`/`stream`/`schema` subcommands |
+| `tpt` CLI | `tpt-keystone-cli/` | — | REPL, `query`/`export`/`import`/`migrate`/`stream`/`schema` subcommands |
 
 ## Common shape across every SDK
 
 1. **Schema introspection** — every SDK can fetch live column/type/nullable/
    PK/FK info from a running Keystone node (`information_schema` over the
    wire, or `GET /schema` over HTTP for the browser/edge SDKs) and generate
-   typed bindings from it: `tpt-canvas`'s `tsgen`, `@tpt/sdk-web`'s
+   typed bindings from it: `tpt-keystone-canvas`'s `tsgen`, `@tpt/sdk-web`'s
    `tpt-typegen`, the Rust/TS/Python query-builder codegen below.
 2. **Typed query builder** (this session's addition — see below) — a
    schema-driven builder that produces parameterized SQL from typed method
@@ -56,8 +56,8 @@ get their own copy — the two packages have no workspace dependency between
 them, so this follows the same "duplicate the hand-written protocol code
 per package" precedent their wire clients already set, not a shared
 library), and Python:
-- Rust: `tpt-sdk/src/query_builder.rs` (`Table` trait + `QueryBuilder<T>`) +
-  `tpt-sdk/src/bin/typegen.rs` (`cargo run --bin tpt-sdk-typegen -- host:port`)
+- Rust: `tpt-keystone-sdk/src/query_builder.rs` (`Table` trait + `QueryBuilder<T>`) +
+  `tpt-keystone-sdk/src/bin/typegen.rs` (`cargo run --bin tpt-keystone-sdk-typegen -- host:port`)
 - TypeScript: `packages/sdk-web/src/query-builder.ts` (`TableDef<Row>` +
   `TypedQueryBuilder<Row>`, `.fetch()` over the HTTP bridge), with
   `bin/typegen.ts` extended to also emit a `TableDef` const per generated

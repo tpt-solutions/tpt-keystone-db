@@ -1,4 +1,4 @@
-# Build and install the `tpt` CLI (tpt-cli/) from source into %USERPROFILE%\.cargo\bin.
+# Build and install the `tpt` CLI (tpt-keystone-cli/) from source into %USERPROFILE%\.cargo\bin.
 # Requires a Rust toolchain (https://rustup.rs) - there is no prebuilt-binary
 # release pipeline yet (see TODO.md Phase 7).
 $ErrorActionPreference = "Stop"
@@ -10,8 +10,8 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-Write-Host "Building tpt-cli in release mode..."
-Push-Location (Join-Path $repoRoot "tpt-cli")
+Write-Host "Building tpt-keystone-cli in release mode..."
+Push-Location (Join-Path $repoRoot "tpt-keystone-cli")
 try {
     cargo install --path . --locked --force
 } finally {

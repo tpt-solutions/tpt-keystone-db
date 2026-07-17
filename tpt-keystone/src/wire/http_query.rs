@@ -2,7 +2,7 @@
 //! "own port, own accept loop, no external protocol crate" shape as
 //! `wire::websocket`'s Flux endpoint. Exists because a browser can't open a
 //! raw TCP socket to speak the Postgres wire protocol; this is the bridge
-//! that makes `tpt-canvas`'s `useKeystoneQuery` genuinely execute SQL against
+//! that makes `tpt-keystone-canvas`'s `useKeystoneQuery` genuinely execute SQL against
 //! `Database` instead of shipping with mock data.
 //!
 //! Explicit scope cuts (same discipline as `wire::websocket`): no auth (this
@@ -22,7 +22,7 @@
 //!   `GET /schema` is how a client learns the real type to parse a cell into.
 //! - `GET /schema` — introspects `Database::list_tables`/`get_table` and
 //!   returns `{"tables": [{"name":..., "columns":[{"name":..., "type":...}]}]}`,
-//!   consumed by `tpt-canvas`'s `tsgen` binary for TypeScript codegen.
+//!   consumed by `tpt-keystone-canvas`'s `tsgen` binary for TypeScript codegen.
 //!
 //! Auth: when `_tpt_roles` is non-empty, `POST /query` requires
 //! `Authorization: Basic <base64(user:pass)>` (verified via

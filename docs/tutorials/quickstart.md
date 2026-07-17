@@ -63,7 +63,7 @@ SELECT * FROM graph_bfs('follows', 'from_id', 'alice', 2);
 
 ```sh
 # CLI
-cargo install --path ../tpt-cli   # or use the tpt-cli/ crate directly
+cargo install --path ../tpt-keystone-cli   # or use the tpt-keystone-cli/ crate directly
 tpt query "SELECT 1"
 
 # Python

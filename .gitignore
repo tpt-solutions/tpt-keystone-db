@@ -31,7 +31,7 @@ dist/
 npm-debug.log*
 
 # Generated WASM bindings for the Canvas demo (rebuild via `npm run build:wasm`)
-tpt-canvas/examples/dashboard/pkg/
+tpt-keystone-canvas/examples/dashboard/pkg/
 
 # Flutter / Dart
 .dart_tool/

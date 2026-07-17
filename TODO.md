@@ -157,6 +157,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        `tpt-sdk` respectively) — expected on first publish; resolves once published in dependency order
        (canvas → sdk → cli), which the leaf dry-runs already validate.
 - [ ] No automated release pipeline in this pass — manual `cargo publish` when ready
+- [x] Renamed every non-core Rust crate (directory + Cargo.toml `name`) to carry a `tpt-keystone-`
+      prefix ahead of crates.io publish, to claim an unambiguous namespace and avoid name collisions:
+      `tpt-canvas` → `tpt-keystone-canvas`, `tpt-harbor` → `tpt-keystone-harbor`, `tpt-cli` →
+      `tpt-keystone-cli`, `tpt-sdk` → `tpt-keystone-sdk`, `tpt-operator` → `tpt-keystone-operator`
+      (`tpt-keystone` itself was already correctly named). Path deps between them now alias the local
+      dependency key to the new `package = "..."` name (e.g. `tpt-keystone-cli`'s Cargo.toml still
+      depends on a key named `tpt-sdk` but points `package =` at `tpt-keystone-sdk`), so no `use
+      tpt_sdk::`/`use tpt_canvas::` call sites needed to change. Binary names: `tpt-harbor` →
+      `tpt-keystone-harbor`, `tpt-operator` → `tpt-keystone-operator`, `tpt-sdk-typegen` →
+      `tpt-keystone-sdk-typegen`; the `tpt` (CLI) and `tpt-keystone` (core engine) binary names are
+      intentionally unchanged since they're short user-facing commands, not derived from the crate
+      name. Non-Rust packages (`sdk-go`, `sdk-python`, `packages/*`, `tpt_sdk` Flutter,
+      `tpt-sdk-android`) are out of scope — they don't publish to crates.io and have their own
+      registries/naming conventions.
 
 ## Done outside this list (`cfdafce`)
 

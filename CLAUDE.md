@@ -15,8 +15,9 @@ checking `TODO.md` first.
   `compress.rs`), Plexus/graph (`src/graph/`), Canopy/document (JSON operators + indexes, no separate
   module), Flux/streaming (`src/storage/flux.rs`, `src/wire/websocket.rs`, `src/wire/grpc/`) — plus two agent-facing
   layers, Synapse (`src/synapse/`) and Mirror (`src/mirror/`), and an MCP server (`src/mcp/`).
-- **`tpt-canvas/`** (WASM frontend), **`tpt-harbor/`** (migration platform), **`tpt-cli/`**, **`tpt-sdk/`**
-  (Rust SDK, incl. a `copy_in` bulk-ingest path over `COPY ... FROM STDIN`), **`tpt-operator/`**
+- **`tpt-keystone-canvas/`** (WASM frontend), **`tpt-keystone-harbor/`** (migration platform),
+  **`tpt-keystone-cli/`**, **`tpt-keystone-sdk/`**
+  (Rust SDK, incl. a `copy_in` bulk-ingest path over `COPY ... FROM STDIN`), **`tpt-keystone-operator/`**
   (Kubernetes operator), **`sdk-go/`**, **`sdk-python/`**, **`packages/`** (`sdk-web`/`sdk-server`/
   `sdk-edge`/`sdk-react-native` TypeScript SDKs), **`tpt_sdk/`** (Flutter/Dart), **`tpt-sdk-android/`**
   (Kotlin) are separate crates/packages, each building independently (no root Cargo workspace). The three
@@ -45,8 +46,9 @@ per-engine design specs.
 
 ## Build / run / test
 
-There is no workspace `Cargo.toml` at the repo root — every Rust crate (`tpt-keystone/`, `tpt-canvas/`,
-`tpt-harbor/`, `tpt-cli/`, `tpt-sdk/`, `tpt-operator/`) builds independently; `cd` into it first. The
+There is no workspace `Cargo.toml` at the repo root — every Rust crate (`tpt-keystone/`,
+`tpt-keystone-canvas/`, `tpt-keystone-harbor/`, `tpt-keystone-cli/`, `tpt-keystone-sdk/`,
+`tpt-keystone-operator/`) builds independently; `cd` into it first. The
 core engine, which every other crate/SDK talks to over the wire:
 
 ```
@@ -65,7 +67,7 @@ streaming endpoint (`TPT_FLUX_GRPC_ADDR`, default `:5436`, `src/wire/grpc/` — 
 HPACK + protobuf + gRPC framing, no `h2`/`tonic` crate, same from-scratch-wire-protocol rule as
 everything else), and Prometheus metrics (`TPT_METRICS_ADDR`, default `:9187`, `src/metrics.rs`).
 
-Other crates build/test the same way (`cd <dir> && cargo build`/`cargo test`); `tpt-canvas` additionally
+Other crates build/test the same way (`cd <dir> && cargo build`/`cargo test`); `tpt-keystone-canvas` additionally
 targets `wasm32-unknown-unknown` (`cargo build --target wasm32-unknown-unknown`) and has no meaningful
 native test path since it's browser-only. TypeScript packages (`packages/*`) use `npm run build`/
 `node --test`; `sdk-python` uses `uv pip install -e ".[pandas,dev]"`; `sdk-go` uses `go build ./...`/

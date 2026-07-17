@@ -6,7 +6,7 @@
 //!
 //! `SessionCursor` is the "debug REPL" *engine* — step forward/back through
 //! a session's events one at a time. A literal interactive terminal
-//! front-end wasn't built here (that's `tpt-cli`'s job); this module is the
+//! front-end wasn't built here (that's `tpt-keystone-cli`'s job); this module is the
 //! part a REPL, a dashboard's "replay controls", or a test assertion would
 //! all sit on top of.
 

@@ -8,11 +8,11 @@ This is a multi-engine data platform where the **Keystone relational engine** (`
 | Crate | Purpose | Status |
 |---|---|---|
 | `tpt-keystone/` | Core engine (relational + geo/graph/vector/time-series/document/streaming) | Substantial |
-| `tpt-sdk/` | Rust client SDK (sync + async, FFI) | Real, unverified by `cargo test` |
-| `tpt-cli/` | `tpt` CLI binary (REPL, query, export/import, migrate, stream) | Real |
-| `tpt-harbor/` | Migration platform (PG plus real InfluxDB/Kafka/vector-DB/Oracle source connectors; Oracle is reverse-engineered TTC and least verified) | Real |
-| `tpt-canvas/` | WASM frontend framework (builds to `wasm32-unknown-unknown`) | Real |
-| `tpt-operator/` | Kubernetes operator (CRD-based lifecycle) | Real |
+| `tpt-keystone-sdk/` | Rust client SDK (sync + async, FFI) | Real, unverified by `cargo test` |
+| `tpt-keystone-cli/` | `tpt` CLI binary (REPL, query, export/import, migrate, stream) | Real |
+| `tpt-keystone-harbor/` | Migration platform (PG plus real InfluxDB/Kafka/vector-DB/Oracle source connectors; Oracle is reverse-engineered TTC and least verified) | Real |
+| `tpt-keystone-canvas/` | WASM frontend framework (builds to `wasm32-unknown-unknown`) | Real |
+| `tpt-keystone-operator/` | Kubernetes operator (CRD-based lifecycle) | Real |
 
 **SDK packages**: `packages/sdk-web/`, `packages/sdk-server/`, `packages/sdk-edge/` (TypeScript), `sdk-python/` (Python), `sdk-go/` (Go) — all have real implementations, not stubs.
 

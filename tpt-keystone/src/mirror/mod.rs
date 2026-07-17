@@ -13,7 +13,7 @@
 //!   written as an immutable, ordered event to a per-session Flux topic
 //! - `replay` — session replay (`ReplayEngine`) and an event-by-event
 //!   stepper (`SessionCursor`) — the "debug REPL" *engine*; a literal
-//!   interactive terminal front-end wasn't built (that's `tpt-cli`'s job,
+//!   interactive terminal front-end wasn't built (that's `tpt-keystone-cli`'s job,
 //!   out of scope for this crate, same boundary Chronos/Plexus/Canopy never
 //!   crossed into a UI either)
 //! - `metrics` — per-agent latency/token/success-rate metrics, stored via a

@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [tpt-cli, tpt-sdk, tpt-harbor, tpt-operator]
+        crate: [tpt-keystone-cli, tpt-keystone-sdk, tpt-keystone-harbor, tpt-keystone-operator]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,7 +55,7 @@ jobs:
         working-directory: ${{ matrix.crate }}
         run: cargo test
       - name: Test (ffi feature)
-        if: matrix.crate == 'tpt-sdk'
+        if: matrix.crate == 'tpt-keystone-sdk'
         working-directory: ${{ matrix.crate }}
         run: cargo test --features ffi
 
@@ -63,7 +63,7 @@ jobs:
   # Canvas: WASM build only (no meaningful native test path).
   # ---------------------------------------------------------------------------
   canvas:
-    name: tpt-canvas (wasm32 build)
+    name: tpt-keystone-canvas (wasm32 build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,9 +73,9 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tpt-canvas
+          workspaces: tpt-keystone-canvas
       - name: Build wasm32
-        working-directory: tpt-canvas
+        working-directory: tpt-keystone-canvas
         run: cargo build --target wasm32-unknown-unknown
 
   # ---------------------------------------------------------------------------
@@ -89,13 +89,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [tpt-keystone, tpt-cli, tpt-sdk, tpt-harbor, tpt-operator, tpt-canvas]
+        crate: [tpt-keystone, tpt-keystone-cli, tpt-keystone-sdk, tpt-keystone-harbor, tpt-keystone-operator, tpt-keystone-canvas]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: ${{ matrix.crate == 'tpt-canvas' && 'wasm32-unknown-unknown' || '' }}
+          targets: ${{ matrix.crate == 'tpt-keystone-canvas' && 'wasm32-unknown-unknown' || '' }}
       - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:
@@ -104,7 +104,7 @@ jobs:
         working-directory: ${{ matrix.crate }}
         continue-on-error: true
         run: |
-          if [ "${{ matrix.crate }}" = "tpt-canvas" ]; then
+          if [ "${{ matrix.crate }}" = "tpt-keystone-canvas" ]; then
             cargo clippy --target wasm32-unknown-unknown --all-targets -- -W clippy::all
           else
             cargo clippy --all-targets -- -W clippy::all

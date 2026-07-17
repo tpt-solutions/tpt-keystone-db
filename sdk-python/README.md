@@ -3,7 +3,7 @@
 Python client for TPT Keystone (`pip install tpt-sdk`). Speaks the Postgres
 wire protocol v3 directly over `asyncio` TCP — no `psycopg2`/`asyncpg`/any
 Postgres driver dependency; `tpt_sdk/wire.py` is a hand-written client-side
-codec mirroring the Rust SDK's `tpt-sdk/src/keystone/wire.rs`, which mirrors
+codec mirroring the Rust SDK's `tpt-keystone-sdk/src/keystone/wire.rs`, which mirrors
 `tpt-keystone/src/wire` server-side.
 
 ```python

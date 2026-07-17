@@ -67,13 +67,13 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
 
 ## Frontend, SDKs, and migration tooling (separate crates/packages)
 
-- **`tpt-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, reactive
+- **`tpt-keystone-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, reactive
   primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/`<Canvas.Graph>`/`<Canvas.VectorSearch>`/
   `<Canvas.Document>`/`<Canvas.AgentMonitor>` components, auto WebSocket sync with Flux).
 - **`packages/sdk-web`**, **`packages/sdk-server`**, **`packages/sdk-edge`** — TypeScript SDKs for
   browsers, Node/Deno/Bun, and edge/Workers runtimes, each with a hand-written Postgres-wire or
   HTTP/JSON client (no `pg`/`postgres` deps).
-- **`tpt-sdk/`** — the Rust native SDK (sync + async clients, FFI/C ABI, zero-copy row views, a
+- **`tpt-keystone-sdk/`** — the Rust native SDK (sync + async clients, FFI/C ABI, zero-copy row views, a
   `copy_in` bulk-ingest path driving `COPY table FROM STDIN` instead of one round trip per row).
 - **`sdk-go/`**, **`sdk-python/`** — Go and Python clients, both hand-written wire-protocol codecs.
 - **`packages/sdk-react-native`**, **`tpt_sdk` (Flutter)**, **`tpt-sdk-android` (Kotlin)** — mobile SDKs:
@@ -81,15 +81,15 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
   cache-with-TTL storage adapter. Not a native Postgres-wire bridge — Canvas is the bridge, by design.
   React Native and Flutter are test-verified in this repo (`node --test`, `flutter test`); the Kotlin
   SDK is unverified here (no `gradle`/`kotlinc` on this machine). Swift/iOS remains unbuilt (no Xcode).
-- **`tpt-cli/`** — the `tpt` binary: REPL, `query`/`export`/`import`/`schema`/`stream`/`migrate`
+- **`tpt-keystone-cli/`** — the `tpt` binary: REPL, `query`/`export`/`import`/`schema`/`stream`/`migrate`
   subcommands.
-- **`tpt-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
+- **`tpt-keystone-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
   verify → cutover) targeting Keystone. PostgreSQL and PostGIS sources are fully implemented and
   verified against a live server; MongoDB/Neo4j/MySQL/MSSQL/InfluxDB/Kafka/vector-DB (Pinecone/Weaviate/
   Qdrant)/Elasticsearch/Oracle all now have real protocol-level source connectors, though most (and
   Oracle especially, which reverse-engineers the TTC wire protocol) are unverified against a live server
   of that kind. See `TODO.md` Phase 15 for the exact per-connector state.
-- **`tpt-operator/`** — a Kubernetes operator (kube-rs) for cluster lifecycle management.
+- **`tpt-keystone-operator/`** — a Kubernetes operator (kube-rs) for cluster lifecycle management.
 
 ## Getting started
 
@@ -104,7 +104,7 @@ cargo test                     # unit tests + the Phase 3 multi-node cloud-stora
 ```
 
 Once running, connect with any Postgres client, e.g. `psql -h localhost -p 55432`, or use the `tpt` CLI
-(`cd tpt-cli && cargo run -- query "SELECT 1"`). Other services on the same node: MCP on `:5433`
+(`cd tpt-keystone-cli && cargo run -- query "SELECT 1"`). Other services on the same node: MCP on `:5433`
 (`TPT_MCP_ADDR`), the HTTP/JSON bridge for browsers on `:5435` (`TPT_HTTP_ADDR`), the Flux WebSocket
 bridge on `:5434` (`TPT_FLUX_WS_ADDR`), the Flux gRPC streaming endpoint on `:5436`
 (`TPT_FLUX_GRPC_ADDR`), and Prometheus metrics on `:9187` (`TPT_METRICS_ADDR`).
@@ -143,9 +143,9 @@ This starts a single-node writer and maps the following host ports:
 - `tpt-keystone/` — the core engine crate: relational storage/SQL/wire protocol, plus every other
   engine's SQL-extension modules (`geo/`, `vector/`, `graph/`, `synapse/`, `mirror/`), the MCP server,
   and the HTTP/WebSocket/gRPC bridges
-- `tpt-canvas/` — the WASM frontend framework
-- `tpt-harbor/` — the migration platform crate
-- `tpt-cli/`, `tpt-sdk/`, `tpt-operator/` — the CLI, Rust SDK, and Kubernetes operator crates
+- `tpt-keystone-canvas/` — the WASM frontend framework
+- `tpt-keystone-harbor/` — the migration platform crate
+- `tpt-keystone-cli/`, `tpt-keystone-sdk/`, `tpt-keystone-operator/` — the CLI, Rust SDK, and Kubernetes operator crates
 - `sdk-go/`, `sdk-python/`, `packages/` — the Go, Python, and TypeScript (web/server/edge/react-native) SDKs
 - `tpt_sdk/` (Flutter), `tpt-sdk-android/` (Kotlin) — mobile SDKs
 - `docs/formats/` — versioned, language-independent on-disk format specs (SSTable, WAL, manifest/lease,

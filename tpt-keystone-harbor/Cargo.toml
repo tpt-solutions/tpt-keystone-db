@@ -1,0 +1,50 @@
+[package]
+name = "tpt-keystone-harbor"
+version = "0.1.0"
+edition = "2021"
+description = "tpt-keystone-harbor — universal data migration platform: discover/validate/snapshot/replicate/verify/cutover pipelines onto TPT engines. Harbor/PG (PostgreSQL -> Keystone) is fully implemented; other sources are trait-level stubs (see src/sources)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpt-solutions/tpt-keystone-db"
+documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
+readme = "../README.md"
+keywords = ["database", "migration", "etl", "postgres", "postgresql"]
+categories = ["database"]
+rust-version = "1.85"
+
+[lib]
+name = "tpt_harbor"
+
+[[bin]]
+name = "tpt-keystone-harbor"
+path = "src/main.rs"
+
+[dependencies]
+# Hand-written Postgres-wire-v3 client (src/pgwire.rs) — same "no pgwire crate"
+# rule as tpt-keystone itself. Harbor needs COPY-both / logical-replication
+# message support tpt-sdk's client doesn't have, so it isn't reused as-is;
+# both Harbor/PG's source (real Postgres) and its target (Keystone) connect
+# through this one client, since both speak the same wire protocol.
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "time", "fs", "sync", "signal"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+async-trait = "0.1"
+# Harbor/ODBC (sources/odbc.rs): a safe wrapper over the OS driver manager
+# (unixODBC / Windows ODBC) and whatever vendor ODBC driver is installed at
+# runtime — not a hand-rolled reimplementation of a vendor's own wire
+# protocol, so this doesn't conflict with this crate's "no pgwire crate"
+# rule above (there is no publicly documented wire protocol here to
+# reimplement in the first place; the driver manager + vendor driver do
+# that opaquely). Generic across whatever database has an ODBC driver
+# installed — unlike this crate's other connectors, it isn't tied to one
+# vendor (Oracle, named in earlier design notes, now has its own
+# hand-written TNS connector in sources/oracle.rs; ODBC's value here is
+# covering everything else: DB2, Sybase, Teradata, Snowflake, etc.).
+odbc-api = "28"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,31 @@
+[package]
+name = "tpt-keystone-cli"
+version = "0.1.0"
+edition = "2021"
+description = "tpt — single-binary CLI for TPT Keystone: interactive REPL, query execution, export/import, schema introspection, Flux stream tailing, and schema migrations."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpt-solutions/tpt-keystone-db"
+documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
+readme = "../README.md"
+keywords = ["database", "cli", "sql", "postgres", "repl"]
+categories = ["command-line-utilities", "database"]
+rust-version = "1.85"
+
+[[bin]]
+name = "tpt"
+path = "src/main.rs"
+
+[dependencies]
+# Reuses the hand-written Postgres-wire-v3 client from tpt-sdk (no pgwire/
+# tokio-postgres) rather than re-implementing wire::Conn a third time.
+tpt-sdk = { package = "tpt-keystone-sdk", path = "../tpt-keystone-sdk", version = "0.1.0", default-features = false, features = ["keystone"] }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+# For the hand-rolled Flux WebSocket client (stream.rs) — same RFC 6455
+# handshake digest and framing this project already hand-writes server-side
+# in tpt-keystone/src/wire/websocket.rs; sha1/base64 aren't the "from
+# scratch" boundary, only wire/parsing layers are (see that module's doc).
+base64 = "0.22"
+sha1 = "0.10"
+rand = "0.8"
+anyhow = "1"

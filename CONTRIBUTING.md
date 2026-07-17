@@ -25,7 +25,7 @@ Thanks for your interest in contributing. This is a from-scratch, multi-engine d
 
 1. Fork and branch from `master`.
 2. Match the existing code's documentation style: when you make a deliberate scope cut or leave a
-   known limitation, say so explicitly in a doc comment (see `tpt-canvas/src/lib.rs`'s module doc
+   known limitation, say so explicitly in a doc comment (see `tpt-keystone-canvas/src/lib.rs`'s module doc
    comment for the convention) rather than leaving it undocumented.
 3. Add or extend tests for the crate you're touching (`cargo test`, or `cargo test <module>::` for a
    single suite — see `CLAUDE.md` for per-crate specifics). A change with no test coverage is a much
