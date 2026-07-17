@@ -1,3 +1,11 @@
+//! Kubernetes operator for TPT Keystone clusters (Phase 16 / `TODO.md`).
+//!
+//! Watches `KeystoneCluster` custom resources (CRD defined in `types.rs`) and
+//! reconciles Kubernetes `StatefulSet`, `Deployment`, and `Service` objects to
+//! match the desired cluster state. Autoscaling (`autoscale.rs`) adjusts
+//! replica counts based on load signals. Run `tpt-operator --print-crd` to
+//! emit the `KeystoneCluster` CRD YAML for `kubectl apply -f -`.
+
 mod autoscale;
 mod reconcile;
 mod resources;
