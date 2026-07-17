@@ -13,6 +13,7 @@ use super::{parse_rows, resolve_table_ref, CteContext};
 use crate::geo::geometry::Geometry;
 use crate::sql::ast::{BinOp, Expr, Join, JoinType, TableRef};
 use crate::storage::database::Database;
+use crate::storage::database::txn::TxnHandle;
 use crate::storage::{StorageEngine, TableSchema};
 
 /// Resolve a FROM clause's primary table, using a B-Tree index point lookup
@@ -20,6 +21,11 @@ use crate::storage::{StorageEngine, TableSchema};
 /// top-level equality predicate on an indexed column. The full WHERE clause
 /// is still re-evaluated by the caller afterwards, so an imperfect (or
 /// stale) predicate match here can only cost performance, never correctness.
+///
+/// When `txn` is `Some`, the index fast-paths are skipped (they read only
+/// committed state and would miss the transaction's own staged writes); the
+/// full `resolve_table_ref` txn-aware scan is used instead, so a transaction
+/// always sees a consistent view of its own writes.
 pub fn resolve_primary_table(
     table: &TableRef,
     where_: &Option<Expr>,
@@ -27,46 +33,49 @@ pub fn resolve_primary_table(
     cte_ctx: &mut CteContext,
     outer: &[eval::OuterRow],
     params: &[eval::Value],
+    txn: Option<&TxnHandle>,
 ) -> anyhow::Result<(Option<Arc<TableSchema>>, Vec<Vec<Option<Vec<u8>>>>)> {
-    if table.subquery.is_none() && cte_ctx.get(&table.name).is_none() {
-        if let Some(schema) = db.get_table(&table.name)? {
-            if let Some((col, literal)) = extract_equality_predicate(where_, &schema) {
-                if db.indexed_column(&table.name, &col) {
-                    let hit = db.index_lookup(&table.name, &col, &literal)?;
-                    let schema_arc = Arc::new(schema.clone());
-                    let rows = match hit {
-                        Some(kv) => parse_rows(std::slice::from_ref(&kv), &Some(schema)),
-                        None => Vec::new(),
-                    };
-                    return Ok((Some(schema_arc), rows));
-                }
-            } else if let Some(sp) = extract_spatial_predicate(where_, &schema) {
-                if db.indexed_column_spatial(&table.name, &sp.col) {
-                    if let Some(hits) = db.spatial_query(
-                        &table.name,
-                        &sp.col,
-                        sp.lon,
-                        sp.lat,
-                        sp.radius_m,
-                        sp.time_range,
-                    ) {
+    if txn.is_none() {
+        if table.subquery.is_none() && cte_ctx.get(&table.name).is_none() {
+            if let Some(schema) = db.get_table(&table.name)? {
+                if let Some((col, literal)) = extract_equality_predicate(where_, &schema) {
+                    if db.indexed_column(&table.name, &col) {
+                        let hit = db.index_lookup(&table.name, &col, &literal)?;
                         let schema_arc = Arc::new(schema.clone());
-                        let rows = parse_rows(&hits, &Some(schema));
+                        let rows = match hit {
+                            Some(kv) => parse_rows(std::slice::from_ref(&kv), &Some(schema)),
+                            None => Vec::new(),
+                        };
                         return Ok((Some(schema_arc), rows));
                     }
-                }
-            } else if let Some(tp) = extract_time_bucket_predicate(where_, &schema) {
-                if db.indexed_column_time(&table.name, &tp.col) {
-                    if let Some(hits) = db.time_range_query(&table.name, &tp.col, tp.t0, tp.t1) {
-                        let schema_arc = Arc::new(schema.clone());
-                        let rows = parse_rows(&hits, &Some(schema));
-                        return Ok((Some(schema_arc), rows));
+                } else if let Some(sp) = extract_spatial_predicate(where_, &schema) {
+                    if db.indexed_column_spatial(&table.name, &sp.col) {
+                        if let Some(hits) = db.spatial_query(
+                            &table.name,
+                            &sp.col,
+                            sp.lon,
+                            sp.lat,
+                            sp.radius_m,
+                            sp.time_range,
+                        ) {
+                            let schema_arc = Arc::new(schema.clone());
+                            let rows = parse_rows(&hits, &Some(schema));
+                            return Ok((Some(schema_arc), rows));
+                        }
+                    }
+                } else if let Some(tp) = extract_time_bucket_predicate(where_, &schema) {
+                    if db.indexed_column_time(&table.name, &tp.col) {
+                        if let Some(hits) = db.time_range_query(&table.name, &tp.col, tp.t0, tp.t1) {
+                            let schema_arc = Arc::new(schema.clone());
+                            let rows = parse_rows(&hits, &Some(schema));
+                            return Ok((Some(schema_arc), rows));
+                        }
                     }
                 }
             }
         }
     }
-    resolve_table_ref(table, db, cte_ctx, outer, params)
+    resolve_table_ref(table, db, cte_ctx, outer, params, txn)
 }
 
 /// A `ST_DWithin(col, point, radius)` predicate, optionally AND-combined

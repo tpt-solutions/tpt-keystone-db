@@ -7,6 +7,7 @@ use super::eval::{eval_expr_with_db, RowContext, Value};
 use super::parse_rows;
 use super::QueryResult;
 use crate::sql::ast::Expr;
+use crate::storage::database::txn::TxnHandle;
 use crate::storage::database::Database;
 use crate::storage::{ColumnType, StorageEngine, TableSchema};
 
@@ -138,13 +139,14 @@ fn normalize_vector_cells(schema: &TableSchema, cells: &mut [Option<Vec<u8>>]) {
 fn check_unique_constraints(
     schema: &TableSchema,
     db: &Arc<Database>,
+    txn: Option<&TxnHandle>,
     cells: &[Option<Vec<u8>>],
     exclude_key: Option<&[u8]>,
 ) -> anyhow::Result<()> {
     if schema.unique_groups.is_empty() {
         return Ok(());
     }
-    let raw_rows = db.scan(&schema.name)?;
+    let raw_rows = db.txn_scan(txn, &schema.name)?;
     let existing = parse_rows(&raw_rows, &Some(schema.clone()));
     for group in &schema.unique_groups {
         if group
@@ -183,6 +185,7 @@ fn check_unique_constraints(
 fn check_foreign_keys(
     schema: &TableSchema,
     db: &Arc<Database>,
+    txn: Option<&TxnHandle>,
     cells: &[Option<Vec<u8>>],
 ) -> anyhow::Result<()> {
     for fk in &schema.foreign_keys {
@@ -199,7 +202,7 @@ fn check_foreign_keys(
             .ok_or_else(|| {
                 anyhow::anyhow!("referenced column \"{}\" does not exist", fk.ref_column)
             })?;
-        let raw_rows = db.scan(&fk.ref_table)?;
+        let raw_rows = db.txn_scan(txn, &fk.ref_table)?;
         let ref_rows = parse_rows(&raw_rows, &Some(ref_schema));
         let exists = ref_rows
             .iter()
@@ -253,6 +256,7 @@ fn check_json_schemas(schema: &TableSchema, cells: &[Option<Vec<u8>>]) -> anyhow
 pub(super) fn execute_insert(
     insert: crate::sql::ast::InsertStmt,
     db: Arc<Database>,
+    txn: Option<&TxnHandle>,
     params: &[Value],
 ) -> anyhow::Result<QueryResult> {
     let schema = db
@@ -262,8 +266,8 @@ pub(super) fn execute_insert(
     let mut row_count = 0usize;
     for row_values in &insert.values {
         let cells = resolve_insert_row(&schema, &insert.columns, row_values, &db, params)?;
-        check_unique_constraints(&schema, &db, &cells, None)?;
-        check_foreign_keys(&schema, &db, &cells)?;
+        check_unique_constraints(&schema, &db, txn, &cells, None)?;
+        check_foreign_keys(&schema, &db, txn, &cells)?;
         check_json_schemas(&schema, &cells)?;
 
         let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
@@ -271,7 +275,7 @@ pub(super) fn execute_insert(
 
         let value_buf = build_row_value(&schema, &cells, &db);
 
-        db.write(&insert.table, &pk_value, &value_buf)?;
+        db.txn_write(txn, &insert.table, &pk_value, &value_buf)?;
         publish_cdc_event(
             &db,
             &insert.table,
@@ -337,11 +341,12 @@ fn publish_cdc_event(
 pub(super) fn execute_delete(
     delete: crate::sql::ast::DeleteStmt,
     db: Arc<Database>,
+    txn: Option<&TxnHandle>,
     params: &[Value],
 ) -> anyhow::Result<QueryResult> {
     let schema = db.get_table(&delete.table)?;
     let schema_arc = schema.clone().map(Arc::new);
-    let raw_rows = db.scan(&delete.table)?;
+    let raw_rows = db.txn_scan(txn, &delete.table)?;
     let parsed = parse_rows(&raw_rows, &schema);
 
     let mut deleted = 0usize;
@@ -355,7 +360,7 @@ pub(super) fn execute_delete(
             None => true,
         };
         if matches {
-            db.delete(&delete.table, &kv.key)?;
+            db.txn_delete(txn, &delete.table, &kv.key)?;
             if let Some(schema) = &schema {
                 publish_cdc_event(
                     &db,
@@ -381,13 +386,14 @@ pub(super) fn execute_delete(
 pub(super) fn execute_update(
     update: crate::sql::ast::UpdateStmt,
     db: Arc<Database>,
+    txn: Option<&TxnHandle>,
     params: &[Value],
 ) -> anyhow::Result<QueryResult> {
     let schema = db
         .get_table(&update.table)?
         .ok_or_else(|| anyhow::anyhow!("table \"{}\" does not exist", update.table))?;
     let schema_arc = Arc::new(schema.clone());
-    let raw_rows = db.scan(&update.table)?;
+    let raw_rows = db.txn_scan(txn, &update.table)?;
     let parsed = parse_rows(&raw_rows, &Some(schema.clone()));
 
     let mut updated = 0usize;
@@ -414,12 +420,12 @@ pub(super) fn execute_update(
         }
         normalize_vector_cells(&schema, &mut new_row);
 
-        check_unique_constraints(&schema, &db, &new_row, Some(&kv.key))?;
-        check_foreign_keys(&schema, &db, &new_row)?;
+        check_unique_constraints(&schema, &db, txn, &new_row, Some(&kv.key))?;
+        check_foreign_keys(&schema, &db, txn, &new_row)?;
         check_json_schemas(&schema, &new_row)?;
 
         let value_buf = build_row_value(&schema, &new_row, &db);
-        db.write(&update.table, &kv.key, &value_buf)?;
+        db.txn_write(txn, &update.table, &kv.key, &value_buf)?;
         publish_cdc_event(
             &db,
             &update.table,

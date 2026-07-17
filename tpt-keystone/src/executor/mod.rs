@@ -27,6 +27,8 @@ mod pg_dump_tests;
 mod phase4_tests;
 #[cfg(test)]
 mod ddl_tests;
+#[cfg(test)]
+mod transaction_tests;
 mod planner;
 pub mod rbac;
 #[cfg(test)]
@@ -94,7 +96,8 @@ pub fn execute_query(sql_text: &str, db: Arc<Database>) -> anyhow::Result<QueryR
 }
 
 /// Execute an already-parsed statement, with bound `$n` parameter values
-/// (used by the extended query protocol's Bind/Execute).
+/// (used by the extended query protocol's Bind/Execute). Runs autocommit
+/// (no open transaction).
 #[tracing::instrument(skip_all)]
 pub fn execute_parsed(
     stmt: Stmt,
@@ -104,25 +107,29 @@ pub fn execute_parsed(
     // Trusted/internal callers (in-process server code, catalog maintenance,
     // the test suite) run unrestricted: authorization is enforced at the wire
     // layer via `execute_parsed_as`, which supplies the authenticated `Actor`.
-    execute_parsed_as(stmt, db, params, &rbac::Actor::unrestricted())
+    execute_parsed_as(stmt, db, params, &rbac::Actor::unrestricted(), None)
 }
 
 /// Execute an already-parsed statement on behalf of an authenticated
 /// connection. Runs the RBAC `Actor::check` predicate first; on denial the
 /// returned error downcasts to `rbac::InsufficientPrivilege` so the wire
-/// layer can emit SQLSTATE `42501`.
+/// layer can emit SQLSTATE `42501`. `txn`, when `Some`, routes all reads and
+/// writes through the connection's open transaction (Stage 1 read-committed)
+/// so its own uncommitted writes are visible to it and atomically committed
+/// on `COMMIT`.
 #[tracing::instrument(skip_all)]
 pub fn execute_parsed_as(
     stmt: Stmt,
     db: Arc<Database>,
     params: &[Value],
     actor: &rbac::Actor,
+    txn: Option<&crate::storage::database::txn::TxnHandle>,
 ) -> anyhow::Result<QueryResult> {
     let start = std::time::Instant::now();
     let result = actor
         .check(&db, &stmt)
         .map_err(|e| anyhow::Error::new(e))
-        .and_then(|()| execute_parsed_inner(stmt, db, params));
+        .and_then(|()| execute_parsed_inner(stmt, db, params, txn));
     crate::metrics::Metrics::global().record_query(start.elapsed(), result.is_err());
     result
 }
@@ -131,14 +138,15 @@ fn execute_parsed_inner(
     stmt: Stmt,
     db: Arc<Database>,
     params: &[Value],
+    txn: Option<&crate::storage::database::txn::TxnHandle>,
 ) -> anyhow::Result<QueryResult> {
     match stmt {
         Stmt::Select(select) => {
-            execute_select_with_cte(select, db, &mut CteContext::new(), &[], params)
+            execute_select_with_cte(select, db, &mut CteContext::new(), &[], params, txn)
         }
-        Stmt::Insert(insert) => dml::execute_insert(insert, db, params),
-        Stmt::Delete(delete) => dml::execute_delete(delete, db, params),
-        Stmt::Update(update) => dml::execute_update(update, db, params),
+        Stmt::Insert(insert) => dml::execute_insert(insert, db, txn, params),
+        Stmt::Delete(delete) => dml::execute_delete(delete, db, txn, params),
+        Stmt::Update(update) => dml::execute_update(update, db, txn, params),
         Stmt::CreateTable(ct) => ddl::execute_create_table(ct, db),
         Stmt::DropTable(dt) => ddl::execute_drop_table(dt, db),
         Stmt::CreateIndex(ci) => ddl::execute_create_index(ci, db),
@@ -168,16 +176,26 @@ fn execute_parsed_inner(
             rows: vec![],
             tag: "BEGIN".into(),
         }),
-        Stmt::Commit => Ok(QueryResult {
-            fields: vec![],
-            rows: vec![],
-            tag: "COMMIT".into(),
-        }),
-        Stmt::Rollback => Ok(QueryResult {
-            fields: vec![],
-            rows: vec![],
-            tag: "ROLLBACK".into(),
-        }),
+        Stmt::Commit => {
+            if let Some(t) = txn {
+                db.commit_txn(t)?;
+            }
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "COMMIT".into(),
+            })
+        }
+        Stmt::Rollback => {
+            if let Some(t) = txn {
+                db.rollback_txn(t);
+            }
+            Ok(QueryResult {
+                fields: vec![],
+                rows: vec![],
+                tag: "ROLLBACK".into(),
+            })
+        }
         Stmt::AlterTable(at) => ddl::execute_alter_table(at, db),
         Stmt::DeclareCursor(_) | Stmt::Fetch(_) | Stmt::MoveCursor(_) | Stmt::CloseCursor(_) => {
             anyhow::bail!("cursor statements are only supported over the simple query protocol")
@@ -367,13 +385,15 @@ pub fn describe_select(
 ) -> anyhow::Result<Vec<FieldDescription>> {
     let mut cte_ctx = CteContext::new();
     for cte in &select.ctes {
-        select::materialize_cte(cte, db.clone(), &mut cte_ctx, &[], &[])?;
+        select::materialize_cte(cte, db.clone(), &mut cte_ctx, &[], &[], None)?;
     }
     let schema = if let Some(twj) = &select.from {
-        let (primary_schema, _) = resolve_table_ref(&twj.primary, &db, &mut cte_ctx, &[], &[])?;
+        let (primary_schema, _) =
+            resolve_table_ref(&twj.primary, &db, &mut cte_ctx, &[], &[], None)?;
         let mut result_schema = primary_schema;
         for join in &twj.joins {
-            let (join_schema, _) = resolve_table_ref(&join.table, &db, &mut cte_ctx, &[], &[])?;
+            let (join_schema, _) =
+                resolve_table_ref(&join.table, &db, &mut cte_ctx, &[], &[], None)?;
             result_schema = merge_schema(&result_schema, &join_schema);
         }
         result_schema
@@ -391,10 +411,17 @@ fn resolve_table_ref(
     cte_ctx: &mut CteContext,
     outer: &[OuterRow],
     params: &[Value],
+    txn: Option<&crate::storage::database::txn::TxnHandle>,
 ) -> anyhow::Result<(Option<Arc<TableSchema>>, Vec<Vec<Option<Vec<u8>>>>)> {
     if let Some(subquery) = &table.subquery {
-        let result =
-            execute_select_with_cte((**subquery).clone(), db.clone(), cte_ctx, outer, params)?;
+        let result = execute_select_with_cte(
+            (**subquery).clone(),
+            db.clone(),
+            cte_ctx,
+            outer,
+            params,
+            txn,
+        )?;
         let schema = schema_from_fields(&table.name, &result.fields);
         return Ok((Some(Arc::new(schema)), result.rows));
     }
@@ -409,7 +436,7 @@ fn resolve_table_ref(
         return Ok((Some(schema), rows));
     }
     let schema = db.get_table(&table.name)?;
-    let rows = db.scan(&table.name)?;
+    let rows = db.txn_scan(txn, &table.name)?;
     let schema_arc = schema.clone().map(Arc::new);
     Ok((schema_arc, parse_rows(&rows, &schema)))
 }

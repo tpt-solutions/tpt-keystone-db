@@ -101,10 +101,10 @@ fn handle_query(db: &Arc<Database>, body: &[u8], actor: &Actor) -> Vec<u8> {
     let result = if params.is_empty() {
         // Reuse the trusted path but still authorize via the actor.
         db.parse_cached(sql)
-            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &[], actor))
+            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &[], actor, None))
     } else {
         db.parse_cached(sql)
-            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &params, actor))
+            .and_then(|stmt| execute_parsed_as(stmt, db.clone(), &params, actor, None))
     };
 
     match result {

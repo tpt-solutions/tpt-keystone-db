@@ -171,14 +171,14 @@ fn query(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
             "query() only accepts read-only statements (SELECT/SHOW) — use mutate() for writes/DDL"
         );
     }
-    let result = execute_parsed_as(stmt, db.clone(), &[], actor)?;
+    let result = execute_parsed_as(stmt, db.clone(), &[], actor, None)?;
     Ok(rows_to_json(&result))
 }
 
 fn mutate(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
     let sql = arg_sql(args)?;
     let stmt = db.parse_cached(sql)?;
-    let result = execute_parsed_as(stmt, db.clone(), &[], actor)?;
+    let result = execute_parsed_as(stmt, db.clone(), &[], actor, None)?;
     // DML tags are "INSERT 0 <n>" / "UPDATE <n>" / "DELETE <n>"; DDL tags
     // (e.g. "CREATE TABLE") have no trailing count.
     let rows_affected = result
@@ -393,7 +393,7 @@ fn select_one_by_column(
 ) -> Result<Option<Vec<Option<Vec<u8>>>>> {
     let sql = format!("SELECT * FROM {table} WHERE {column} = $1 LIMIT 1");
     let stmt = db.parse_cached(&sql)?;
-    let result = execute_parsed_as(stmt, db.clone(), &[value], actor)?;
+    let result = execute_parsed_as(stmt, db.clone(), &[value], actor, None)?;
     Ok(result.rows.into_iter().next())
 }
 
@@ -407,7 +407,7 @@ fn select_many_by_column(
 ) -> Result<Vec<Vec<Option<Vec<u8>>>>> {
     let sql = format!("SELECT * FROM {table} WHERE {column} = $1 LIMIT {limit}");
     let stmt = db.parse_cached(&sql)?;
-    let result = execute_parsed_as(stmt, db.clone(), &[value], actor)?;
+    let result = execute_parsed_as(stmt, db.clone(), &[value], actor, None)?;
     Ok(result.rows)
 }
 

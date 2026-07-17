@@ -25,36 +25,42 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] Extend `phase3_tests.rs`/`chaos_tests.rs` with atomicity/isolation/crash-mid-transaction tests
 - [ ] Manual verification: concurrent `BEGIN`/`COMMIT`/`ROLLBACK` from two `psql` sessions
 
-## Phase 2 — DDL/catalog bug fixes
+## Phase 2 — DDL/catalog bug fixes ✅ done (`cfdafce`)
 
-- [ ] `CREATE SEQUENCE IF NOT EXISTS` not enforced — add `if_not_exists` to `CreateSequenceStmt`
-      (`sql/ast.rs`), wire through `parser.rs` and `execute_create_sequence` (`ddl.rs`); update
-      `docs/sql-reference.md:37`
-- [ ] `DROP TABLE` is a complete no-op — add `Database::drop_table` (schema removal, row-data purge,
-      per-table secondary-index cleanup); verify `if_exists` is actually wired; document the Phase-3
-      reader-node convergence gap (`refresh()`'s `.entry().or_insert()`) as a known follow-up
-- [ ] `ALTER TABLE ADD/DROP COLUMN` no-op — add `Database::alter_table_add_column`/
-      `alter_table_drop_column` (hold the `lsm` mutex for the whole scan-rewrite pass, use the
-      already-locked guard directly, never re-enter via `StorageEngine` trait methods); reject
-      `DROP COLUMN` on indexed/PK/unique/FK columns; document non-crash-atomicity and global-lock
-      duration as accepted limitations
-- [ ] Extend `phase4_tests.rs` / add `ddl_tests.rs` covering all three fixes
+- [x] `CREATE SEQUENCE IF NOT EXISTS` not enforced — added `if_not_exists` to `CreateSequenceStmt`
+      (`sql/ast.rs`), wired through `parser.rs` and `execute_create_sequence` (`ddl.rs`)
+- [x] `DROP TABLE` is a complete no-op — added `Database::drop_table` (schema removal, row-data purge,
+      per-table secondary-index cleanup incl. spatial/time/graph/JSON/FTS/vector/IVF-PQ, implicit
+      `__cdc_<table>` Flux topic cleanup); `if_exists` wired; the Phase-3 reader-node convergence gap
+      (`refresh()`'s `.entry().or_insert()` never removing dropped schemas) is documented in
+      `catalog.rs` as a known follow-up, not fixed here
+- [x] `ALTER TABLE ADD/DROP COLUMN` no-op — added `Database::alter_table_add_column`/
+      `alter_table_drop_column` (single LSM-mutex hold across the whole scan-rewrite pass, no
+      `StorageEngine` trait re-entry); `DROP COLUMN` rejected on PK/unique/FK/indexed columns; `ADD
+      COLUMN` with `NOT NULL` and no default is rejected rather than silently backfilling NULL;
+      non-crash-atomicity and global-lock duration remain accepted limitations (documented in code)
+- [x] `ddl_tests.rs` added, covering all three fixes plus the `DROP COLUMN` rejection paths and the
+      `ADD COLUMN NOT NULL`-without-default rejection
 
-## Phase 3 — Auth + rate limiting for HTTP/WebSocket/gRPC/MCP bridges
+## Phase 3 — Auth + rate limiting for HTTP/WebSocket/gRPC/MCP bridges ✅ done (`cfdafce`)
 
-- [ ] `RoleStore::verify_password` + shared `wire::bridge_auth::authenticate_actor` helper
-      (zero-config-preserving: `roles.is_empty()?` checked first, exactly like `session::run`)
-- [ ] HTTP + WebSocket (at Upgrade) + gRPC (metadata header) accept `Authorization: Basic`, checked
-      via the shared helper; MCP keeps its `X-TPT-Token` gate but gets an `Actor` threaded through too
-- [ ] Thread `Actor` into `http_query.rs` and `mcp/tools.rs`/`protocol.rs` for real per-table RBAC
-- [ ] Document (don't attempt to fix here) that `websocket.rs`/`wire/grpc/mod.rs` get authentication
+- [x] `wire::bridge_auth` module: `authenticate_basic` (HTTP/WebSocket/gRPC, zero-config-preserving —
+      `roles.is_empty()?` short-circuits to `Actor::unrestricted()` exactly like `session::run`) and
+      `actor_for_mcp` (resolves an `Actor` for the existing `X-TPT-Token` gate, requiring a superuser
+      role to act as when a token gate is configured)
+- [x] HTTP (`Authorization: Basic`) + WebSocket (at Upgrade) + gRPC (metadata header) accept Basic
+      auth via the shared helper; MCP keeps its `X-TPT-Token` gate, now resolving an `Actor` too
+- [x] `Actor` threaded into `http_query.rs` (`execute_parsed_as`) and `mcp/tools.rs`/`protocol.rs`
+      (`query`/`mutate`/`related` tools) for real per-table RBAC
+- [x] Rate limiting: `TPT_HTTP_MAX_CONNECTIONS`, `TPT_FLUX_WS_MAX_CONNECTIONS`,
+      `TPT_FLUX_GRPC_MAX_CONNECTIONS`, `TPT_MCP_MAX_CONNECTIONS` (default 1000) — `tokio::sync::
+      Semaphore` acquired per-connection in `main.rs`, held for the connection's lifetime
+- [x] `bridge_auth_tests.rs` (new); `websocket_tests.rs`/`http_query_tests.rs`/`mcp/tests.rs`/
+      `mcp/protocol_tests.rs`/`mcp/tools_tests.rs` extended
+- [ ] Still open: document (don't fix) that `websocket.rs`/`wire/grpc/mod.rs` get authentication
       only, not per-topic authorization, since there's no topic-level privilege model in `rbac.rs`
-- [ ] Rate limiting: `TPT_HTTP_MAX_CONNECTIONS`, `TPT_FLUX_WS_MAX_CONNECTIONS`,
-      `TPT_FLUX_GRPC_MAX_CONNECTIONS`, `TPT_MCP_MAX_CONNECTIONS` (default 1000, `Semaphore` pattern)
-- [ ] Update `docs/security_audit_phase12.md` (stale, predates Phase 20 RBAC, never scoped these
-      four listeners)
-- [ ] New WebSocket auth test file; extend `mcp/tests.rs`, `http_query_tests.rs`,
-      `tools/verify_flux_grpc.py`
+- [ ] Still open: update `docs/security_audit_phase12.md` (stale, predates Phase 20 RBAC and this
+      auth work, never scoped these four listeners) and extend `tools/verify_flux_grpc.py`
 
 ## Phase 4 — Canvas frontend build-out
 
@@ -97,3 +103,9 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       fields
 - [ ] `cargo publish --dry-run` per crate in dependency order, fix whatever it flags
 - [ ] No automated release pipeline in this pass — manual `cargo publish` when ready
+
+## Done outside this list (`cfdafce`)
+
+- [x] `tpt-harbor`: ODBC source connector (`sources/odbc.rs`, `SourceKind::Odbc`) — vendor-agnostic
+      DSN-based connector, targets Keystone by default since ODBC's real target engine depends on
+      whatever's behind the DSN and the registry has no way to know

@@ -443,6 +443,7 @@ impl RowContext {
             &mut super::CteContext::new(),
             &outer,
             &self.params,
+            None,
         )?;
         Ok(result.rows)
     }

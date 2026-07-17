@@ -24,7 +24,100 @@ impl StorageEngine for Database {
             .lock()
             .unwrap()
             .write(table, &composite_key, value)?;
+        self.maintain_indexes_on_write(table, &composite_key, value)
+    }
 
+    fn read(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let composite_key = Self::make_key(table, key);
+        self.lsm.lock().unwrap().read(&composite_key)
+    }
+
+    fn delete(&self, table: &str, key: &[u8]) -> Result<()> {
+        self.check_writable()?;
+        let composite_key = Self::make_key(table, key);
+        self.lsm.lock().unwrap().delete(table, &composite_key)?;
+        Ok(())
+    }
+
+    fn scan(&self, table: &str) -> Result<Vec<KeyValue>> {
+        let all = self.lsm.lock().unwrap().scan()?;
+        let prefix = Self::make_prefix(table);
+        let results = all
+            .into_iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, v)| {
+                // Strip the table prefix from the key
+                let key = k[prefix.len()..].to_vec();
+                KeyValue { key, value: v }
+            })
+            .collect();
+        Ok(results)
+    }
+
+    fn create_table(&self, name: &str, columns: &[ColumnDef]) -> Result<()> {
+        self.create_table_with_constraints(name, columns, vec![], vec![])
+    }
+
+    fn get_table(&self, name: &str) -> Result<Option<TableSchema>> {
+        Ok(self.schemas.lock().unwrap().get(name).cloned())
+    }
+
+    fn list_tables(&self) -> Result<Vec<String>> {
+        Ok(self.schemas.lock().unwrap().keys().cloned().collect())
+    }
+
+    /// Create a B-Tree index on a column, backfilling it from existing rows.
+    fn create_index(&self, table: &str, column: &str) -> Result<()> {
+        self.check_writable()?;
+        let index_dir = &self.local_index_dir;
+        std::fs::create_dir_all(index_dir)?;
+        let index_path = index_dir.join(format!("{}_{}", table, column));
+
+        let mut btree = BTree::open(&index_path)?;
+
+        let schema = self
+            .schemas
+            .lock()
+            .unwrap()
+            .get(table)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
+        let col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
+
+        for kv in self.scan(table)? {
+            if let Some(col_bytes) = decode_column(&kv.value, col_idx) {
+                btree.insert(&col_bytes, &kv.key)?;
+            }
+        }
+
+        let mut idx_map = self.indexes.lock().unwrap();
+        idx_map
+            .entry(table.to_string())
+            .or_insert_with(HashMap::new)
+            .insert(column.to_string(), btree);
+
+        info!(table, column, "index created");
+        Ok(())
+    }
+}
+
+impl Database {
+    /// Maintain every affected secondary index for a freshly-written row
+    /// (B-Tree, spatial, time, graph, JSON-path, full-text, vector). Shared
+    /// by both the immediate `StorageEngine::write` path and the transaction
+    /// `COMMIT` replay path, so a committed transaction's writes keep indexes
+    /// consistent exactly as an autocommit write does. `key` is the composite
+    /// `table\0key` bytes.
+    pub(crate) fn maintain_indexes_on_write(
+        &self,
+        table: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
         // Maintain any B-Tree indexes defined on this table.
         let indexed_cols: Vec<(String, usize)> = {
             let schemas = self.schemas.lock().unwrap();
@@ -285,83 +378,6 @@ impl StorageEngine for Database {
                 }
             }
         }
-        Ok(())
-    }
-
-    fn read(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let composite_key = Self::make_key(table, key);
-        self.lsm.lock().unwrap().read(&composite_key)
-    }
-
-    fn delete(&self, table: &str, key: &[u8]) -> Result<()> {
-        self.check_writable()?;
-        let composite_key = Self::make_key(table, key);
-        self.lsm.lock().unwrap().delete(table, &composite_key)?;
-        Ok(())
-    }
-
-    fn scan(&self, table: &str) -> Result<Vec<KeyValue>> {
-        let all = self.lsm.lock().unwrap().scan()?;
-        let prefix = Self::make_prefix(table);
-        let results = all
-            .into_iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(k, v)| {
-                // Strip the table prefix from the key
-                let key = k[prefix.len()..].to_vec();
-                KeyValue { key, value: v }
-            })
-            .collect();
-        Ok(results)
-    }
-
-    fn create_table(&self, name: &str, columns: &[ColumnDef]) -> Result<()> {
-        self.create_table_with_constraints(name, columns, vec![], vec![])
-    }
-
-    fn get_table(&self, name: &str) -> Result<Option<TableSchema>> {
-        Ok(self.schemas.lock().unwrap().get(name).cloned())
-    }
-
-    fn list_tables(&self) -> Result<Vec<String>> {
-        Ok(self.schemas.lock().unwrap().keys().cloned().collect())
-    }
-
-    /// Create a B-Tree index on a column, backfilling it from existing rows.
-    fn create_index(&self, table: &str, column: &str) -> Result<()> {
-        self.check_writable()?;
-        let index_dir = &self.local_index_dir;
-        std::fs::create_dir_all(index_dir)?;
-        let index_path = index_dir.join(format!("{}_{}", table, column));
-
-        let mut btree = BTree::open(&index_path)?;
-
-        let schema = self
-            .schemas
-            .lock()
-            .unwrap()
-            .get(table)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("table \"{table}\" does not exist"))?;
-        let col_idx = schema
-            .columns
-            .iter()
-            .position(|c| c.name == column)
-            .ok_or_else(|| anyhow::anyhow!("column \"{column}\" does not exist"))?;
-
-        for kv in self.scan(table)? {
-            if let Some(col_bytes) = decode_column(&kv.value, col_idx) {
-                btree.insert(&col_bytes, &kv.key)?;
-            }
-        }
-
-        let mut idx_map = self.indexes.lock().unwrap();
-        idx_map
-            .entry(table.to_string())
-            .or_insert_with(HashMap::new)
-            .insert(column.to_string(), btree);
-
-        info!(table, column, "index created");
         Ok(())
     }
 }

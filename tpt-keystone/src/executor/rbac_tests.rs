@@ -93,7 +93,7 @@ fn non_superuser_denied_role_admin_ddl() {
 #[test]
 fn privilege_grant_allows_then_deny_without() {
     let (db, _b, _l) = open_db();
-    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[])
+    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[], None)
         .unwrap();
     let roles = RoleStore::new(db.clone()).unwrap();
     roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();
@@ -101,7 +101,7 @@ fn privilege_grant_allows_then_deny_without() {
     let reader = Actor::for_role(&db, "reader").unwrap();
 
     // No grant yet: SELECT is denied.
-    let denied = execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &reader);
+    let denied = execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &reader, None);
     assert!(denied.is_err());
     assert!(denied
         .unwrap_err()
@@ -112,16 +112,16 @@ fn privilege_grant_allows_then_deny_without() {
     PrivilegeStore::new(db.clone())
         .unwrap()
         .grant("reader", PrivilegeRepr::Select, &GrantObjectRepr::table("t"));
-    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &reader).is_ok());
+    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &reader, None).is_ok());
 
     // But INSERT is still denied.
-    assert!(execute_parsed_as(p("INSERT INTO t VALUES (1, 2)"), db.clone(), &[], &reader).is_err());
+    assert!(execute_parsed_as(p("INSERT INTO t VALUES (1, 2)"), db.clone(), &[], &reader, None).is_err());
 }
 
 #[test]
 fn membership_inherits_table_privilege() {
     let (db, _b, _l) = open_db();
-    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[])
+    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[], None)
         .unwrap();
     let roles = RoleStore::new(db.clone()).unwrap();
     roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();
@@ -140,13 +140,13 @@ fn membership_inherits_table_privilege() {
 
     let alice = Actor::for_role(&db, "alice").unwrap();
     assert!(alice.memberships.contains(&"readers".to_string()));
-    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &alice).is_ok());
+    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &alice, None).is_ok());
 
     // bob is not a member: denied.
     let roles2 = RoleStore::new(db.clone()).unwrap();
     roles2.create_role("bob", false, false, None, &[]).unwrap();
     let bob = Actor::for_role(&db, "bob").unwrap();
-    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &bob).is_err());
+    assert!(execute_parsed_as(p("SELECT * FROM t"), db.clone(), &[], &bob, None).is_err());
 }
 
 #[test]
@@ -186,3 +186,4 @@ fn database_level_create_required_for_ddl() {
     // DROP still denied (needs DROP privilege).
     assert!(dev.check(&db, &p("DROP TABLE t")).is_err());
 }
+

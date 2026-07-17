@@ -10,25 +10,31 @@ use super::{build_fields, infer_column_name, merge_schema, resolve_table_ref, sc
 use super::{join, planner};
 use super::{CteContext, QueryResult};
 use crate::sql::ast::{Expr, FrameBound, FrameBoundType, InList, Projection, SelectStmt, UnionOp};
+use crate::storage::database::txn::TxnHandle;
 use crate::storage::database::Database;
 use crate::storage::TableSchema;
 use crate::wire::messages::FieldDescription;
 
 /// Execute a SELECT statement with CTE, correlation, and parameter-binding context.
+/// `txn`, when `Some`, makes the scan path read through the connection's open
+/// transaction so its own uncommitted writes are visible (Stage 1 read-committed).
 pub(super) fn execute_select_with_cte(
     select: SelectStmt,
     db: Arc<Database>,
     cte_ctx: &mut CteContext,
     outer: &[OuterRow],
     params: &[Value],
+    txn: Option<&TxnHandle>,
 ) -> anyhow::Result<QueryResult> {
     // Set operations (UNION / UNION ALL) are handled generically: evaluate
     // both sides fully (including their own nested CTEs/unions) and combine.
     if let Some((op, rhs)) = select.union.clone() {
         let mut left = select.clone();
         left.union = None;
-        let left_result = execute_select_with_cte(left, db.clone(), cte_ctx, outer, params)?;
-        let right_result = execute_select_with_cte(*rhs, db, cte_ctx, outer, params)?;
+        let left_result =
+            execute_select_with_cte(left, db.clone(), cte_ctx, outer, params, txn)?;
+        let right_result =
+            execute_select_with_cte(*rhs, db, cte_ctx, outer, params, txn)?;
         let mut rows = left_result.rows;
         rows.extend(right_result.rows);
         if op == UnionOp::Union {
@@ -44,11 +50,11 @@ pub(super) fn execute_select_with_cte(
     }
 
     for cte in &select.ctes {
-        materialize_cte(cte, db.clone(), cte_ctx, outer, params)?;
+        materialize_cte(cte, db.clone(), cte_ctx, outer, params, txn)?;
     }
 
     let Some(table_with_joins) = &select.from else {
-        return execute_projection_only(&select, db, params);
+        return execute_projection_only(&select, db, params, txn);
     };
 
     let (primary_schema, primary_rows) = planner::resolve_primary_table(
@@ -58,6 +64,7 @@ pub(super) fn execute_select_with_cte(
         cte_ctx,
         outer,
         params,
+        txn,
     )?;
 
     let primary_alias = table_with_joins
@@ -82,7 +89,8 @@ pub(super) fn execute_select_with_cte(
     );
     for &join_idx in &join_order {
         let jn = &table_with_joins.joins[join_idx];
-        let (join_schema, join_rows) = resolve_table_ref(&jn.table, &db, cte_ctx, outer, params)?;
+        let (join_schema, join_rows) =
+            resolve_table_ref(&jn.table, &db, cte_ctx, outer, params, txn)?;
         let join_len = join_schema.as_ref().map(|s| s.columns.len()).unwrap_or(0);
         let join_alias = jn
             .table
@@ -196,6 +204,7 @@ fn execute_projection_only(
     select: &SelectStmt,
     db: Arc<Database>,
     params: &[Value],
+    _txn: Option<&TxnHandle>,
 ) -> anyhow::Result<QueryResult> {
     let mut ctx = RowContext::empty().with_params(params.to_vec());
     ctx.db = Some(db);
@@ -229,12 +238,14 @@ pub(super) fn materialize_cte(
     cte_ctx: &mut CteContext,
     outer: &[OuterRow],
     params: &[Value],
+    txn: Option<&TxnHandle>,
 ) -> anyhow::Result<()> {
     if cte.recursive {
         if let Some((_, ref recursive_term)) = cte.subquery.union {
             let mut base = cte.subquery.clone();
             base.union = None;
-            let base_result = execute_select_with_cte(base, db.clone(), cte_ctx, outer, params)?;
+            let base_result =
+                execute_select_with_cte(base, db.clone(), cte_ctx, outer, params, txn)?;
             let schema = cte_schema(cte, &base_result.fields);
 
             let mut all_rows = base_result.rows.clone();
@@ -250,6 +261,7 @@ pub(super) fn materialize_cte(
                     cte_ctx,
                     outer,
                     params,
+                    txn,
                 )?;
                 if step.rows.is_empty() {
                     break;
@@ -266,7 +278,7 @@ pub(super) fn materialize_cte(
         }
         // RECURSIVE declared but no UNION body — fall through as non-recursive.
     }
-    let result = execute_select_with_cte(cte.subquery.clone(), db, cte_ctx, outer, params)?;
+    let result = execute_select_with_cte(cte.subquery.clone(), db, cte_ctx, outer, params, txn)?;
     let schema = cte_schema(cte, &result.fields);
     cte_ctx.ctes.insert(cte.name.clone(), (result.rows, schema));
     Ok(())

@@ -1,9 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
+
+use crate::storage::database::txn::TxnHandle;
+use crate::storage::StorageEngine;
 
 use super::btree::BTree;
 use super::canopy_index::{FtsIndex, JsonPathIndex};
@@ -533,6 +536,157 @@ impl Database {
         }
         Ok(())
     }
+
+    // ---- transactions (Phase 1, Stage 1: read-committed) ------------------
+
+    /// Begin a new read-committed transaction, returning a shareable handle
+    /// the session keeps for the connection. Reads through the handle see
+    /// its own staged writes; `COMMIT`/`ROLLBACK` flush or discard them.
+    pub fn begin_txn(&self) -> crate::storage::database::txn::TxnHandle {
+        use crate::storage::database::txn::TxnHandle;
+        let id = super::mvcc::new_tx_id();
+        TxnHandle::new(id)
+    }
+
+    /// Commit a transaction: replay its staged writes into the committed LSM
+    /// store (plus any affected secondary indexes) atomically under the LSM
+    /// lock, then mark it finished. Returns `Ok` even for an already-finished
+    /// handle (idempotent, mirrors Postgres's "no-op COMMIT" after ROLLBACK).
+    pub fn commit_txn(&self, txn: &crate::storage::database::txn::TxnHandle) -> Result<()> {
+        let staged = txn.take_staged();
+        if staged.is_empty() {
+            return Ok(());
+        }
+        self.check_writable()?;
+        let mut lsm = self.lsm.lock().unwrap();
+        for (composite_key, write) in staged {
+            // Extract the table name from the composite `table\0key` bytes.
+            let table = {
+                let idx = composite_key.iter().position(|&b| b == 0);
+                match idx {
+                    Some(i) => match std::str::from_utf8(&composite_key[..i]) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    },
+                    None => continue,
+                }
+            };
+            match write.value {
+                Some(value) => {
+                    lsm.write(table, &composite_key, &value)?;
+                    drop(lsm);
+                    self.maintain_indexes_on_write(table, &composite_key, &value)?;
+                    lsm = self.lsm.lock().unwrap();
+                }
+                None => {
+                    lsm.delete(table, &composite_key)?;
+                }
+            }
+        }
+        drop(lsm);
+        Ok(())
+    }
+
+    /// Roll back a transaction, discarding all staged writes. Idempotent.
+    pub fn rollback_txn(&self, txn: &crate::storage::database::txn::TxnHandle) {
+        txn.discard();
+    }
+
+    /// Apply a single write on behalf of a transaction (or, if `txn` is
+    /// `None`, commit it immediately through the normal `StorageEngine`
+    /// path). Used by the executor's DML so a statement behaves identically
+    /// inside or outside a transaction.
+    pub fn txn_write(
+        &self,
+        txn: Option<&crate::storage::database::txn::TxnHandle>,
+        table: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        match txn {
+            Some(t) => {
+                let composite = Self::make_key(table, key);
+                t.stage_write(composite, value.to_vec());
+                Ok(())
+            }
+            None => self.write(table, key, value),
+        }
+    }
+
+    /// Apply a single delete on behalf of a transaction (or immediately).
+    pub fn txn_delete(
+        &self,
+        txn: Option<&crate::storage::database::txn::TxnHandle>,
+        table: &str,
+        key: &[u8],
+    ) -> Result<()> {
+        match txn {
+            Some(t) => {
+                let composite = Self::make_key(table, key);
+                t.stage_delete(composite);
+                Ok(())
+            }
+            None => self.delete(table, key),
+        }
+    }
+
+    /// Read a row, consulting the transaction's staging buffer first so an
+    /// open transaction sees its own uncommitted writes. `txn == None` is the
+    /// legacy immediate path.
+    pub fn txn_read(
+        &self,
+        txn: Option<&crate::storage::database::txn::TxnHandle>,
+        table: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let composite = Self::make_key(table, key);
+        if let Some(t) = txn {
+            match t.staged_read(&composite) {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Ok(None) => return Ok(None), // tombstone
+                Err(()) => {}
+            }
+        }
+        self.lsm.lock().unwrap().read(&composite)
+    }
+
+    /// Scan all rows of a table, merging the transaction's staged writes over
+    /// the committed snapshot: staged inserts/updates override committed
+    /// values, staged deletes are removed, and any newly-staged keys not yet
+    /// present in the committed store appear as new rows.
+    pub fn txn_scan(
+        &self,
+        txn: Option<&crate::storage::database::txn::TxnHandle>,
+        table: &str,
+    ) -> Result<Vec<crate::storage::KeyValue>> {
+        let prefix = Self::make_prefix(table);
+        let committed: Vec<(Vec<u8>, Vec<u8>)> = {
+            let all = self.lsm.lock().unwrap().scan()?;
+            all.into_iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .collect()
+        };
+        let mut merged: BTreeMap<Vec<u8>, Option<Vec<u8>>> = committed
+            .into_iter()
+            .map(|(k, v)| (k, Some(v)))
+            .collect();
+        if let Some(t) = txn {
+            let state = t.inner.lock().unwrap();
+            for (composite_key, write) in &state.staged {
+                if composite_key.starts_with(&prefix) {
+                    merged.insert(composite_key.clone(), write.value.clone());
+                }
+            }
+        }
+        let results = merged
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|value| crate::storage::KeyValue {
+                key: k[prefix.len()..].to_vec(),
+                value,
+            }))
+            .collect();
+        Ok(results)
+    }
 }
 
 /// Parses a row cell's text-encoded (see `Value::to_wire_bytes`) bytes as an
@@ -611,6 +765,8 @@ pub mod storage_engine;
 pub mod time;
 pub mod vector;
 
+pub mod txn;
+
 #[cfg(test)]
 mod reader_staleness_tests {
     use super::ReaderStaleness;
@@ -658,3 +814,4 @@ mod reader_staleness_tests {
         assert!(!s.is_stale(u64::MAX));
     }
 }
+

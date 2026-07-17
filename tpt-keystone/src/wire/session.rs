@@ -231,6 +231,8 @@ async fn run_query_loop(
 ) -> anyhow::Result<()> {
     let mut ext = ExtendedState::default();
     let mut notify_rx = db.subscribe_notifications();
+    // Per-connection open transaction (Phase 1). `None` means autocommit.
+    let mut txn: Option<crate::storage::database::txn::TxnHandle> = None;
 
     // --- Query loop ---
     // `select!` between the client socket and the LISTEN/NOTIFY bus so an
@@ -256,7 +258,7 @@ async fn run_query_loop(
             FrontendMessage::Query(sql) => {
                 let sql = sql.trim().to_string();
                 debug!(%peer, %sql, "query received");
-                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening, &actor)
+                handle_simple_query(conn, &sql, db.clone(), &mut ext.cursors, &mut ext.listening, &mut txn, &actor)
                     .await?;
             }
 
@@ -362,7 +364,7 @@ async fn run_query_loop(
 
             FrontendMessage::Execute { portal, max_rows } => {
                 match ext.portals.get(&portal) {
-                    Some(p) => match execute_parsed_as(p.stmt.clone(), db.clone(), &p.params, &actor) {
+                    Some(p) => match execute_parsed_as(p.stmt.clone(), db.clone(), &p.params, &actor, txn.as_ref()) {
                         Ok(result) => {
                             let total = result.rows.len();
                             let limited = max_rows > 0 && (max_rows as usize) < total;
@@ -453,6 +455,7 @@ async fn handle_simple_query(
     db: Arc<Database>,
     cursors: &mut HashMap<String, CursorState>,
     listening: &mut HashSet<String>,
+    txn: &mut Option<crate::storage::database::txn::TxnHandle>,
     actor: &Actor,
 ) -> anyhow::Result<()> {
     if sql.is_empty() {
@@ -481,7 +484,48 @@ async fn handle_simple_query(
         _ => {}
     }
 
-    match execute_simple(stmt, db, cursors, listening, actor) {
+    // Transaction-control statements are intercepted here so the per-connection
+    // `txn` handle is managed on the wire side; the executor only sees them as
+    // no-ops (the actual staged-write flush/discard happens here via COMMIT/
+    // ROLLBACK). `BEGIN` is idempotent (a second BEGIN just keeps the open
+    // transaction), matching Postgres's implicit-transaction semantics.
+    match &stmt {
+        Stmt::Begin => {
+            if txn.is_none() {
+                *txn = Some(db.begin_txn());
+            }
+            conn.send(&BackendMessage::CommandComplete("BEGIN".into()));
+            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::InTransaction));
+            conn.flush().await?;
+            return Ok(());
+        }
+        Stmt::Commit => {
+            if let Some(t) = txn.take() {
+                if let Err(e) = db.commit_txn(&t) {
+                    conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
+                    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+                    conn.flush().await?;
+                    return Ok(());
+                }
+            }
+            conn.send(&BackendMessage::CommandComplete("COMMIT".into()));
+            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+            conn.flush().await?;
+            return Ok(());
+        }
+        Stmt::Rollback => {
+            if let Some(t) = txn.take() {
+                db.rollback_txn(&t);
+            }
+            conn.send(&BackendMessage::CommandComplete("ROLLBACK".into()));
+            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+            conn.flush().await?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    match execute_simple(stmt, db, cursors, listening, txn.as_ref(), actor) {
         Ok(result) => {
             conn.send(&BackendMessage::RowDescription(result.fields));
             for row in result.rows {
@@ -494,7 +538,14 @@ async fn handle_simple_query(
             conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
         }
     }
-    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+    // Report InTransaction when a transaction is open so a client can tell it
+    // is still inside one (mirrors Postgres's ReadyForQuery status byte).
+    let status = if txn.is_some() {
+        TransactionStatus::InTransaction
+    } else {
+        TransactionStatus::Idle
+    };
+    conn.send(&BackendMessage::ReadyForQuery(status));
     conn.flush().await?;
     Ok(())
 }
@@ -508,6 +559,7 @@ fn execute_simple(
     db: Arc<Database>,
     cursors: &mut HashMap<String, CursorState>,
     listening: &mut HashSet<String>,
+    txn: Option<&crate::storage::database::txn::TxnHandle>,
     actor: &Actor,
 ) -> anyhow::Result<QueryResult> {
     match stmt {
@@ -532,7 +584,7 @@ fn execute_simple(
             })
         }
         Stmt::DeclareCursor(d) => {
-            let result = execute_parsed_as(Stmt::Select(d.query), db, &[], actor)?;
+            let result = execute_parsed_as(Stmt::Select(d.query), db, &[], actor, None)?;
             cursors.insert(
                 d.name,
                 CursorState {
@@ -587,7 +639,7 @@ fn execute_simple(
                 tag: "CLOSE CURSOR".into(),
             })
         }
-        other => execute_parsed_as(other, db, &[], actor),
+        other => execute_parsed_as(other, db, &[], actor, txn),
     }
 }
 
@@ -892,6 +944,7 @@ mod tests {
             db,
             cursors,
             listening,
+            None,
             &crate::executor::rbac::Actor::unrestricted(),
         )
     }
@@ -915,6 +968,7 @@ mod tests {
                 crate::sql::parse(&format!("INSERT INTO nums VALUES ({i})")).unwrap(),
                 db.clone(),
                 &[],
+                None,
             )
             .unwrap();
         }
@@ -1228,12 +1282,14 @@ mod tests {
             .unwrap(),
             db.clone(),
             &[],
+            None,
         )
         .unwrap();
         execute_parsed(
             crate::sql::parse("INSERT INTO t VALUES (7, 2.5, true, 'hi')").unwrap(),
             db.clone(),
             &[],
+            None,
         )
         .unwrap();
     }
@@ -1341,3 +1397,4 @@ mod tests {
         }
     }
 }
+
