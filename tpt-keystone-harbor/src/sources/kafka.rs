@@ -383,16 +383,12 @@ fn decode_record_batch(buf: &[u8]) -> Result<Vec<Record>> {
 
 pub struct KafkaSource {
     conn: KafkaConn,
-    addr: String,
 }
 
 impl KafkaSource {
     pub async fn connect(addr: &str) -> Result<Self> {
         let conn = KafkaConn::connect(addr).await?;
-        Ok(Self {
-            conn,
-            addr: addr.to_string(),
-        })
+        Ok(Self { conn })
     }
 
     async fn read_all(&mut self, topic: &str) -> Result<(Vec<Record>, i64)> {

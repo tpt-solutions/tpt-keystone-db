@@ -5,9 +5,7 @@
 //! less certain than the rest). [`ConnectorError::Unimplemented`] is still
 //! used within otherwise-real connectors for genuinely scope-cut phases
 //! (every connector's live-CDC `replicate`, which each has its own reason
-//! for cutting), not as a whole-connector stub anymore. `unimplemented_source!`
-//! below is unused dead code now that no connector needs it — kept in case a
-//! future connector is added stub-first again.
+//! for cutting), not as a whole-connector stub anymore.
 
 use crate::schema::TableSchema;
 use async_trait::async_trait;
@@ -73,40 +71,3 @@ pub trait TargetConnector: Send {
 
     async fn row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError>;
 }
-
-/// Shared helper: every stub source connector answers the same way.
-macro_rules! unimplemented_source {
-    ($ty:ident, $name:literal, $detail:literal) => {
-        pub struct $ty;
-
-        #[async_trait::async_trait]
-        impl crate::connector::SourceConnector for $ty {
-            fn name(&self) -> &'static str {
-                $name
-            }
-            async fn discover(&mut self) -> Result<Vec<crate::schema::TableSchema>, crate::connector::ConnectorError> {
-                Err(crate::connector::ConnectorError::Unimplemented { connector: $name, detail: $detail })
-            }
-            async fn snapshot_table(
-                &mut self,
-                _table: &crate::schema::TableSchema,
-                _tx: tokio::sync::mpsc::Sender<Vec<crate::connector::SourceRow>>,
-            ) -> Result<u64, crate::connector::ConnectorError> {
-                Err(crate::connector::ConnectorError::Unimplemented { connector: $name, detail: $detail })
-            }
-            async fn replicate(
-                &mut self,
-                _tables: &[crate::schema::TableSchema],
-                _resume_token: Option<String>,
-                _tx: tokio::sync::mpsc::Sender<crate::connector::ChangeEvent>,
-            ) -> Result<(), crate::connector::ConnectorError> {
-                Err(crate::connector::ConnectorError::Unimplemented { connector: $name, detail: $detail })
-            }
-            async fn row_checksums(&mut self, _table: &crate::schema::TableSchema) -> Result<Vec<u64>, crate::connector::ConnectorError> {
-                Err(crate::connector::ConnectorError::Unimplemented { connector: $name, detail: $detail })
-            }
-        }
-    };
-}
-
-pub(crate) use unimplemented_source;

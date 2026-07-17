@@ -27,13 +27,11 @@ struct MysqlConn {
 
 #[derive(Debug)]
 struct MysqlRow {
-    columns: Vec<String>,
     cells: Vec<Option<Vec<u8>>>,
 }
 
 #[derive(Debug)]
 struct QueryResult {
-    columns: Vec<String>,
     rows: Vec<MysqlRow>,
 }
 
@@ -223,7 +221,7 @@ impl MysqlConn {
         }
         if packet[0] == 0xFE {
             // OK or EOF
-            return Ok(QueryResult { columns: vec![], rows: vec![] });
+            return Ok(QueryResult { rows: vec![] });
         }
 
         let col_count = packet[0] as usize;
@@ -274,7 +272,6 @@ impl MysqlConn {
                     if p.len() >= name_len {
                         let name = String::from_utf8_lossy(&p[..name_len]).to_string();
                         columns.push(name);
-                        p = &p[name_len..];
                     }
                 } else if p[0] != 0xFB {
                     let name_len = p[0] as usize;
@@ -282,7 +279,6 @@ impl MysqlConn {
                     if p.len() >= name_len {
                         let name = String::from_utf8_lossy(&p[..name_len]).to_string();
                         columns.push(name);
-                        p = &p[name_len..];
                     }
                 }
             }
@@ -329,10 +325,10 @@ impl MysqlConn {
                 }
             }
 
-            rows.push(MysqlRow { columns: columns.clone(), cells });
+            rows.push(MysqlRow { cells });
         }
 
-        Ok(QueryResult { columns, rows })
+        Ok(QueryResult { rows })
     }
 }
 

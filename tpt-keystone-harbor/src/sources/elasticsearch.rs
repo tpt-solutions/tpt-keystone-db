@@ -17,7 +17,6 @@ const SNAPSHOT_BATCH_SIZE: usize = 5_000;
 /// Minimal Elasticsearch HTTP client.
 struct EsClient {
     stream: TcpStream,
-    read_buf: Vec<u8>,
     write_buf: Vec<u8>,
     host: String,
     scroll_keep_alive: String,
@@ -38,7 +37,6 @@ impl EsClient {
 
         Ok(Self {
             stream,
-            read_buf: Vec::with_capacity(65536),
             write_buf: Vec::with_capacity(16384),
             host: format!("{}:{}", host, port),
             scroll_keep_alive: "5m".to_string(),

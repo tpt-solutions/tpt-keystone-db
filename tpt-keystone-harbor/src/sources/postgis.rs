@@ -224,7 +224,7 @@ impl SourceConnector for PostGisSource {
         let order_by = if pk.is_empty() { String::new() } else { format!(" ORDER BY {}", pk.join(", ")) };
 
         // Wrap geometry columns with ST_AsText for checksum consistency
-        let select_cols: Vec<String> = table
+        let _select_cols: Vec<String> = table
             .columns
             .iter()
             .map(|c| {

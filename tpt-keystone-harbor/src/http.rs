@@ -137,7 +137,7 @@ impl HttpClient {
                     }
                     if cursor + 2 > body.len() {
                         // Need more data
-                        let old_len = body.len();
+                        let _old_len = body.len();
                         let mut temp = [0u8; 8192];
                         let n = self.stream.read(&mut temp).await?;
                         if n == 0 {

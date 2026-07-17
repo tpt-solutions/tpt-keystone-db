@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "pretest": "npm run build",
-    "test": "node --test dist/**/*.test.js"
+    "test": "find dist -name '*.test.js' -print0 | xargs -0 node --test"
   },
   "engines": {
     "node": ">=18"

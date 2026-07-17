@@ -99,7 +99,7 @@ impl TdsConn {
         let mut body = BytesMut::new();
 
         // TDS 7.4 login header
-        let length_offset = body.len();
+        let _length_offset = body.len();
         body.put_u32_le(0); // length (filled later)
         body.put_u32_le(0); // tds_version
         body.put_u32_le(0); // packet_size
@@ -227,7 +227,6 @@ impl TdsConn {
                     if p.len() < prog_name_len + 4 { break; }
                     p = &p[prog_name_len..];
                     let _prog_ver = u32::from_be_bytes(p[0..4].try_into().unwrap_or([0;4]));
-                    p = &p[4..];
                     return Ok(true);
                 }
                 0xE3 => {
@@ -409,14 +408,14 @@ impl TdsConn {
 
     async fn read_tds_header(&mut self) -> Result<TdsHeader> {
         self.fill(8).await?;
-        let packet_type = self.read_buf[0];
+        let _packet_type = self.read_buf[0];
         let status = self.read_buf[1];
         let length = u16::from_le_bytes(self.read_buf[2..4].try_into().unwrap());
         let _spid = u16::from_le_bytes(self.read_buf[4..6].try_into().unwrap());
-        let packet_id = self.read_buf[6];
+        let _packet_id = self.read_buf[6];
         let _window = self.read_buf[7];
         self.read_buf.advance(8);
-        Ok(TdsHeader { packet_type, status, length, packet_id })
+        Ok(TdsHeader { status, length })
     }
 
     async fn read_exact(&mut self, n: usize) -> Result<Vec<u8>> {
@@ -437,10 +436,8 @@ impl TdsConn {
 }
 
 struct TdsHeader {
-    packet_type: u8,
     status: u8,
     length: u16,
-    packet_id: u8,
 }
 
 pub struct MsSqlSource {

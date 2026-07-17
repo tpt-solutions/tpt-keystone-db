@@ -5,7 +5,7 @@
 //! API.
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow, ChangeEvent};
-use crate::schema::{from_neo4j_type, ColumnSchema, TableSchema};
+use crate::schema::{ColumnSchema, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
@@ -120,7 +120,7 @@ impl BoltConn {
             match msg[0] {
                 0x71 => {
                     // RECORD
-                    let mut p = &msg[1..];
+                    let p = &msg[1..];
                     // List of field values
                     if let Some((values, _)) = bolt_decode_list(&p) {
                         all_rows.push(values);
@@ -205,7 +205,7 @@ fn put_bolt_map(buf: &mut BytesMut, entries: &[(&str, &str)]) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum BsonValue {
     Double(f64),
     String(String),
@@ -214,8 +214,13 @@ enum BsonValue {
     Null,
     List(Vec<BsonValue>),
     Map(Vec<(String, BsonValue)>),
-    Node { labels: Vec<String>, props: Vec<(String, BsonValue)> },
+    // Decoded per the Bolt structure spec for completeness, but discovery/snapshot only
+    // read a sampled node's `props` (labels come from the `db.labels()` metadata query
+    // instead) — so these payloads aren't read anywhere yet.
+    Node { #[allow(dead_code)] labels: Vec<String>, props: Vec<(String, BsonValue)> },
+    #[allow(dead_code)]
     Relationship { rel_type: String, props: Vec<(String, BsonValue)> },
+    #[allow(dead_code)]
     Path(Vec<BsonValue>),
     Unknown,
 }
@@ -347,50 +352,18 @@ fn bolt_decode_value(buf: &[u8]) -> Option<(BsonValue, &[u8])> {
         0xA0..=0xAF | 0xD8 | 0xD9 => {
             bolt_decode_map(buf).map(|(v, r)| (BsonValue::Map(v), r))
         }
-        // Node (0x4E)
-        0x4E => {
-            let mut p = &buf[1..];
-            // Node signature: num_labels(1) + labels* + properties_map
-            if p.is_empty() { return None; }
-            let num_labels = p[0] as usize;
-            p = &p[1..];
-            let mut labels = Vec::new();
-            for _ in 0..num_labels {
-                let (val, rest) = bolt_decode_value(p)?;
-                p = rest;
-                if let BsonValue::String(s) = val {
-                    labels.push(s);
-                }
-            }
-            let (props, rest) = bolt_decode_map(p)?;
-            Some((BsonValue::Node { labels, props }, rest))
+        // Struct: marker (low nibble = field count, or 0xDC/0xDD for larger
+        // counts) followed by a 1-byte signature (0x4E Node, 0x52 Relationship,
+        // 0x50 Path, ...), then that many field values.
+        0xB0..=0xBF => bolt_decode_struct(buf[0] as usize - 0xB0, &buf[1..]),
+        0xDC => {
+            if buf.len() < 2 { return None; }
+            bolt_decode_struct(buf[1] as usize, &buf[2..])
         }
-        // Relationship (0x52)
-        0x52 => {
-            let mut p = &buf[1..];
-            // rel_id, start_node_id, end_node_id, rel_type, properties
-            if p.len() < 21 { return None; }
-            let _rel_id = i64::from_be_bytes(p[0..8].try_into().unwrap_or([0;8]));
-            p = &p[8..];
-            let _start = i64::from_be_bytes(p[0..8].try_into().unwrap_or([0;8]));
-            p = &p[8..];
-            let _end = i64::from_be_bytes(p[0..8].try_into().unwrap_or([0;8]));
-            p = &p[8..];
-            let (rel_type_val, rest) = bolt_decode_value(p)?;
-            p = rest;
-            let rel_type = match rel_type_val {
-                BsonValue::String(s) => s,
-                _ => "UNKNOWN".to_string(),
-            };
-            let (props, rest) = bolt_decode_map(p)?;
-            Some((BsonValue::Relationship { rel_type, props }, rest))
-        }
-        // Path (0x50)
-        0x50 => {
-            let mut p = &buf[1..];
-            let (nodes, rest) = bolt_decode_list(p)?;
-            let (_, rest) = bolt_decode_list(rest)?;
-            Some((BsonValue::Path(nodes), rest))
+        0xDD => {
+            if buf.len() < 3 { return None; }
+            let count = u16::from_be_bytes(buf[1..3].try_into().unwrap_or([0, 0])) as usize;
+            bolt_decode_struct(count, &buf[3..])
         }
         // Bytes
         0xCC => {
@@ -401,6 +374,61 @@ fn bolt_decode_value(buf: &[u8]) -> Option<(BsonValue, &[u8])> {
         }
         _ => Some((BsonValue::Unknown, &buf[1..])),
     }
+}
+
+/// Decode a Bolt structure's signature byte + `field_count` field values.
+/// `buf` starts right after the marker byte (at the signature).
+fn bolt_decode_struct(field_count: usize, buf: &[u8]) -> Option<(BsonValue, &[u8])> {
+    if buf.is_empty() {
+        return None;
+    }
+    let signature = buf[0];
+    let mut p = &buf[1..];
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        let (val, rest) = bolt_decode_value(p)?;
+        fields.push(val);
+        p = rest;
+    }
+    let value = match signature {
+        // Node: identity, labels (list<string>), properties (map)
+        0x4E => {
+            let labels = match fields.get(1) {
+                Some(BsonValue::List(items)) => items
+                    .iter()
+                    .filter_map(|v| if let BsonValue::String(s) = v { Some(s.clone()) } else { None })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let props = match fields.get(2) {
+                Some(BsonValue::Map(m)) => m.clone(),
+                _ => Vec::new(),
+            };
+            BsonValue::Node { labels, props }
+        }
+        // Relationship: identity, start, end, type (string), properties (map), ...
+        0x52 => {
+            let rel_type = match fields.get(3) {
+                Some(BsonValue::String(s)) => s.clone(),
+                _ => "UNKNOWN".to_string(),
+            };
+            let props = match fields.get(4) {
+                Some(BsonValue::Map(m)) => m.clone(),
+                _ => Vec::new(),
+            };
+            BsonValue::Relationship { rel_type, props }
+        }
+        // Path: nodes (list<Node>), relationships (list), indices (list)
+        0x50 => {
+            let nodes = match fields.into_iter().next() {
+                Some(BsonValue::List(items)) => items,
+                _ => Vec::new(),
+            };
+            BsonValue::Path(nodes)
+        }
+        _ => BsonValue::Unknown,
+    };
+    Some((value, p))
 }
 
 fn neo4j_value_to_bytes(v: &BsonValue) -> Vec<u8> {
@@ -601,5 +629,56 @@ impl SourceConnector for Neo4jSource {
             let source_row: SourceRow = row.iter().map(|v| Some(neo4j_value_to_bytes(v))).collect();
             crate::verify::hash_row(&source_row)
         }).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_node_struct() {
+        // Tiny struct, 3 fields, signature 0x4E (Node): identity=7 (tiny int),
+        // labels=["Person"] (tiny list of 1 tiny string), props={"name": "Ada"}
+        // (tiny map of 1 entry, tiny string key/value).
+        let mut buf = vec![0xB3, 0x4E, 0x07];
+        buf.push(0x91); // list of 1
+        buf.push(0x86); // tiny string, len 6
+        buf.extend_from_slice(b"Person");
+        buf.push(0xA1); // map of 1 entry
+        buf.push(0x84); // tiny string, len 4
+        buf.extend_from_slice(b"name");
+        buf.push(0x83); // tiny string, len 3
+        buf.extend_from_slice(b"Ada");
+
+        let (value, rest) = bolt_decode_value(&buf).expect("decodes");
+        assert!(rest.is_empty());
+        match value {
+            BsonValue::Node { labels, props } => {
+                assert_eq!(labels, vec!["Person".to_string()]);
+                assert_eq!(props, vec![("name".to_string(), BsonValue::String("Ada".to_string()))]);
+            }
+            other => panic!("expected Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_relationship_struct() {
+        // Tiny struct, 5 fields, signature 0x52 (Relationship): id, start, end
+        // (tiny ints), type="KNOWS" (tiny string), props={} (empty tiny map).
+        let mut buf = vec![0xB5, 0x52, 0x01, 0x02, 0x03];
+        buf.push(0x85); // tiny string, len 5
+        buf.extend_from_slice(b"KNOWS");
+        buf.push(0xA0); // empty map
+
+        let (value, rest) = bolt_decode_value(&buf).expect("decodes");
+        assert!(rest.is_empty());
+        match value {
+            BsonValue::Relationship { rel_type, props } => {
+                assert_eq!(rel_type, "KNOWS");
+                assert!(props.is_empty());
+            }
+            other => panic!("expected Relationship, got {other:?}"),
+        }
     }
 }

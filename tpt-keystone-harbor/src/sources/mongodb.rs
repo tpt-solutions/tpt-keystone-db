@@ -55,16 +55,6 @@ fn bson_encode_string_typed(name: &str, val: &str) -> Vec<u8> {
     out
 }
 
-fn bson_encode_doc(name: &str, elements: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x03]; // type: document
-    out.extend_from_slice(&bson_encode_cstring(name));
-    let doc_len = elements.len() as i32 + 5; // elements + length(4) + terminator(1)
-    out.extend_from_slice(&doc_len.to_le_bytes());
-    out.extend_from_slice(elements);
-    out.push(0);
-    out
-}
-
 fn bson_build_doc(elements: Vec<Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::new();
     for el in elements {
@@ -75,25 +65,6 @@ fn bson_build_doc(elements: Vec<Vec<u8>>) -> Vec<u8> {
     let mut doc = total.to_le_bytes().to_vec();
     doc.extend_from_slice(&out);
     doc
-}
-
-fn bson_encode_array(name: &str, items: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut out = vec![0x04]; // type: array
-    out.extend_from_slice(&bson_encode_cstring(name));
-    let mut arr = Vec::new();
-    for (i, item) in items.into_iter().enumerate() {
-        arr.extend_from_slice(&bson_encode_cstring(&i.to_string()));
-        arr.extend_from_slice(&item);
-    }
-    arr.push(0);
-    let arr_len = arr.len() as i32 + 4;
-    out.extend_from_slice(&arr_len.to_le_bytes());
-    out.extend_from_slice(&arr);
-    out
-}
-
-fn bson_empty_doc() -> Vec<u8> {
-    vec![5, 0, 0, 0, 0]
 }
 
 // ── Minimal BSON decoder ─────────────────────────────────────────────
@@ -287,7 +258,7 @@ impl MongoConn {
         Ok(conn)
     }
 
-    async fn send_op_msg(&mut self, flags: u32, body: &[u8], db_selector: u8) -> Result<Vec<(String, BsonValue)>> {
+    async fn send_op_msg(&mut self, flags: u32, body: &[u8], _db_selector: u8) -> Result<Vec<(String, BsonValue)>> {
         // OP_MSG: header(16) + flags(4) + section_kind(1) + section_body
         let section_len = 4 + 1 + body.len() as u32; // size(4) + body
         let msg_len = 16 + 4 + 1 + section_len;
@@ -339,15 +310,11 @@ impl MongoConn {
                     };
                     if p.len() < doc_size { break; }
                     let doc = bson_decode_doc(&p[..doc_size]).unwrap_or_default();
-                    p = &p[doc_size..];
                     return Ok(doc);
                 } else {
                     // Document sequence: size(4) + identifier(cstring) + docs
                     if p.len() < 4 { break; }
                     let _seq_size = i32::from_le_bytes(p[0..4].try_into().unwrap()) as usize;
-                    p = &p[4..];
-                    let _id_end = p.iter().position(|&b| b == 0).unwrap_or(p.len());
-                    p = &p[_id_end + 1..];
                     // Skip remaining documents in this section
                     break;
                 }
@@ -368,7 +335,6 @@ impl MongoConn {
 
 pub struct MongoSource {
     conn: MongoConn,
-    addr: String,
     database: String,
 }
 
@@ -377,7 +343,6 @@ impl MongoSource {
         let conn = MongoConn::connect(addr).await?;
         Ok(Self {
             conn,
-            addr: addr.to_string(),
             database: database.to_string(),
         })
     }
@@ -419,7 +384,7 @@ impl SourceConnector for MongoSource {
 
                         // Extract field types from the options.info.fields or
                         // do a sample query to infer the schema
-                        let fields = coll_info
+                        let _fields = coll_info
                             .iter()
                             .find(|(k, _)| k == "options")
                             .and_then(|(_, v)| if let BsonValue::Document(d) = v { Some(d) } else { None })
@@ -486,11 +451,10 @@ impl SourceConnector for MongoSource {
 
     async fn snapshot_table(&mut self, table: &TableSchema, tx: Sender<Vec<SourceRow>>) -> Result<u64, ConnectorError> {
         let mut total: u64 = 0;
-        let mut batch_size: i64 = SNAPSHOT_BATCH_SIZE;
-        let mut cursor_id: i64 = 0;
+        let batch_size: i64 = SNAPSHOT_BATCH_SIZE;
 
         // First query
-        let mut cmd = bson_build_doc(vec![
+        let cmd = bson_build_doc(vec![
             bson_encode_string_typed("find", &table.name),
             bson_encode_int64("batchSize", batch_size),
         ]);
@@ -541,9 +505,8 @@ impl SourceConnector for MongoSource {
             }
 
             // getMore
-            cursor_id = next_cursor;
             let getmore_cmd = bson_build_doc(vec![
-                bson_encode_string_typed("getMore", &cursor_id.to_string()),
+                bson_encode_string_typed("getMore", &next_cursor.to_string()),
                 bson_encode_string_typed("collection", &table.name),
                 bson_encode_int64("batchSize", batch_size),
             ]);
@@ -566,9 +529,8 @@ impl SourceConnector for MongoSource {
 
     async fn row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError> {
         let mut checksums = Vec::new();
-        let mut cursor_id: i64 = 0;
 
-        let mut cmd = bson_build_doc(vec![
+        let cmd = bson_build_doc(vec![
             bson_encode_string_typed("find", &table.name),
             bson_encode_int64("batchSize", 1000),
         ]);
@@ -602,9 +564,8 @@ impl SourceConnector for MongoSource {
                 break;
             }
 
-            cursor_id = next_cursor;
             let getmore_cmd = bson_build_doc(vec![
-                bson_encode_string_typed("getMore", &cursor_id.to_string()),
+                bson_encode_string_typed("getMore", &next_cursor.to_string()),
                 bson_encode_string_typed("collection", &table.name),
                 bson_encode_int64("batchSize", 1000),
             ]);

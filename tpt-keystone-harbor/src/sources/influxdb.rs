@@ -38,7 +38,6 @@ struct InfluxConn {
     stream: TcpStream,
     buf: Vec<u8>,
     host_header: String,
-    addr: String,
     database: String,
 }
 
@@ -52,7 +51,6 @@ impl InfluxConn {
             stream,
             buf: Vec::with_capacity(65536),
             host_header: format!("{host}:{port}"),
-            addr: format!("{host}:{port}"),
             database: database.to_string(),
         })
     }

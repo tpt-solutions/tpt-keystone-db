@@ -44,6 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install unixODBC (tpt-keystone-harbor's odbc-api dep links against it)
+        if: matrix.crate == 'tpt-keystone-harbor'
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
       - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
         with:

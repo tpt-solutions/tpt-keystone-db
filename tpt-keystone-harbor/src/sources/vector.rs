@@ -29,7 +29,6 @@ struct VectorRestClient {
     stream: TcpStream,
     buf: Vec<u8>,
     host_header: String,
-    addr: String,
     auth_header: Option<String>,
 }
 
@@ -47,7 +46,6 @@ impl VectorRestClient {
             stream,
             buf: Vec::with_capacity(65536),
             host_header: format!("{host}:{port}"),
-            addr: format!("{host}:{port}"),
             auth_header: api_key.map(|k| format!("Bearer {k}")),
         })
     }
