@@ -23,6 +23,34 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Option<String>>>,
 }
 
+/// Client-side auto-inference of the Flux topic to subscribe to from a SQL
+/// `SELECT` (single-table only — see the module docs' scope cut). Extracts
+/// the first identifier after `FROM`, ignoring `JOIN`/subqueries, and
+/// returns the table's native CDC topic name `Phase 11` already publishes
+/// to (`__cdc_<table>`). Returns `None` for anything that isn't a
+/// single-table `SELECT ... FROM <table>` (multi-table `JOIN`s have no
+/// single auto-target, and `INSERT`/`UPDATE`/`DELETE` are not CDC
+/// sources here). Pure and host-testable.
+pub fn infer_topic_from_sql(sql: &str) -> Option<String> {
+    let sql = sql.trim();
+    if !sql.to_ascii_lowercase().starts_with("select") {
+        return None;
+    }
+    // Best-effort, ASCII-case-insensitive scan: find the first `FROM`
+    // keyword, then the next whitespace-delimited token is the table.
+    let from_idx = sql.to_ascii_lowercase().find(" from ")?;
+    let after = &sql[from_idx + " from ".len()..];
+    let table = after
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .find(|tok| !tok.is_empty() && tok.to_ascii_lowercase() != "from")?;
+    // Reject apparent joins / multi-source FROMs (second identifier after
+    // the table, before any clause boundary, is a JOIN/coma source).
+    if table.to_ascii_lowercase().contains("join") {
+        return None;
+    }
+    Some(format!("__cdc_{}", table))
+}
+
 // Everything below actually talks to a browser (`fetch`, `WebSocket`), so it
 // only compiles for the wasm32 target — see `lib.rs` module docs for why
 // this crate's tests are split between "host-testable pure logic" and
@@ -38,6 +66,7 @@ mod browser {
     use web_sys::{RequestInit, RequestMode};
 
     use super::QueryResult;
+    use super::infer_topic_from_sql;
     use crate::reactive::Signal;
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,9 +154,15 @@ impl KeystoneClient {
     /// populating the returned `Signal`; if `realtime_topic` is set, each
     /// message on that Flux topic triggers a fresh fetch that replaces the
     /// signal's value. Returns the signal plus the live WebSocket handle (if
-    /// any) that the caller must keep alive.
+    /// any) that the caller must keep alive. When `realtime_topic` is
+    /// `None`, the topic is auto-inferred from `sql` via
+    /// `infer_topic_from_sql` (single-table `SELECT` only; multi-table
+    /// joins and non-SELECT statements fall back to `None` — no live
+    /// updates — documenting the architectural ceiling in the module docs.
     pub fn use_keystone_query(self: &Rc<Self>, sql: &str, realtime_topic: Option<&str>) -> (Signal<QueryResult>, Option<web_sys::WebSocket>) {
         let signal = Signal::new(QueryResult::default());
+        let inferred = infer_topic_from_sql(sql);
+        let topic = realtime_topic.or_else(|| inferred.as_deref());
         let refetch = {
             let client = self.clone();
             let sql = sql.to_string();
@@ -146,7 +181,7 @@ impl KeystoneClient {
         };
         refetch();
 
-        let ws = match realtime_topic {
+        let ws = match topic {
             Some(topic) => self.subscribe_topic(topic, refetch).ok(),
             None => None,
         };
@@ -157,3 +192,23 @@ impl KeystoneClient {
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::KeystoneClient;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_topic_from_single_table_select() {
+        assert_eq!(infer_topic_from_sql("SELECT * FROM users"), Some("__cdc_users".to_string()));
+        assert_eq!(infer_topic_from_sql("select id from orders where id = 1"), Some("__cdc_orders".to_string()));
+    }
+
+    #[test]
+    fn infer_topic_rejects_non_select_and_joins() {
+        assert_eq!(infer_topic_from_sql("INSERT INTO users VALUES (1)"), None);
+        assert_eq!(infer_topic_from_sql("UPDATE users SET x = 1"), None);
+        // Multi-table FROM with a JOIN has no single auto-target.
+        assert_eq!(infer_topic_from_sql("SELECT * FROM a JOIN b ON a.id = b.id"), None);
+        assert_eq!(infer_topic_from_sql("not sql at all"), None);
+    }
+}

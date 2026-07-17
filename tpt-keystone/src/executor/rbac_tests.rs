@@ -93,7 +93,7 @@ fn non_superuser_denied_role_admin_ddl() {
 #[test]
 fn privilege_grant_allows_then_deny_without() {
     let (db, _b, _l) = open_db();
-    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[], None)
+    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[])
         .unwrap();
     let roles = RoleStore::new(db.clone()).unwrap();
     roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();
@@ -121,7 +121,7 @@ fn privilege_grant_allows_then_deny_without() {
 #[test]
 fn membership_inherits_table_privilege() {
     let (db, _b, _l) = open_db();
-    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[], None)
+    execute_parsed(p("CREATE TABLE t (id INT8 PRIMARY KEY, v INT8)"), db.clone(), &[])
         .unwrap();
     let roles = RoleStore::new(db.clone()).unwrap();
     roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();

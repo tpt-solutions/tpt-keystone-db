@@ -35,10 +35,12 @@
 //! `Canvas.*` components (the sixth, `AgentMonitor`, is Mirror-native,
 //! Phase 17).
 
-pub mod client;
-pub mod components;
-pub mod reactive;
-pub mod render;
+    pub mod client;
+    pub mod components;
+    pub mod reactive;
+    pub mod render;
+    pub mod theme;
+
 
 #[cfg(target_arch = "wasm32")]
 pub use components::agent_monitor::CanvasAgentMonitor;

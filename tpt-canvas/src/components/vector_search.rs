@@ -50,6 +50,7 @@ pub struct CanvasVectorSearch {
 impl CanvasVectorSearch {
     #[wasm_bindgen(constructor)]
     pub fn new(container_id: &str, http_base: &str, ws_base: &str, sql: &str, score_field: &str, realtime_topic: &str) -> Result<CanvasVectorSearch, JsValue> {
+        crate::theme::apply_theme(&crate::theme::Theme::default());
         let client = Rc::new(KeystoneClient::new(http_base, ws_base));
         let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
         let (data, ws) = client.use_keystone_query(sql, topic);
@@ -79,15 +80,15 @@ fn render(container_id: &str, result: &QueryResult, score_field: &str) {
         let pct = ((1.0 - score / max_score) * 100.0).clamp(0.0, 100.0);
         row.set_attribute(
             "style",
-            "display:flex;align-items:center;gap:8px;padding:4px 0;font:13px sans-serif;",
+            "display:flex;align-items:center;gap:8px;padding:4px 0;font:13px sans-serif;color:var(--tpt-text);",
         )
         .ok();
         row.set_inner_html(&format!(
             "<div style=\"flex:1\">{label}</div>\
-             <div style=\"width:80px;height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden\">\
-               <div style=\"width:{pct:.0}%;height:100%;background:#2563eb\"></div>\
+             <div style=\"width:80px;height:8px;background:var(--tpt-surface);border-radius:4px;overflow:hidden\">\
+                <div style=\"width:{pct:.0}%;height:100%;background:var(--tpt-accent)\"></div>\
              </div>\
-             <div style=\"width:60px;text-align:right;color:#64748b\">{score:.4}</div>"
+             <div style=\"width:60px;text-align:right;color:var(--tpt-muted)\">{score:.4}</div>"
         ));
         let _ = container.append_child(&row);
     }

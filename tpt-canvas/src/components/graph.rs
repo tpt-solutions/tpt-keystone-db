@@ -9,6 +9,8 @@
 //! edges as distinct row shapes: `nodes_sql` must select an `id` column,
 //! `edges_sql` must select `(from_id, to_id)`.
 
+use crate::client::QueryResult;
+
 /// One fixed-iteration Fruchterman-Reingold layout pass. Deterministic
 /// initial placement (points on a circle) rather than random, so this is a
 /// pure function of `(node_count, edges)` and unit-testable without a PRNG.
@@ -77,6 +79,56 @@ fn resolve_edges(node_ids: &[String], edge_rows: &[(String, String)]) -> Vec<(us
         .collect()
 }
 
+/// Client-side translator for a GQL `MATCH` query result into the
+/// `(node_ids, edges)` shape `CanvasGraph::draw` consumes. No server change
+/// needed — `gql::execute_match` already returns ordinary rows; this just
+/// reshapes them for the graph renderer.
+///
+/// Accepts two result shapes:
+/// - a pre-joined edge table with `from`/`to` (or `from_id`/`to_id`)
+///   columns (each row is one edge), or
+/// - a node list with an `id` column (no edges — produces nodes only).
+/// Either way it returns the sorted unique node ids plus resolved
+/// `(usize, usize)` edges.
+pub fn translate_match_result(result: &QueryResult) -> (Vec<String>, Vec<(usize, usize)>) {
+    let find = |name: &str| result.columns.iter().position(|c| c.eq_ignore_ascii_case(name));
+
+    // Shape A: edge rows via (from, to) / (from_id, to_id).
+    if let (Some(fi), Some(ti)) = (find("from").or_else(|| find("from_id")), find("to").or_else(|| find("to_id"))) {
+        let mut node_ids: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let edge_pairs: Vec<(String, String)> = result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let f = row.get(fi).and_then(|c| c.clone())?;
+                let t = row.get(ti).and_then(|c| c.clone())?;
+                if seen.insert(f.clone()) {
+                    node_ids.push(f.clone());
+                }
+                if seen.insert(t.clone()) {
+                    node_ids.push(t.clone());
+                }
+                Some((f, t))
+            })
+            .collect();
+        let edges = resolve_edges(&node_ids, &edge_pairs);
+        return (node_ids, edges);
+    }
+
+    // Shape B: a node list with `id`.
+    if let Some(id_i) = find("id") {
+        let node_ids: Vec<String> = result
+            .rows
+            .iter()
+            .filter_map(|row| row.get(id_i).and_then(|c| c.clone()))
+            .collect();
+        return (node_ids, vec![]);
+    }
+
+    (vec![], vec![])
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use std::cell::RefCell;
@@ -85,7 +137,7 @@ mod wasm_impl {
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
 
-    use super::{fruchterman_reingold, resolve_edges};
+    use super::{fruchterman_reingold, resolve_edges, translate_match_result};
     use crate::client::{KeystoneClient, QueryResult};
     use crate::render::Canvas2d;
 
@@ -126,6 +178,50 @@ impl CanvasGraph {
         });
 
         let graph = CanvasGraph { _canvas: canvas, positions, _node_ws: node_ws, _edge_ws: edge_ws, _effect: effect };
+        graph.install_drag_handler(canvas_id)?;
+        Ok(graph)
+    }
+
+    /// Like `new`, but consumes the result of a single GQL `MATCH` query
+    /// (see `gql::execute_match` server-side) which returns either edge
+    /// rows (`from`/`to`, or `from_id`/`to_id`) or a node list (`id`).
+    /// `translate_match_result` reshapes it client-side into the node/edge
+    /// shapes `draw` expects — no server change required.
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_from_match(
+        canvas_id: &str,
+        http_base: &str,
+        ws_base: &str,
+        match_sql: &str,
+        realtime_topic: &str,
+    ) -> Result<CanvasGraph, JsValue> {
+        let canvas = Canvas2d::mount(canvas_id).map_err(|e| JsValue::from_str(&e))?;
+        let client = Rc::new(KeystoneClient::new(http_base, ws_base));
+        let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
+        let (data, node_ws) = client.use_keystone_query(match_sql, topic);
+
+        let positions = Rc::new(RefCell::new(Vec::new()));
+        let draw_canvas = Canvas2d { ctx: canvas.ctx.clone(), width: canvas.width, height: canvas.height };
+        let draw_positions = positions.clone();
+        let effect = crate::reactive::create_effect(move || {
+            let result = data.get();
+            let (node_ids, edges) = translate_match_result(&result);
+            let nodes = QueryResult {
+                columns: vec!["id".into()],
+                rows: node_ids.iter().map(|id| vec![Some(id.clone())]).collect(),
+            };
+            let edges = QueryResult {
+                columns: vec!["from".into(), "to".into()],
+                rows: edges
+                    .iter()
+                    .map(|(a, b)| vec![Some(node_ids[*a].clone()), Some(node_ids[*b].clone())])
+                    .collect(),
+            };
+            draw(&draw_canvas, &nodes, &edges, &draw_positions);
+        });
+
+        let graph = CanvasGraph { _canvas: canvas, positions, _node_ws: node_ws, _edge_ws: None, _effect: effect };
         graph.install_drag_handler(canvas_id)?;
         Ok(graph)
     }
@@ -211,10 +307,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_edges_maps_ids_to_indices() {
-        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let edges = vec![("a".to_string(), "c".to_string()), ("b".to_string(), "missing".to_string())];
-        assert_eq!(resolve_edges(&ids, &edges), vec![(0, 2)]);
+    fn translate_match_result_reads_edge_rows() {
+        let result = QueryResult {
+            columns: vec!["from".into(), "to".into()],
+            rows: vec![
+                vec![Some("a".into()), Some("b".into())],
+                vec![Some("b".into()), Some("c".into())],
+            ],
+        };
+        let (ids, edges) = translate_match_result(&result);
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(edges, vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn translate_match_result_reads_node_list() {
+        let result = QueryResult {
+            columns: vec!["id".into()],
+            rows: vec![vec![Some("x".into())], vec![Some("y".into())]],
+        };
+        let (ids, edges) = translate_match_result(&result);
+        assert_eq!(ids, vec!["x".to_string(), "y".to_string()]);
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn translate_match_result_handles_empty() {
+        let result = QueryResult { columns: vec!["other".into()], rows: vec![] };
+        assert_eq!(translate_match_result(&result), (vec![], vec![]));
+        assert_eq!(translate_match_result(&QueryResult::default()), (vec![], vec![]));
     }
 
     #[test]

@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "TPT Keystone — cloud-native relational database engine"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpt-solutions/tpt-keystone-db"
+homepage = "https://github.com/tpt-solutions/tpt-keystone-db"
+documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
+readme = "../README.md"
+keywords = ["database", "sql", "postgres", "lsm", "vector-search"]
+categories = ["database", "data-structures"]
+rust-version = "1.85"
 
 [lib]
 name = "tpt_keystone"

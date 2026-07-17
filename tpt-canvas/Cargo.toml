@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "TPT Canvas — the data-aware frontend framework for TPT Keystone (Rust -> WASM)"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpt-solutions/tpt-keystone-db"
+homepage = "https://github.com/tpt-solutions/tpt-keystone-db"
+documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
+readme = "../README.md"
+keywords = ["wasm", "webassembly", "frontend", "dashboard", "data-visualization"]
+categories = ["wasm", "web-programming"]
+rust-version = "1.85"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -34,6 +41,7 @@ features = [
     "RequestMode",
     "Response",
     "Headers",
+    "HtmlDocument",
     "WebSocket",
     "MessageEvent",
     "CloseEvent",

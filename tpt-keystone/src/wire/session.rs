@@ -968,7 +968,6 @@ mod tests {
                 crate::sql::parse(&format!("INSERT INTO nums VALUES ({i})")).unwrap(),
                 db.clone(),
                 &[],
-                None,
             )
             .unwrap();
         }
@@ -1282,14 +1281,12 @@ mod tests {
             .unwrap(),
             db.clone(),
             &[],
-            None,
         )
         .unwrap();
         execute_parsed(
             crate::sql::parse("INSERT INTO t VALUES (7, 2.5, true, 'hi')").unwrap(),
             db.clone(),
             &[],
-            None,
         )
         .unwrap();
     }

@@ -52,7 +52,50 @@ or unsafe-default issues.
 | Informational | Conditional-PUT correctness looks right: `put_if_match` (`objectstore.rs:318-348`) maps `None` → `if_none_match("*")` and `Some(etag)` → `if_match` (re-quoted), and distinguishes HTTP 412 (`CasError::Conflict`) from other failures via response status — matches the CAS semantics the manifest/lease code depends on. |
 | Informational | No request/response body or header logging anywhere in `objectstore.rs` — `tracing` isn't invoked in this file at all, so no risk of a `debug!`/`info!` call accidentally dumping a signed request or object body containing secrets. |
 
-## Recommended priority for closing these out
+## 4. Non-Postgres bridge listeners — auth added (Phase 3 / Phase 20 follow-up)
+
+The original audit (sections 1–3) scoped its wire-auth review to the Postgres
+wire protocol listener (`src/wire/session.rs`). The engine also brings up four
+*other* network listeners — the Canvas HTTP query bridge (`wire/http_query.rs`),
+the Flux WebSocket streaming endpoint (`wire/websocket.rs`), the Flux gRPC
+endpoint (`wire/grpc/mod.rs`), and the MCP server (`src/mcp/`) — and none of
+these were covered by the original audit, nor did they have any authentication
+at the time.
+
+As of Phase 3, all four now share one authentication helper,
+`wire::bridge_auth` (`src/wire/bridge_auth.rs`), modeled on `session::run`'s
+zero-config behavior:
+
+- **HTTP, WebSocket, gRPC** authenticate with `Authorization: Basic` (an
+  `Authorization` metadata header on gRPC). When `_tpt_roles` is empty (the
+  default quickstart) the check short-circuits to `Actor::unrestricted()`,
+  exactly preserving the documented zero-config experience; once at least one
+  role exists, a valid `Basic` credential (password verified against the
+  stored SCRAM credential, role must have `LOGIN`) is required.
+- **MCP** keeps its existing `X-TPT-Token` gate and now additionally resolves a
+  concrete RBAC `Actor` (the first superuser role) so downstream tool handlers
+  can enforce per-table RBAC, mirroring the other bridges.
+
+The authenticated `Actor` is threaded into `http_query.rs` and the MCP tool
+handlers (`src/mcp/tools.rs`, `src/mcp/protocol.rs`) for real per-table RBAC.
+Connection-level rate limiting was also added across all four bridges
+(`TPT_HTTP_MAX_CONNECTIONS`, `TPT_FLUX_WS_MAX_CONNECTIONS`,
+`TPT_FLUX_GRPC_MAX_CONNECTIONS`, `TPT_MCP_MAX_CONNECTIONS`, default 1000) as a
+`tokio::sync::Semaphore` held for the connection's lifetime.
+
+| Severity | Finding |
+|---|---|
+| **Fixed** | The four non-Postgres listeners now require authentication once roles are configured (zero-config preserved). See `wire/bridge_auth.rs` and `src/wire/grpc/mod.rs:416`. |
+| Low — **still open** | The HTTP/WebSocket/gRPC bridges enforce *authentication* (who you are) but not *per-topic authorization* — there is no topic-level privilege model in `rbac.rs`, so any authenticated caller can publish/subscribe/poll any Flux topic. Documented as a known architectural ceiling, not fixed here. MCP tool handlers do enforce per-table RBAC. |
+| Informational | The authenticated `Actor` is `unrestricted()` under the zero-config path; this is intended (same as the Postgres listener) and only changes once `_tpt_roles` is populated. |
+
+The Phase 12 "still open" top finding — wire-protocol authentication — is now
+closed for **all five** listeners (Postgres via SCRAM-SHA-256 per
+`tpt-keystone`'s existing session handshake, plus these four bridges via Basic
+token / MCP token). TLS remains opt-in (`TPT_TLS_CERT_PATH` /
+`TPT_TLS_KEY_PATH`); the deployment guidance is to terminate TLS in front of
+the listeners until in-process TLS is the default.
+
 
 1. Wire protocol authentication (SCRAM) + TLS — the only finding that
    changes the server's actual trust boundary; everything else assumes an

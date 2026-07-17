@@ -163,6 +163,7 @@ impl CanvasAgentMonitor {
         metrics_sql: &str,
         realtime_topic: &str,
     ) -> Result<CanvasAgentMonitor, JsValue> {
+        crate::theme::apply_theme(&crate::theme::Theme::default());
         let canvas = Canvas2d::mount(canvas_id).map_err(|e| JsValue::from_str(&e))?;
         let client = Rc::new(KeystoneClient::new(http_base, ws_base));
         let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
@@ -228,13 +229,13 @@ fn render_events(container_id: &str, result: &QueryResult, cursor: i64) {
         let border = if is_current { "2px solid #111" } else { "1px solid transparent" };
         row.set_attribute(
             "style",
-            &format!("display:flex;gap:8px;align-items:baseline;padding:3px 4px;border:{border};font:12px sans-serif;"),
+            &format!("display:flex;gap:8px;align-items:baseline;padding:3px 4px;border:{border};font:12px sans-serif;color:var(--tpt-text);"),
         ).ok();
         let tool = event.tool_name.as_deref().map(|t| format!(" ({t})")).unwrap_or_default();
         let err = event.error.as_deref().map(|e| format!(" — {e}")).unwrap_or_default();
         row.set_inner_html(&format!(
             "<div style=\"width:14px;height:14px;border-radius:50%;background:{color}\"></div>\
-             <div style=\"width:70px;color:#64748b\">{agent}</div>\
+             <div style=\"width:70px;color:var(--tpt-muted)\">{agent}</div>\
              <div style=\"width:70px;font-weight:600\">{kind}{tool}</div>\
              <div style=\"flex:1\">{detail}{err}</div>",
             color = event_kind_color(&event.kind),

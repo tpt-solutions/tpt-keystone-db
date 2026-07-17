@@ -58,4 +58,8 @@ impl Canvas2d {
         self.ctx.set_fill_style_str(fill);
         let _ = self.ctx.fill_text(text, x, y);
     }
+
+    pub fn fill_rect(&self, x: f64, y: f64, w: f64, h: f64) {
+        self.ctx.fill_rect(x, y, w, h);
+    }
 }

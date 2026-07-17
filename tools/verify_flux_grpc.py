@@ -11,9 +11,20 @@ codegen is required.
 Exercises: Publish (unary) -> Subscribe (server-streaming) sees the live record
 -> Poll (unary) returns it from a consumer group.
 
+Auth coverage: when the process is started with `TPT_AUTH_BOOTSTRAP_USER` /
+`TPT_AUTH_BOOTSTRAP_PASSWORD` set, the gRPC listener (like the HTTP/WebSocket
+bridges) requires a valid `Authorization: Basic` metadata header — see
+`src/wire/bridge_auth.rs` and the Phase 3 bridge-auth work. In that mode this
+script sends the matching header on every call and additionally asserts that a
+request *without* it is rejected (HTTP 401 / gRPC UNAUTHENTICATED), exercising
+the auth gate end-to-end rather than only the zero-config path. When those env
+vars are unset (the default quickstart), auth is skipped and the script behaves
+exactly as before.
+
 Run:  python tools/verify_flux_grpc.py
 (assumes `cargo build` has produced target/debug/tpt-keystone)
 """
+import base64
 import os
 import signal
 import socket
@@ -35,6 +46,17 @@ PROTO = os.path.join(ROOT, "docs", "formats", "flux_grpc.proto")
 BIN = os.path.join(ROOT, "tpt-keystone", "target", "debug", "tpt-keystone.exe")
 ADDR = os.environ.get("TPT_FLUX_GRPC_ADDR", "0.0.0.0:5436").replace("0.0.0.0", "127.0.0.1")
 SERVICE = "flux.Flux"
+
+# Bootstrap credentials (optional). When set, the server starts with
+# role-gated auth and gRPC calls must carry a Basic header.
+AUTH_USER = os.environ.get("TPT_AUTH_BOOTSTRAP_USER")
+AUTH_PASS = os.environ.get("TPT_AUTH_BOOTSTRAP_PASSWORD")
+# grpcio generic RPCs take metadata as an iterable of (key, value) tuples.
+AUTH_METADATA = (
+    [("authorization", "Basic " + base64.b64encode(f"{AUTH_USER}:{AUTH_PASS}".encode()).decode())]
+    if AUTH_USER and AUTH_PASS else None
+)
+
 
 # --- generate message classes from the .proto (no grpc codegen plugin) -------
 sys.path.insert(0, HERE)
@@ -111,15 +133,27 @@ def main():
             f"/{SERVICE}/CreateTopic",
             request_serializer=serialize,
             response_deserializer=pb.CreateTopicResponse.FromString,
-        )(pb.CreateTopicRequest(name="greetings"), timeout=10)
+        )(pb.CreateTopicRequest(name="greetings"), timeout=10, metadata=AUTH_METADATA)
 
         # 1) Publish (unary)
         pub = pb.PublishRequest(topic="greetings", key=b"k1", value=b"hello-grpc")
         resp = channel.unary_unary(
             f"/{SERVICE}/Publish", request_serializer=serialize, response_deserializer=pb.PublishResponse.FromString
-        )(pub, timeout=10)
+        )(pub, timeout=10, metadata=AUTH_METADATA)
         print(f"Publish -> partition={resp.partition} offset={resp.offset}")
         assert resp.offset == 0, "expected first publish at offset 0"
+
+        # If auth is configured, verify the gate rejects a call with no
+        # credentials (the zero-config path always accepts, so skip there).
+        if AUTH_METADATA is not None:
+            try:
+                channel.unary_unary(
+                    f"/{SERVICE}/Publish", request_serializer=serialize, response_deserializer=pb.PublishResponse.FromString
+                )(pb.PublishRequest(topic="greetings", value=b"unauth"), timeout=10)
+                raise AssertionError("gRPC accepted a request without Basic auth")
+            except grpc.RpcError as e:
+                assert e.code() == grpc.StatusCode.UNAUTHENTICATED, f"expected UNAUTHENTICATED, got {e.code()}"
+                print("auth gate rejected unauthenticated gRPC call (UNAUTHENTICATED)")
 
         # 2) Subscribe (server-streaming) and observe the live publish.
         # grpcio's generic `stream_stream(method, req_ser, resp_deser)` returns a
@@ -133,7 +167,7 @@ def main():
             request_serializer=serialize,
             response_deserializer=deserialize_record,
         )
-        stream = stream_call([sub_req], timeout=30)
+        stream = stream_call([sub_req], timeout=30, metadata=AUTH_METADATA)
         # Give the subscription time to register server-side before publishing
         # the record we expect to be streamed back (a too-short delay lets the
         # publish race ahead of the subscribe registration).
@@ -142,7 +176,7 @@ def main():
             f"/{SERVICE}/Publish",
             request_serializer=serialize,
             response_deserializer=pb.PublishResponse.FromString,
-        )(pb.PublishRequest(topic="greetings", value=b"second"), timeout=10)
+        )(pb.PublishRequest(topic="greetings", value=b"second"), timeout=10, metadata=AUTH_METADATA)
         received = []
         try:
             for rec in stream:
@@ -163,7 +197,7 @@ def main():
             f"/{SERVICE}/Poll",
             request_serializer=serialize,
             response_deserializer=pb.PollResponse.FromString,
-        )(poll, timeout=10)
+        )(poll, timeout=10, metadata=AUTH_METADATA)
         print(f"Poll -> {len(presp.records)} record(s) for group g1")
         assert len(presp.records) >= 1, "poll returned nothing"
 
