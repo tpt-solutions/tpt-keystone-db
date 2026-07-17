@@ -5,7 +5,6 @@ edition = "2021"
 description = "tpt — single-binary CLI for TPT Keystone: interactive REPL, query execution, export/import, schema introspection, Flux stream tailing, and schema migrations."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpt-solutions/tpt-keystone-db"
-homepage = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "../README.md"
 keywords = ["database", "cli", "sql", "postgres", "repl"]

@@ -5,7 +5,6 @@ edition = "2021"
 description = "tpt-harbor — universal data migration platform: discover/validate/snapshot/replicate/verify/cutover pipelines onto TPT engines. Harbor/PG (PostgreSQL -> Keystone) is fully implemented; other sources are trait-level stubs (see src/sources)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpt-solutions/tpt-keystone-db"
-homepage = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "../README.md"
 keywords = ["database", "migration", "etl", "postgres", "postgresql"]

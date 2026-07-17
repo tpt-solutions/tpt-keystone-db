@@ -5,7 +5,6 @@ edition = "2021"
 description = "TPT Canvas — the data-aware frontend framework for TPT Keystone (Rust -> WASM)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpt-solutions/tpt-keystone-db"
-homepage = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "../README.md"
 keywords = ["wasm", "webassembly", "frontend", "dashboard", "data-visualization"]
