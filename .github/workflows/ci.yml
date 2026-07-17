@@ -79,6 +79,38 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown
 
   # ---------------------------------------------------------------------------
+  # Clippy: report-only lint pass across every Rust crate. Not a hard gate yet
+  # (tpt-keystone alone currently has ~246 pre-existing warnings to work
+  # through), so failures here warn but don't fail the workflow.
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: ${{ matrix.crate }} (cargo clippy)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [tpt-keystone, tpt-cli, tpt-sdk, tpt-harbor, tpt-operator, tpt-canvas]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.crate == 'tpt-canvas' && 'wasm32-unknown-unknown' || '' }}
+      - uses: mozilla-actions/sccache-action@v0.0.6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+      - name: Clippy (report-only)
+        working-directory: ${{ matrix.crate }}
+        continue-on-error: true
+        run: |
+          if [ "${{ matrix.crate }}" = "tpt-canvas" ]; then
+            cargo clippy --target wasm32-unknown-unknown --all-targets -- -W clippy::all
+          else
+            cargo clippy --all-targets -- -W clippy::all
+          fi
+
+  # ---------------------------------------------------------------------------
   # TypeScript SDKs: build (tsc) + node --test.
   # ---------------------------------------------------------------------------
   javascript:
@@ -172,6 +204,23 @@ jobs:
       - name: Stop keystone
         if: always()
         run: kill "$(cat keystone.pid)" || true
+
+  # ---------------------------------------------------------------------------
+  # Dart/Flutter SDK: offline `dart test` (fully mocked, no live server needed).
+  # ---------------------------------------------------------------------------
+  dart:
+    name: tpt_sdk (dart test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tpt_sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: dart test
 
   # ---------------------------------------------------------------------------
   # Go SDK: offline `go test ./...`, then `-tags live` against the real

@@ -40,14 +40,35 @@ pub fn infer_topic_from_sql(sql: &str) -> Option<String> {
     // keyword, then the next whitespace-delimited token is the table.
     let from_idx = sql.to_ascii_lowercase().find(" from ")?;
     let after = &sql[from_idx + " from ".len()..];
+    // The FROM clause runs until the next query clause boundary (or the end
+    // of the statement). Capture it so we can reject multi-source FROMs
+    // (anything containing a JOIN keyword has no single auto-target).
+    let clause_boundary = after
+        .to_ascii_lowercase()
+        .find(|c| matches!(c, 'w' | 'g' | 'o' | 'h' | 'l'))
+        .and_then(|i| {
+            let rest = &after.to_ascii_lowercase()[i..];
+            if rest.starts_with("where")
+                || rest.starts_with("group")
+                || rest.starts_with("order")
+                || rest.starts_with("having")
+                || rest.starts_with("limit")
+            {
+                Some(i)
+            } else {
+                None
+            }
+        });
+    let from_clause = match clause_boundary {
+        Some(i) => &after[..i],
+        None => after,
+    };
+    if from_clause.to_ascii_lowercase().contains("join") {
+        return None;
+    }
     let table = after
         .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .find(|tok| !tok.is_empty() && tok.to_ascii_lowercase() != "from")?;
-    // Reject apparent joins / multi-source FROMs (second identifier after
-    // the table, before any clause boundary, is a JOIN/coma source).
-    if table.to_ascii_lowercase().contains("join") {
-        return None;
-    }
     Some(format!("__cdc_{}", table))
 }
 

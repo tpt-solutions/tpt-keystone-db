@@ -15,7 +15,7 @@ use tpt_harbor::sources::{
     odbc::OdbcSource, oracle::OracleSource, postgres::PostgresSource, postgis::PostGisSource,
     vector::VectorSource, SourceKind,
 };
-use tpt_harbor::target::keystone::KeystoneTarget;
+use tpt_harbor::targets::keystone::KeystoneTarget;
 
 #[derive(Parser)]
 #[command(name = "tpt-harbor", about = "Universal data migration platform for TPT engines")]

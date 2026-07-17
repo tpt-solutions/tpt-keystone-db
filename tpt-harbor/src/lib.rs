@@ -28,5 +28,5 @@ pub mod http;
 pub mod pgwire;
 pub mod schema;
 pub mod sources;
-pub mod target;
+pub mod targets;
 pub mod verify;

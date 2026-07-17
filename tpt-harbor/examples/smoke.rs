@@ -8,7 +8,7 @@
 use tpt_harbor::engine::MigrationEngine;
 use tpt_harbor::pgwire::Client;
 use tpt_harbor::sources::postgres::PostgresSource;
-use tpt_harbor::target::keystone::KeystoneTarget;
+use tpt_harbor::targets::keystone::KeystoneTarget;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

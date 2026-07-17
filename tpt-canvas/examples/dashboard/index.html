@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TPT Keystone — Canvas Dashboard</title>
+    <style>
+      :root {
+        --bg: #0b1120;
+        --surface: #111827;
+        --border: #1f2937;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #3b82f6;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      header {
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+      }
+      header h1 { font-size: 18px; margin: 0; }
+      header .sub { color: var(--muted); }
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        gap: 16px;
+        padding: 16px 24px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        min-height: 280px;
+      }
+      .card h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 8px;
+      }
+      .card canvas,
+      .card #doc {
+        flex: 1;
+        width: 100%;
+        min-height: 220px;
+        border-radius: 6px;
+        background: #fff;
+      }
+      .card #doc { overflow: auto; padding: 8px; color: #111; font: 13px monospace; }
+      .status { color: var(--muted); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>TPT Keystone — Canvas Dashboard</h1>
+      <span class="sub" id="status">connecting…</span>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Time Series</h2>
+        <canvas id="ts"></canvas>
+      </section>
+      <section class="card">
+        <h2>Map</h2>
+        <canvas id="map"></canvas>
+      </section>
+      <section class="card">
+        <h2>Graph</h2>
+        <canvas id="graph"></canvas>
+      </section>
+      <section class="card">
+        <h2>Vector Search</h2>
+        <div id="vec" style="flex:1; overflow:auto;"></div>
+      </section>
+      <section class="card">
+        <h2>Document</h2>
+        <div id="doc"></div>
+      </section>
+      <section class="card">
+        <h2>Agent Monitor</h2>
+        <div id="agent" style="flex:1; overflow:auto;"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

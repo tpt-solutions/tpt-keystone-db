@@ -42,6 +42,7 @@ features = [
     "Response",
     "Headers",
     "HtmlDocument",
+    "HtmlHeadElement",
     "WebSocket",
     "MessageEvent",
     "CloseEvent",

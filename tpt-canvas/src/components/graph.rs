@@ -186,8 +186,10 @@ impl CanvasGraph {
     /// (see `gql::execute_match` server-side) which returns either edge
     /// rows (`from`/`to`, or `from_id`/`to_id`) or a node list (`id`).
     /// `translate_match_result` reshapes it client-side into the node/edge
-    /// shapes `draw` expects — no server change required.
-    #[wasm_bindgen(constructor)]
+    /// shapes `draw` expects — no server change required. Exposed to JS as
+    /// `CanvasGraph.fromMatch(...)` (wasm-bindgen allows only one
+    /// `#[constructor]`, so this is a static factory rather than a second ctor).
+    #[wasm_bindgen(js_name = "fromMatch")]
     #[allow(clippy::too_many_arguments)]
     pub fn new_from_match(
         canvas_id: &str,

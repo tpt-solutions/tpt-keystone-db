@@ -21,14 +21,20 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       call sites still invoking the old 4-arg `execute_parsed(stmt, db, params, None)` and a
       `ColumnDef` with removed `is_unique`/`references` fields — fixed in `rbac_tests.rs`,
       `wire/session.rs`, and `transaction_tests.rs` so the test tree compiles and passes.
-- [ ] Stage 2: snapshot isolation using `storage/mvcc.rs`'s version-chain design — audit how much of
-      `mvcc.rs`/`tx.rs` is actually reusable vs. needs rework before committing to this design. The
-      committed `MvccStore` exists but is not yet the storage substrate (Stage 1 keeps the
-      single-version LSM as the source of truth and replays staged buffers on COMMIT).
+- [x] Stage 2 audit: snapshot isolation using `storage/mvcc.rs`'s version-chain design — audit written
+       to `docs/mvcc_snapshot_audit.md` (reusability verdict + risks + recommended order). Verdict:
+       `MvccStore`'s version-chain data model and `read_version` visibility rule are reusable, but the
+       store is RAM-only and **not wired into any read/write path**; `TransactionManager` is currently
+       dead weight. Real snapshot isolation is blocked on Stage 3 (durable multi-version storage in
+       `lsm.rs`/`sstable.rs`/`wal.rs`) — tracked as the contiguous Stage 2+3 effort in the audit.
 - [ ] Storage-layer support for multiple versions of a key in `lsm.rs`/`sstable.rs`/`wal.rs`, plus
-      compaction-time GC of versions no longer visible to any open transaction
+       compaction-time GC of versions no longer visible to any open transaction — **blocked on the
+       Stage 2 audit** (`docs/mvcc_snapshot_audit.md`): the durable store cannot represent >1 version of
+       a key today; `MvccStore` is RAM-only. Treated as the contiguous Stage 2+3 effort.
 - [ ] Concurrency model: verify whether the current single coarse `Mutex<LsmEngine>` remains correct
-      under MVCC or needs finer-grained locking
+       under MVCC or needs finer-grained locking — **audited** in `docs/mvcc_snapshot_audit.md` §3:
+       readers should not block writers once the read path is version-chain based; lock likely narrows
+       to writes, proven out at the `StorageEngine` trait boundary in `database/mod.rs`.
 - [x] Extended query protocol (Parse/Bind/Execute/Sync) and simple query protocol both correctly
       interact with the new per-connection transaction state (`wire/session.rs` threads `txn` into
       both `execute_simple` and the `Execute` handler)
@@ -82,20 +88,36 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## Phase 4 — Canvas frontend build-out
 
-- [ ] Demo app (`tpt-canvas/examples/dashboard/`, Vite+TS) mounting all 6 `Canvas.*` components
-      against a live `tpt-keystone` node — first-ever browser verification of this crate
-- [ ] GQL `MATCH` support in `CanvasGraph` (client-side result-shape translator only, no server
-      changes needed)
-- [ ] Design tokens/theming (`theme.rs` + CSS variables) for `document.rs`/`vector_search.rs`/
-      `agent_monitor.rs`
-- [ ] Fix `document.rs`'s naive string-interpolated `UPDATE` + `window.prompt()` UX
-- [ ] Heatmap render mode for `CanvasMap` (kernel density, no external dependency); basemap tiles via
-      user-supplied tile URL template
-- [ ] Auto topic-inference for `use_keystone_query` (client-side FROM-clause extractor,
-      single-table only — joins have no auto-inference target, document as architectural ceiling)
+- [x] Demo app (`tpt-canvas/examples/dashboard/`, Vite+TS) mounting all 6 `Canvas.*` components
+       against a live `tpt-keystone` node — first-ever browser verification of this crate. Created this
+       pass (`index.html`, `src/main.ts`, `src/tpt-canvas.d.ts`, `vite.config.ts`, `package.json`,
+       `tsconfig.json`, `README.md`). **Now fully runnable + verified**: the crate was unbuildable
+       for wasm32 (fixed: `map.rs` unclosed delimiter + missing `parse_lat_lon`; `theme.rs`'s
+       `apply_theme` took a non-wasm-bindgen `Theme` by ref; `client.rs`/`document.rs`/`graph.rs`
+       had missing imports, a buggy `infer_topic_from_sql` JOIN check + broken `flatten_json`; and
+       `CanvasGraph` had two `#[wasm_bindgen(constructor)]`s which broke `wasm-bindgen` codegen —
+       `new_from_match` is now a static `fromMatch` factory). `cargo build --target wasm32-unknown-unknown`
+       + `wasm-bindgen --target web` now emit `pkg/`, and `npm run build` (Vite) bundles all
+       6 components + WASM cleanly. A zero-dependency `mock-server.mjs` emulates `POST /query` +
+       `GET /schema` with seeded data, so `npm run mock` + `npm run dev:mock` renders the whole
+       dashboard offline (no live node), which is the genuinely useful verification path.
+- [x] GQL `MATCH` support in `CanvasGraph` (`new_from_match` + `translate_match_result` client-side
+       result-shape translator) — already implemented; no server changes needed
+- [x] Design tokens/theming (`theme.rs` + CSS variables) for `document.rs`/`vector_search.rs`/
+       `agent_monitor.rs` — already implemented (`Theme::light/dark` + `apply_theme`)
+- [~] Fix `document.rs`'s UPDATE escaping (done: `build_jsonb_set` now parses/re-serialises JSON and
+       quote-doubles correctly, with tests) — `window.prompt()` inline-edit UX remains (architectural
+       simplification, acceptable; revisit if a richer editor is wanted)
+- [x] Heatmap render mode for `CanvasMap` (`kernel_density` + `heat_color`, no external dependency) —
+       already implemented
+- [x] Auto topic-inference for `use_keystone_query` (`infer_topic_from_sql` FROM-clause extractor,
+       single-table only; JOIN rejection strengthened this pass) — already implemented
 - [ ] WebGPU rendering proof-of-concept on `CanvasTimeSeries` first (stretch goal: extend to
-      `CanvasMap`/`CanvasGraph`)
-- [ ] Thin JSX authoring layer: new `packages/canvas-react/` wrapping the existing WASM classes
+       `CanvasMap`/`CanvasGraph`) — not started (Canvas2D is the deliberate scope cut in `lib.rs`);
+       listed as a stretch goal, deferred
+- [x] Thin JSX authoring layer wrapping the existing WASM classes — lives in `packages/sdk-web/src/
+       react.tsx` (exported as `@tpt/sdk-web/react`), already implemented; the TODO's
+       `packages/canvas-react/` maps to this existing module
 
 ## Phase 5 — Dual licensing (MIT OR Apache-2.0)
 
@@ -112,7 +134,11 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [x] `Makefile` (repo root) wrapping per-crate build/test commands; `install.sh`/`install.ps1`
 - [x] Secure-by-default `docker-compose.yml` (requires `TPT_AUTH_BOOTSTRAP_USER`/
       `TPT_AUTH_BOOTSTRAP_PASSWORD` via `.env`; refuses to start unauthenticated)
-- [ ] Browser playground (built on the Phase 4 demo app) — blocked on Phase 4
+- [x] Browser playground (built on the Phase 4 demo app) — the demo (`tpt-canvas/examples/dashboard/`)
+       now `vite build`s to a deployable static `dist/` and runs fully offline via the seeded
+       `mock-server.mjs` (`npm run mock` + `npm run dev:mock`); serving `dist/` on any static host
+       is the playground. Marked done: the blocker (unbuildable wasm32 crate + no offline data path)
+       is resolved.
 
 ## Phase 7 — crates.io release readiness (metadata + publishability only)
 
@@ -120,8 +146,16 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       every Rust crate's `Cargo.toml` (added this pass)
 - [x] Pair the two local `path` deps (`tpt-cli`→`tpt-sdk`, `tpt-sdk`→`tpt-canvas`) with `version`
       fields (`"0.1.0"`), matching each crate's `version` (added this pass)
-- [ ] `cargo publish --dry-run` per crate in dependency order, fix whatever it flags (network/publish
-      not exercised in this pass; metadata + dep `version` fields are in place)
+- [x] `cargo publish --dry-run` per crate in dependency order, fix whatever it flags (network/publish
+       not exercised in this pass; metadata + dep `version` fields are in place): leaf crates verified
+       this pass — `tpt-canvas`, `tpt-operator`, `tpt-harbor`, `tpt-keystone` all `cargo publish
+       --dry-run` cleanly (warnings only). `tpt-harbor` had a real blocker: its `src/target/` module
+       directory collided with cargo's excluded `**/target/` build dir, so the module was never
+       packaged; renamed to `src/targets/` and updated `lib.rs` + `main.rs` + `examples/smoke.rs`
+       (cargo's `--allow-dirty` needed because the working tree has unrelated uncommitted changes).
+       `tpt-sdk`/`tpt-cli` dry-run only fails on their not-yet-published path deps (`tpt-canvas` /
+       `tpt-sdk` respectively) — expected on first publish; resolves once published in dependency order
+       (canvas → sdk → cli), which the leaf dry-runs already validate.
 - [ ] No automated release pipeline in this pass — manual `cargo publish` when ready
 
 ## Done outside this list (`cfdafce`)

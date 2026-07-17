@@ -365,8 +365,9 @@ mod tests {
 
     #[test]
     fn kernel_density_empty_grid_is_safe() {
-        assert_eq!(kernel_density(&[(1.0, 1.0)], 400.0, 400.0, 0, 10, 40.0), vec![]);
-        assert_eq!(kernel_density(&[(1.0, 1.0)], 400.0, 400.0, 10, 0, 40.0), vec![]);
+        let empty: Vec<f64> = vec![];
+        assert_eq!(kernel_density(&[(1.0, 1.0)], 400.0, 400.0, 0, 10, 40.0), empty);
+        assert_eq!(kernel_density(&[(1.0, 1.0)], 400.0, 400.0, 10, 0, 40.0), empty);
     }
 
     #[test]

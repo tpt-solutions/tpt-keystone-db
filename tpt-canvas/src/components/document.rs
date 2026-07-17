@@ -8,16 +8,18 @@
 //! `executor::eval` (Phase 10) rather than the client reconstructing and
 //! sending a whole new document.
 
-/// Builds a `UPDATE {table} SET {column} = jsonb_set({column}, '{path}', {value}') WHERE {pk_column} = '{pk}'`
-/// statement for an in-place edit of one JSON leaf. Both the jsonb path and the
-/// pk are interpolated as *SQL string literals*, so they are escaped by
-/// doubling single quotes (the Postgres/SQL standard rule) — a raw
-/// `value` string is first turned into a valid JSON literal via
-/// `serde_json::to_string` (so embedded quotes/`}`/`\` can't break the
-/// surrounding SQL or the JSON), then the resulting JSON text (which can
-/// itself contain `'`) is quote-doubled before being wrapped in `'...'`.
-/// This replaces the prior naive interpolation that let a `'` in the user's
-/// input terminate the string literal early.
+/// Builds a `UPDATE {table} SET {column} = jsonb_set({column}, '{path}', {value}) WHERE {pk_column} = '{pk}'`
+/// statement for an in-place edit of one JSON leaf. The jsonb `path`, `value`,
+/// and `pk` are all interpolated as *SQL string literals*, so each is escaped
+/// by doubling single quotes (the Postgres/SQL standard rule). The `value`
+/// undergoes an extra JSON-normalisation step: it is first parsed as a JSON
+/// value (so a user typing a raw object/array literal like `{"k":2}` is kept
+/// as a JSON object, not wrapped into a JSON *string*), then re-serialised to
+/// a compact JSON text — this guarantees the embedded value is valid JSON and
+/// that any embedded quotes/`}`/`\` cannot break the surrounding SQL. If the
+/// input is not valid JSON it is treated as a plain string. This replaces the
+/// prior naive interpolation that let a `'` in the user's input terminate the
+/// string literal early.
 pub fn build_jsonb_set(
     table: &str,
     column: &str,
@@ -26,8 +28,12 @@ pub fn build_jsonb_set(
     pk: &str,
     value: &str,
 ) -> String {
-    // `value` -> valid JSON literal (e.g. `"a\"b"`), then quote-double.
-    let json_value = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    // `value` -> valid JSON text. Parse as JSON first so a raw object/array
+    // literal stays a JSON value; fall back to a JSON string for plain text.
+    let json_value = match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()),
+        Err(_) => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+    };
     let json_escaped = json_value.replace('\'', "''");
     let path_escaped = path.replace('\'', "''");
     let pk_escaped = pk.replace('\'', "''");
@@ -63,7 +69,11 @@ pub fn flatten_json(value: &serde_json::Value, path: &str, depth: usize) -> Vec<
         serde_json::Value::Array(arr) => {
             out.push((depth, path.to_string(), "[ ... ]".to_string(), false));
             for (i, v) in arr.iter().enumerate() {
-                let child_path = format!("{path},{i}");
+                let child_path = if path.is_empty() {
+                    i.to_string()
+                } else {
+                    format!("{path},{i}")
+                };
                 out.extend(flatten_json(v, &child_path, depth + 1));
             }
         }
@@ -189,14 +199,15 @@ mod tests {
         // A value with a single quote must be quote-doubled, and the
         // value must be a valid JSON literal (quoted).
         let sql = build_jsonb_set("t", "doc", "a,b", "id", "x'1", "it's");
-        assert!(sql.contains("'it''s'"), "value single quote must be doubled: {sql}");
+        assert!(sql.contains("'\"it''s\"'"), "value single quote must be doubled: {sql}");
         assert!(sql.contains("jsonb_set(doc, '{a,b}', '\"it''s\"')"), "value must be JSON-quoted: {sql}");
         assert!(sql.contains("WHERE id = 'x''1'"), "pk single quote must be doubled: {sql}");
     }
 
     #[test]
     fn build_jsonb_set_handles_nested_json_value() {
-        // A raw JSON object typed by the user stays valid JSON.
+        // A raw JSON object typed by the user stays a JSON value (not a
+        // JSON string) after parse-and-re-serialise normalisation.
         let sql = build_jsonb_set("t", "doc", "0", "id", "1", "{\"k\":2}");
         assert!(sql.contains("'{\"k\":2}'"), "object value must be JSON-quoted: {sql}");
     }
@@ -205,6 +216,14 @@ mod tests {
     fn flatten_json_walks_array_with_index_paths() {
         let value = json!([10, 20]);
         let rows = flatten_json(&value, "", 0);
-        assert_eq!(rows, vec![(0, "0".to_string(), "[0]: 10".to_string(), true), (0, "1".to_string(), "[1]: 20".to_string(), true)]);
+        // Array container node, then each element with its index path.
+        assert_eq!(
+            rows,
+            vec![
+                (0, "".to_string(), "[ ... ]".to_string(), false),
+                (1, "0".to_string(), "10".to_string(), true),
+                (1, "1".to_string(), "20".to_string(), true),
+            ]
+        );
     }
 }

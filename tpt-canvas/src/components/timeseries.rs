@@ -21,6 +21,7 @@ pub fn scale_y(value: f64, min: f64, max: f64, height: f64) -> f64 {
     height - (value - min) / (max - min) * height
 }
 
+#[allow(dead_code)]
 fn numeric_column(result: &QueryResult, field: &str) -> Option<Vec<f64>> {
     let idx = result.columns.iter().position(|c| c == field)?;
     Some(result.rows.iter().map(|row| row.get(idx).and_then(|c| c.as_deref()).and_then(|s| s.parse().ok()).unwrap_or(0.0)).collect())
