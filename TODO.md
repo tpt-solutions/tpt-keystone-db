@@ -181,6 +181,13 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       this sandbox because `libodbc` (unixODBC) isn't installed here — an environment gap unrelated to
       the rename; its lib compiles and packages fine, only the final verification build of the `odbc-api`
       dependency's system library link fails.
+- [x] Fixed the two gaps the dry-runs above surfaced: (1) every crate's `readme` field pointed at
+      `../README.md` (the monorepo root) instead of its own local `README.md`, causing the "readme
+      outside package" warning and shipping the wrong docs to each crate's crates.io page — repointed
+      to `readme = "README.md"` in all 6 crates. (2) every crate's own `LICENSE` file was just the
+      Apache-2.0 text copy-pasted, with no MIT text anywhere in the crate despite `license = "MIT OR
+      Apache-2.0"` in Cargo.toml — added matching `LICENSE`/`LICENSE-MIT`/`LICENSE-APACHE` (copied from
+      the repo root) to all 6 crates so the dual license is actually present in what ships.
 
 ## Done outside this list (`cfdafce`)
 
