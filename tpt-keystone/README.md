@@ -1,5 +1,10 @@
 # tpt-keystone
 
+[![crates.io](https://img.shields.io/crates/v/tpt-keystone.svg)](https://crates.io/crates/tpt-keystone)
+[![docs.rs](https://img.shields.io/docsrs/tpt-keystone)](https://docs.rs/tpt-keystone)
+[![CI](https://github.com/tpt-solutions/tpt-keystone-db/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-keystone-db/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/tpt-keystone.svg)](https://github.com/tpt-solutions/tpt-keystone-db/blob/master/tpt-keystone/LICENSE-MIT)
+
 Cloud-native, Postgres-wire-compatible relational database engine written from scratch in Rust. Seven
 purpose-built engines share one LSM storage substrate: relational (Keystone), geospatial (Meridian),
 vector (Prism), time-series (Chronos), graph (Plexus), document (Canopy), and event-streaming (Flux) —
