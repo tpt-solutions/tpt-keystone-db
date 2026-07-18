@@ -180,8 +180,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p keystone-bin
           for i in 1 2 3 4 5; do
-            if gh run download "${{ github.run_id }}" -n keystone-bin -D .; then
+            if gh run download "${{ github.run_id }}" -n keystone-bin -D keystone-bin; then
               exit 0
             fi
             echo "Download attempt $i failed (artifact storage can be flaky), retrying in 10s..."
@@ -191,8 +192,8 @@ jobs:
           exit 1
       - name: Start keystone
         run: |
-          chmod +x tpt-keystone
-          TPT_PG_ADDR=0.0.0.0:5432 ./tpt-keystone > keystone.log 2>&1 &
+          chmod +x keystone-bin/tpt-keystone
+          TPT_PG_ADDR=0.0.0.0:5432 ./keystone-bin/tpt-keystone > keystone.log 2>&1 &
           echo $! > keystone.pid
       - name: Wait for keystone
         run: |
@@ -256,8 +257,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p keystone-bin
           for i in 1 2 3 4 5; do
-            if gh run download "${{ github.run_id }}" -n keystone-bin -D .; then
+            if gh run download "${{ github.run_id }}" -n keystone-bin -D keystone-bin; then
               exit 0
             fi
             echo "Download attempt $i failed (artifact storage can be flaky), retrying in 10s..."
@@ -267,8 +269,8 @@ jobs:
           exit 1
       - name: Start keystone
         run: |
-          chmod +x tpt-keystone
-          TPT_PG_ADDR=0.0.0.0:5432 ./tpt-keystone > keystone.log 2>&1 &
+          chmod +x keystone-bin/tpt-keystone
+          TPT_PG_ADDR=0.0.0.0:5432 ./keystone-bin/tpt-keystone > keystone.log 2>&1 &
           echo $! > keystone.pid
       - name: Wait for keystone
         run: |
