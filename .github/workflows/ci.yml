@@ -177,19 +177,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Download keystone binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p keystone-bin
-          for i in 1 2 3 4 5; do
-            if gh run download "${{ github.run_id }}" -n keystone-bin -D keystone-bin; then
-              exit 0
-            fi
-            echo "Download attempt $i failed (artifact storage can be flaky), retrying in 10s..."
-            sleep 10
-          done
-          echo "::error::All download attempts for keystone-bin failed"
-          exit 1
+        uses: actions/download-artifact@v4
+        with:
+          name: keystone-bin
+          path: keystone-bin
       - name: Start keystone
         run: |
           chmod +x keystone-bin/tpt-keystone
@@ -254,19 +245,10 @@ jobs:
         with:
           go-version: "1.21"
       - name: Download keystone binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p keystone-bin
-          for i in 1 2 3 4 5; do
-            if gh run download "${{ github.run_id }}" -n keystone-bin -D keystone-bin; then
-              exit 0
-            fi
-            echo "Download attempt $i failed (artifact storage can be flaky), retrying in 10s..."
-            sleep 10
-          done
-          echo "::error::All download attempts for keystone-bin failed"
-          exit 1
+        uses: actions/download-artifact@v4
+        with:
+          name: keystone-bin
+          path: keystone-bin
       - name: Start keystone
         run: |
           chmod +x keystone-bin/tpt-keystone
