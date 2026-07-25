@@ -50,13 +50,19 @@ pub struct Signal<T> {
 
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
-        Self { value: self.value.clone(), subscribers: self.subscribers.clone() }
+        Self {
+            value: self.value.clone(),
+            subscribers: self.subscribers.clone(),
+        }
     }
 }
 
 impl<T: Clone> Signal<T> {
     pub fn new(initial: T) -> Self {
-        Self { value: Rc::new(RefCell::new(initial)), subscribers: Rc::new(RefCell::new(Vec::new())) }
+        Self {
+            value: Rc::new(RefCell::new(initial)),
+            subscribers: Rc::new(RefCell::new(Vec::new())),
+        }
     }
 
     /// Reads the current value, and — if called from inside a
@@ -96,7 +102,9 @@ impl<T: Clone> Signal<T> {
             }
         }
         // Drop subscribers whose effect no longer exists.
-        self.subscribers.borrow_mut().retain(|(_, w)| w.strong_count() > 0);
+        self.subscribers
+            .borrow_mut()
+            .retain(|(_, w)| w.strong_count() > 0);
     }
 }
 
@@ -115,7 +123,10 @@ fn run_effect(effect: &Rc<EffectBox>) {
 /// separate `dispose()` call, matching the "no cleanup graph" scope cut.
 #[must_use = "dropping the returned handle immediately allows the effect to stop running"]
 pub fn create_effect(f: impl FnMut() + 'static) -> Rc<dyn std::any::Any> {
-    let effect = Rc::new(EffectBox { id: next_effect_id(), run: RefCell::new(Box::new(f)) });
+    let effect = Rc::new(EffectBox {
+        id: next_effect_id(),
+        run: RefCell::new(Box::new(f)),
+    });
     run_effect(&effect);
     effect
 }
@@ -124,7 +135,9 @@ pub fn create_effect(f: impl FnMut() + 'static) -> Rc<dyn std::any::Any> {
 /// effect and writes the result into the returned signal. Not lazy (unlike a
 /// real "memo") — it recomputes eagerly whenever a dependency changes, same
 /// as any other `create_effect`.
-pub fn create_memo<T: Clone + 'static>(f: impl Fn() -> T + 'static) -> (Signal<T>, Rc<dyn std::any::Any>) {
+pub fn create_memo<T: Clone + 'static>(
+    f: impl Fn() -> T + 'static,
+) -> (Signal<T>, Rc<dyn std::any::Any>) {
     let initial = f();
     let signal = Signal::new(initial);
     let write = signal.clone();
@@ -170,7 +183,11 @@ mod tests {
         });
         assert_eq!(count.get(), 1);
         untracked.set(99);
-        assert_eq!(count.get(), 1, "effect must not re-run for a signal it never read");
+        assert_eq!(
+            count.get(),
+            1,
+            "effect must not re-run for a signal it never read"
+        );
     }
 
     #[test]
@@ -196,6 +213,10 @@ mod tests {
         assert_eq!(count.get(), 1);
         drop(handle);
         sig.set(2);
-        assert_eq!(count.get(), 1, "effect should not run after its handle is dropped");
+        assert_eq!(
+            count.get(),
+            1,
+            "effect should not run after its handle is dropped"
+        );
     }
 }

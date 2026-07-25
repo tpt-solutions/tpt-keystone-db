@@ -156,7 +156,10 @@ mod tests {
             .limit(10)
             .offset(5)
             .build();
-        assert_eq!(sql, "SELECT id, name FROM users WHERE name = $1 ORDER BY id DESC LIMIT 10 OFFSET 5");
+        assert_eq!(
+            sql,
+            "SELECT id, name FROM users WHERE name = $1 ORDER BY id DESC LIMIT 10 OFFSET 5"
+        );
         assert_eq!(params, vec![Value::Text("Ada".to_string())]);
     }
 
@@ -166,7 +169,10 @@ mod tests {
             .filter_eq("id", 1i64)
             .filter_eq("name", "Ada")
             .build();
-        assert_eq!(sql, "SELECT id, name, signed_up_at FROM users WHERE id = $1 AND name = $2");
+        assert_eq!(
+            sql,
+            "SELECT id, name, signed_up_at FROM users WHERE id = $1 AND name = $2"
+        );
         assert_eq!(params, vec![Value::Int(1), Value::Text("Ada".to_string())]);
     }
 }

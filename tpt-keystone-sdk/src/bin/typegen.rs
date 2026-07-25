@@ -39,7 +39,9 @@ fn rust_type_for(keystone_type: &str) -> &'static str {
 
 fn decode_expr_for(keystone_type: &str, idx: usize) -> String {
     match keystone_type {
-        "int2" | "int4" | "int8" => format!("row.get_str({idx}).and_then(|s| s.parse::<i64>().ok())"),
+        "int2" | "int4" | "int8" => {
+            format!("row.get_str({idx}).and_then(|s| s.parse::<i64>().ok())")
+        }
         "float4" | "float8" => format!("row.get_str({idx}).and_then(|s| s.parse::<f64>().ok())"),
         "bool" => format!("row.get_str({idx}).map(|s| s == \"t\" || s == \"true\")"),
         _ => format!("row.get_str({idx}).map(|s| s.to_string())"),
@@ -53,8 +55,12 @@ struct Column {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:5432".to_string());
-    let mut client = KeystoneClient::connect(&addr).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:5432".to_string());
+    let mut client = KeystoneClient::connect(&addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let result = client
         .query(
@@ -88,23 +94,41 @@ async fn main() -> anyhow::Result<()> {
     for (table, columns) in &tables {
         let struct_name = pascal_case(table);
         let marker_name = format!("{struct_name}Table");
-        let cols_list = columns.iter().map(|c| format!("\"{}\"", c.name)).collect::<Vec<_>>().join(", ");
+        let cols_list = columns
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         out.push_str(&format!("pub struct {marker_name};\n"));
         out.push_str(&format!("impl Table for {marker_name} {{\n"));
         out.push_str(&format!("    const NAME: &'static str = \"{table}\";\n"));
-        out.push_str(&format!("    const COLUMNS: &'static [&'static str] = &[{cols_list}];\n"));
+        out.push_str(&format!(
+            "    const COLUMNS: &'static [&'static str] = &[{cols_list}];\n"
+        ));
         out.push_str("}\n\n");
 
-        out.push_str(&format!("#[derive(Debug, Clone, Default)]\npub struct {struct_name} {{\n"));
+        out.push_str(&format!(
+            "#[derive(Debug, Clone, Default)]\npub struct {struct_name} {{\n"
+        ));
         for c in columns {
-            out.push_str(&format!("    pub {}: Option<{}>,\n", c.name, rust_type_for(&c.data_type)));
+            out.push_str(&format!(
+                "    pub {}: Option<{}>,\n",
+                c.name,
+                rust_type_for(&c.data_type)
+            ));
         }
         out.push_str("}\n\n");
 
-        out.push_str(&format!("impl {struct_name} {{\n    pub fn from_row(row: &Row) -> Self {{\n        Self {{\n"));
+        out.push_str(&format!(
+            "impl {struct_name} {{\n    pub fn from_row(row: &Row) -> Self {{\n        Self {{\n"
+        ));
         for (i, c) in columns.iter().enumerate() {
-            out.push_str(&format!("            {}: {},\n", c.name, decode_expr_for(&c.data_type, i)));
+            out.push_str(&format!(
+                "            {}: {},\n",
+                c.name,
+                decode_expr_for(&c.data_type, i)
+            ));
         }
         out.push_str("        }\n    }\n}\n\n");
     }

@@ -187,7 +187,11 @@ impl QueryResult {
     /// Build a [`QueryResult`]. Mostly useful for tests and for callers
     /// that assemble results without a live [`KeystoneClient`].
     pub fn new(columns: Vec<String>, rows: Vec<Row>, command_tag: Option<String>) -> Self {
-        QueryResult { columns, rows, command_tag }
+        QueryResult {
+            columns,
+            rows,
+            command_tag,
+        }
     }
 }
 
@@ -203,7 +207,10 @@ impl KeystoneClient {
         Self::connect_with_params(addr, &[("user", "tpt_sdk")]).await
     }
 
-    pub async fn connect_with_params(addr: &str, params: &[(&str, &str)]) -> Result<Self, KeystoneError> {
+    pub async fn connect_with_params(
+        addr: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Self, KeystoneError> {
         let conn = Conn::connect(addr, params).await?;
         Ok(Self { conn })
     }
@@ -230,7 +237,10 @@ impl KeystoneClient {
                     rows.clear();
                 }
                 BackendMessage::DataRow(cells) => {
-                    rows.push(Row { columns: columns_arc.clone(), cells });
+                    rows.push(Row {
+                        columns: columns_arc.clone(),
+                        cells,
+                    });
                 }
                 BackendMessage::CommandComplete(tag) => {
                     command_tag = Some(tag);
@@ -243,12 +253,20 @@ impl KeystoneClient {
             }
         }
 
-        Ok(QueryResult { columns, rows, command_tag })
+        Ok(QueryResult {
+            columns,
+            rows,
+            command_tag,
+        })
     }
 
     /// Run a parameterized query over the extended query protocol
     /// (Parse/Bind/Describe/Execute/Sync), all params/results in text format.
-    pub async fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<QueryResult, KeystoneError> {
+    pub async fn query_params(
+        &mut self,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResult, KeystoneError> {
         let encoded: Vec<Option<Vec<u8>>> = params.iter().map(Value::to_param).collect();
 
         self.conn.write_parse("", sql, &[]);
@@ -274,7 +292,10 @@ impl KeystoneClient {
                     columns_arc = std::sync::Arc::new(columns.clone());
                 }
                 BackendMessage::DataRow(cells) => {
-                    rows.push(Row { columns: columns_arc.clone(), cells });
+                    rows.push(Row {
+                        columns: columns_arc.clone(),
+                        cells,
+                    });
                 }
                 BackendMessage::CommandComplete(tag) => command_tag = Some(tag),
                 BackendMessage::PortalSuspended => {}
@@ -292,7 +313,11 @@ impl KeystoneClient {
             }
         }
 
-        Ok(QueryResult { columns, rows, command_tag })
+        Ok(QueryResult {
+            columns,
+            rows,
+            command_tag,
+        })
     }
 
     /// Bulk-load `rows` into `table` via the server's `COPY table FROM STDIN`
@@ -444,7 +469,10 @@ mod tests {
 
     #[test]
     fn keystone_error_formats_human_readable() {
-        assert_eq!(KeystoneError::Server("boom".into()).to_string(), "server error: boom");
+        assert_eq!(
+            KeystoneError::Server("boom".into()).to_string(),
+            "server error: boom"
+        );
     }
 
     #[test]
@@ -460,10 +488,7 @@ mod tests {
             Value::Bool(true),
         ];
         let line = String::from_utf8(encode_copy_line(&row)).unwrap();
-        assert_eq!(
-            line,
-            "1\tAda\t\\N\ttab\\there\\nand\\\\back\t2.5\tt\n"
-        );
+        assert_eq!(line, "1\tAda\t\\N\ttab\\there\\nand\\\\back\t2.5\tt\n");
     }
 
     #[test]

@@ -25,7 +25,11 @@ impl Client {
         self.rt.block_on(self.inner.query(sql))
     }
 
-    pub fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<QueryResult, KeystoneError> {
+    pub fn query_params(
+        &mut self,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResult, KeystoneError> {
         self.rt.block_on(self.inner.query_params(sql, params))
     }
 

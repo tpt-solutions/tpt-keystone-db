@@ -23,15 +23,23 @@ impl Canvas2d {
     pub fn mount(element_id: &str) -> Result<Self, String> {
         let window = web_sys::window().ok_or("no window")?;
         let document = window.document().ok_or("no document")?;
-        let element = document.get_element_by_id(element_id).ok_or_else(|| format!("no element #{element_id}"))?;
-        let canvas: HtmlCanvasElement = element.dyn_into().map_err(|_| format!("#{element_id} is not a <canvas>"))?;
+        let element = document
+            .get_element_by_id(element_id)
+            .ok_or_else(|| format!("no element #{element_id}"))?;
+        let canvas: HtmlCanvasElement = element
+            .dyn_into()
+            .map_err(|_| format!("#{element_id} is not a <canvas>"))?;
         let ctx = canvas
             .get_context("2d")
             .map_err(|e| format!("{e:?}"))?
             .ok_or("2d context unavailable")?
             .dyn_into::<CanvasRenderingContext2d>()
             .map_err(|_| "get_context(\"2d\") did not return CanvasRenderingContext2d")?;
-        Ok(Self { ctx, width: canvas.width() as f64, height: canvas.height() as f64 })
+        Ok(Self {
+            ctx,
+            width: canvas.width() as f64,
+            height: canvas.height() as f64,
+        })
     }
 
     pub fn clear(&self) {

@@ -30,7 +30,11 @@ fn set_last_error(msg: impl std::fmt::Display) {
 /// if there wasn't one. Valid until the next SDK call on this thread.
 #[no_mangle]
 pub extern "C" fn tpt_sdk_last_error() -> *const c_char {
-    LAST_ERROR.with(|slot| slot.borrow().as_ref().map_or(std::ptr::null(), |c| c.as_ptr()))
+    LAST_ERROR.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or(std::ptr::null(), |c| c.as_ptr())
+    })
 }
 
 pub struct ClientHandle(Mutex<Client>);
@@ -70,7 +74,10 @@ pub unsafe extern "C" fn tpt_sdk_connect(addr: *const c_char) -> *mut ClientHand
 /// `client` must be a live pointer returned by [`tpt_sdk_connect`]; `sql`
 /// must be a valid nul-terminated UTF-8 C string.
 #[no_mangle]
-pub unsafe extern "C" fn tpt_sdk_query(client: *mut ClientHandle, sql: *const c_char) -> *mut ResultHandle {
+pub unsafe extern "C" fn tpt_sdk_query(
+    client: *mut ClientHandle,
+    sql: *const c_char,
+) -> *mut ResultHandle {
     if client.is_null() || sql.is_null() {
         set_last_error("client or sql is null");
         return std::ptr::null_mut();
@@ -141,8 +148,12 @@ pub unsafe extern "C" fn tpt_sdk_result_cell(
     }
     *out_len = 0;
     let result = &*result;
-    let Some(row) = result.0.rows.get(row) else { return std::ptr::null() };
-    let Some(cell) = row.get(col) else { return std::ptr::null() };
+    let Some(row) = result.0.rows.get(row) else {
+        return std::ptr::null();
+    };
+    let Some(cell) = row.get(col) else {
+        return std::ptr::null();
+    };
     *out_len = cell.len();
     cell.as_ptr()
 }

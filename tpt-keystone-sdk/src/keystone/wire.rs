@@ -22,8 +22,14 @@ pub struct FieldDescription {
 #[derive(Debug)]
 pub enum BackendMessage {
     AuthenticationOk,
-    ParameterStatus { name: String, value: String },
-    BackendKeyData { pid: i32, secret: i32 },
+    ParameterStatus {
+        name: String,
+        value: String,
+    },
+    BackendKeyData {
+        pid: i32,
+        secret: i32,
+    },
     ReadyForQuery(u8),
     RowDescription(Vec<FieldDescription>),
     DataRow(Vec<Option<Box<[u8]>>>),
@@ -38,9 +44,13 @@ pub enum BackendMessage {
     PortalSuspended,
     EmptyQueryResponse,
     /// Server is ready to receive `CopyData` for a `COPY ... FROM STDIN`.
-    CopyInResponse { columns: usize },
+    CopyInResponse {
+        columns: usize,
+    },
     /// Server is about to stream `CopyData` for a `COPY ... TO STDOUT`.
-    CopyOutResponse { columns: usize },
+    CopyOutResponse {
+        columns: usize,
+    },
     Unknown(u8),
 }
 
@@ -53,7 +63,11 @@ pub struct Conn {
 impl Conn {
     pub async fn connect(addr: &str, params: &[(&str, &str)]) -> anyhow::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
-        let mut conn = Self { stream, read_buf: BytesMut::with_capacity(8192), write_buf: BytesMut::with_capacity(8192) };
+        let mut conn = Self {
+            stream,
+            read_buf: BytesMut::with_capacity(8192),
+            write_buf: BytesMut::with_capacity(8192),
+        };
         conn.write_startup(params);
         conn.flush().await?;
 
@@ -200,7 +214,11 @@ impl Conn {
 
         let msg = match tag {
             b'R' => {
-                let _code = if data.remaining() >= 4 { data.get_i32() } else { 0 };
+                let _code = if data.remaining() >= 4 {
+                    data.get_i32()
+                } else {
+                    0
+                };
                 BackendMessage::AuthenticationOk
             }
             b'S' => {
@@ -213,7 +231,11 @@ impl Conn {
                 let secret = data.get_i32();
                 BackendMessage::BackendKeyData { pid, secret }
             }
-            b'Z' => BackendMessage::ReadyForQuery(if data.has_remaining() { data.get_u8() } else { b'I' }),
+            b'Z' => BackendMessage::ReadyForQuery(if data.has_remaining() {
+                data.get_u8()
+            } else {
+                b'I'
+            }),
             b'T' => {
                 let n = data.get_i16() as usize;
                 let mut fields = Vec::with_capacity(n);

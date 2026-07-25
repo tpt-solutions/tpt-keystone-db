@@ -47,7 +47,10 @@ impl<'a> RowView<'a> {
     }
 
     pub fn to_owned_row(&self) -> Vec<Option<Vec<u8>>> {
-        self.cells.iter().map(|c| c.as_ref().map(|b| b.to_vec())).collect()
+        self.cells
+            .iter()
+            .map(|c| c.as_ref().map(|b| b.to_vec()))
+            .collect()
     }
 }
 
@@ -113,10 +116,9 @@ mod tests {
     fn to_owned_escapes_the_borrow_without_copying_values() {
         let buf = buffer();
         let owned = RowView::new(&buf).to_owned_row();
-        assert_eq!(owned, vec![
-            Some(b"1".to_vec()),
-            None,
-            Some(b"hello".to_vec()),
-        ]);
+        assert_eq!(
+            owned,
+            vec![Some(b"1".to_vec()), None, Some(b"hello".to_vec()),]
+        );
     }
 }

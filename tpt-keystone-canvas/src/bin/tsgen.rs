@@ -14,7 +14,9 @@ fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> std::io::Result<()> {
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:5435".to_string());
+    let addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:5435".to_string());
     let body = http_get(&addr, "/schema")?;
     let schema: serde_json::Value = serde_json::from_str(&body).map_err(std::io::Error::other)?;
 
@@ -44,13 +46,15 @@ fn ts_type_for(keystone_type: &str) -> &'static str {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn pascal_case(s: &str) -> String {
-    s.split(['_', '-']).map(|part| {
-        let mut chars = part.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            None => String::new(),
-        }
-    }).collect()
+    s.split(['_', '-'])
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
