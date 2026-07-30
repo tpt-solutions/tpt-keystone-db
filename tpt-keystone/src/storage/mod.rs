@@ -11,6 +11,7 @@ pub mod flux;
 pub mod geo_index;
 pub mod graph_index;
 pub mod guard;
+pub mod internal_key;
 pub mod io_backend;
 pub mod ivf_pq_index;
 pub mod json_schema;
@@ -29,7 +30,6 @@ pub mod sstable;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ts_index;
-pub mod tx;
 pub mod vector_index;
 pub mod wal;
 
@@ -300,4 +300,11 @@ pub struct StorageStats {
     pub memtable_entries: usize,
     pub sstable_count: usize,
     pub total_disk_bytes: u64,
+    /// Number of currently open MVCC snapshots (open transactions) pinning
+    /// the compaction watermark — see `LsmEngine::register_snapshot`. A
+    /// number that stays persistently high (or never drops back to 0 once
+    /// every transaction ends) usually means a connection is holding a
+    /// transaction open far longer than intended, which prevents compaction
+    /// from reclaiming old versions.
+    pub open_snapshot_count: usize,
 }

@@ -54,7 +54,11 @@ impl TargetConnector for KeystoneTarget {
     }
 
     async fn apply_ddl(&mut self, table: &TableSchema) -> Result<(), ConnectorError> {
-        self.client.execute(&table.to_keystone_ddl()).await.map_err(ConnectorError::Other)
+        self.client.execute(&table.to_keystone_ddl()).await.map_err(ConnectorError::Other)?;
+        for index_ddl in table.index_ddl() {
+            self.client.execute(&index_ddl).await.map_err(ConnectorError::Other)?;
+        }
+        Ok(())
     }
 
     async fn write_rows(&mut self, table: &TableSchema, rows: Vec<SourceRow>) -> Result<(), ConnectorError> {
@@ -154,6 +158,7 @@ mod tests {
                 ColumnSchema { name: "id".into(), source_type: "int4".into(), keystone_type: "INTEGER".into(), nullable: false, is_primary_key: true },
                 ColumnSchema { name: "email".into(), source_type: "text".into(), keystone_type: "TEXT".into(), nullable: true, is_primary_key: false },
             ],
+            indexes: vec![],
         }
     }
 

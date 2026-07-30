@@ -18,6 +18,14 @@ pub struct Manifest {
     pub wal_segment_seq: u64,
     /// Fencing token of the writer that produced this manifest revision.
     pub writer_fencing_token: u64,
+    /// Highest MVCC commit-sequence number durably reflected by this
+    /// manifest revision (i.e. by the SSTables it lists). `#[serde(default)]`
+    /// so a manifest written before this field existed still decodes (as
+    /// `0`, the same "nothing committed yet" sentinel a fresh database
+    /// starts with) — same precedent as `TableSchema`'s `unique_groups`/
+    /// `foreign_keys`/`json_schemas` fields.
+    #[serde(default)]
+    pub max_commit_seq: u64,
 }
 
 impl Manifest {
@@ -66,6 +74,7 @@ mod tests {
             sstable_ids: vec![1, 2, 3],
             wal_segment_seq: 5,
             writer_fencing_token: 1,
+            max_commit_seq: 42,
         };
         let etag = Manifest::save_cas(&store, &m, None).unwrap();
 
@@ -85,5 +94,33 @@ mod tests {
         Manifest::save_cas(&store, &m2, Some(&etag)).unwrap();
         let (loaded2, _) = Manifest::load(&store).unwrap().unwrap();
         assert_eq!(loaded2.sstable_ids, vec![1, 2, 3, 4]);
+    }
+
+    /// A manifest encoded before `max_commit_seq` existed must still decode
+    /// into the current `Manifest` — this is what actually proves bincode's
+    /// positional (non-self-describing) format honors `#[serde(default)]`
+    /// for a missing *trailing* field, rather than erroring on the shorter
+    /// input, since that's not exercised by round-tripping the current shape
+    /// through itself.
+    #[test]
+    fn decodes_a_pre_max_commit_seq_manifest_with_the_default() {
+        #[derive(Serialize)]
+        struct OldManifest {
+            sstable_ids: Vec<u64>,
+            wal_segment_seq: u64,
+            writer_fencing_token: u64,
+        }
+        let old = OldManifest {
+            sstable_ids: vec![7, 8],
+            wal_segment_seq: 3,
+            writer_fencing_token: 2,
+        };
+        let bytes = bincode::serialize(&old).unwrap();
+
+        let decoded: Manifest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.sstable_ids, vec![7, 8]);
+        assert_eq!(decoded.wal_segment_seq, 3);
+        assert_eq!(decoded.writer_fencing_token, 2);
+        assert_eq!(decoded.max_commit_seq, 0, "missing field must default to 0");
     }
 }

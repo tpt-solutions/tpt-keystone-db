@@ -18,11 +18,40 @@ pub struct ColumnSchema {
     pub is_primary_key: bool,
 }
 
+/// A target-engine index to create alongside a table, so migrated data lands
+/// with the same indexing an engine-native table would have (an ANN index for
+/// Prism, a spatial index for Meridian, etc.) instead of sitting as inert
+/// storage. Left empty by sources whose native target is plain relational
+/// Keystone (Postgres, MySQL, MSSQL, Oracle, ODBC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSpec {
+    pub columns: Vec<String>,
+    /// The `USING <KIND>` keyword, e.g. `"SPATIAL"`, `"VECTOR"`, `"TIME"`, `"GRAPH"`, `"GIN"`.
+    pub using: String,
+    /// `WITH (...)` options, rendered as `k = 'v'` pairs.
+    pub with: Vec<(String, String)>,
+}
+
+impl IndexSpec {
+    /// Render as `CREATE INDEX ON "table" USING <KIND> (<cols>)[ WITH (...)]`.
+    fn to_ddl(&self, table_name: &str) -> String {
+        let cols = self.columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
+        let mut ddl = format!("CREATE INDEX ON {} USING {} ({})", quote_ident(table_name), self.using, cols);
+        if !self.with.is_empty() {
+            let opts = self.with.iter().map(|(k, v)| format!("{k} = '{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+            ddl.push_str(&format!(" WITH ({opts})"));
+        }
+        ddl
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub schema: String,
     pub name: String,
     pub columns: Vec<ColumnSchema>,
+    #[serde(default)]
+    pub indexes: Vec<IndexSpec>,
 }
 
 impl TableSchema {
@@ -49,6 +78,12 @@ impl TableSchema {
             cols.push(format!("PRIMARY KEY ({})", pk.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")));
         }
         format!("CREATE TABLE IF NOT EXISTS {} (\n  {}\n)", quote_ident(&self.name), cols.join(",\n  "))
+    }
+
+    /// Render each engine-native index (see [`IndexSpec`]) as its own
+    /// `CREATE INDEX` statement, to run after `to_keystone_ddl()`.
+    pub fn index_ddl(&self) -> Vec<String> {
+        self.indexes.iter().map(|idx| idx.to_ddl(&self.name)).collect()
     }
 }
 
@@ -280,6 +315,43 @@ mod tests {
     }
 
     #[test]
+    fn index_ddl_renders_using_with_no_options() {
+        let idx = IndexSpec { columns: vec!["pos".into()], using: "SPATIAL".into(), with: vec![] };
+        assert_eq!(idx.to_ddl("drones"), "CREATE INDEX ON \"drones\" USING SPATIAL (\"pos\")");
+    }
+
+    #[test]
+    fn index_ddl_renders_with_options_and_escapes_quotes() {
+        let idx = IndexSpec {
+            columns: vec!["from_id".into()],
+            using: "GRAPH".into(),
+            with: vec![("to".into(), "to_id".into()), ("label".into(), "o'brien".into())],
+        };
+        assert_eq!(idx.to_ddl("follows"), "CREATE INDEX ON \"follows\" USING GRAPH (\"from_id\") WITH (to = 'to_id', label = 'o''brien')");
+    }
+
+    #[test]
+    fn table_schema_index_ddl_renders_every_index() {
+        let t = TableSchema {
+            schema: "public".into(),
+            name: "docs".into(),
+            columns: vec![ColumnSchema { name: "embedding".into(), source_type: "[]float".into(), keystone_type: "VECTOR".into(), nullable: false, is_primary_key: false }],
+            indexes: vec![
+                IndexSpec { columns: vec!["embedding".into()], using: "VECTOR".into(), with: vec![("metric".into(), "cosine".into())] },
+            ],
+        };
+        let stmts = t.index_ddl();
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0], "CREATE INDEX ON \"docs\" USING VECTOR (\"embedding\") WITH (metric = 'cosine')");
+    }
+
+    #[test]
+    fn table_schema_with_no_indexes_renders_no_index_ddl() {
+        let t = TableSchema { schema: "public".into(), name: "users".into(), columns: vec![], indexes: vec![] };
+        assert!(t.index_ddl().is_empty());
+    }
+
+    #[test]
     fn renders_create_table_with_primary_key() {
         let t = TableSchema {
             schema: "public".into(),
@@ -288,6 +360,7 @@ mod tests {
                 ColumnSchema { name: "id".into(), source_type: "int4".into(), keystone_type: "INTEGER".into(), nullable: false, is_primary_key: true },
                 ColumnSchema { name: "email".into(), source_type: "text".into(), keystone_type: "TEXT".into(), nullable: true, is_primary_key: false },
             ],
+            indexes: vec![],
         };
         let ddl = t.to_keystone_ddl();
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS \"users\""));

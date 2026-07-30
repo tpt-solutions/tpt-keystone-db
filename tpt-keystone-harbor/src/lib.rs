@@ -4,18 +4,28 @@
 //! detail and honest scope cuts):
 //! - Core migration engine + lifecycle state machine + checkpoint/resume
 //!   ([`engine`]).
-//! - Schema Translator IR + Postgres -> Keystone type mapping ([`schema`]).
+//! - Schema Translator IR + per-source type mapping, plus an `IndexSpec` IR
+//!   for engine-native target indexes ([`schema`]).
 //! - Verification Engine: per-row xxHash3 checksums + row-count diffing
 //!   ([`verify`]).
-//! - **Harbor/PG** end to end: discovery, cursor-batched snapshot,
-//!   `pgoutput` logical-replication CDC ([`sources::postgres`]).
-//! - Keystone target connector ([`target::keystone`]).
-//!
-//! Every other Phase 15 connector (Mongo, Graph, TimeSeries, Stream,
-//! Vector, GIS, Oracle, MySQL, Search, MSSQL) is a named stub in
-//! [`sources`] that reports [`connector::ConnectorError::Unimplemented`] —
-//! present so the CLI's connector matrix and the engine's trait plumbing
-//! are already in place for whichever gets built next.
+//! - Discovery, snapshot, and checksums are real for every named source
+//!   below; only live CDC (`replicate`) is a named, documented scope cut per
+//!   connector — see each `sources::*` module's own doc for its reason (no
+//!   standard change-feed API, or a substantial separate protocol effort).
+//!   **Harbor/PG** additionally has real `pgoutput` logical-replication CDC
+//!   ([`sources::postgres`]), and **Harbor/Stream** (Kafka) gets CDC for
+//!   free since tailing its own log already is one.
+//! - Keystone target connector ([`targets::keystone`]) — the single target
+//!   every source migrates through, since Meridian/Prism/Chronos/Plexus/
+//!   Canopy are SQL-extension features of `tpt-keystone` itself rather than
+//!   separate services. Sources whose native target is one of those engines
+//!   (`sources::SourceKind::target_engine()`) shape their `TableSchema`/rows
+//!   accordingly instead of a generic relational layout: PostGIS/Harbor-Gis
+//!   gets a `SPATIAL` index, vector sources get a `VECTOR` (HNSW) index,
+//!   InfluxDB gets a `TIME` index, Neo4j also migrates relationships as
+//!   `GRAPH`-indexed edge tables (previously dropped entirely), and
+//!   Mongo/Elasticsearch preserve whole documents as GIN-indexed JSON rather
+//!   than flattening fields into typed columns.
 //! - Web dashboard: a hand-rolled, read-only HTTP status server + embedded
 //!   polling page ([`dashboard`]), opt-in via `--dashboard-addr` on
 //!   `transfer`/`replicate`/`verify`/`cutover` — a status view over a

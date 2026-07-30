@@ -305,12 +305,12 @@ fn rollback_after_partial_staged_writes_leaves_committed_store_untouched() {
 }
 
 #[test]
-fn read_committed_sees_other_transactions_committed_writes() {
-    // Read-committed (Stage 1) semantics: an open transaction does NOT take a
-    // snapshot at BEGIN, so once another transaction commits, a later read in
-    // this transaction should see the committed data. This distinguishes
-    // Stage-1 read-committed from snapshot isolation (Stage 2, not yet
-    // implemented), which would not.
+fn snapshot_isolation_hides_other_transactions_later_commits() {
+    // Snapshot isolation (Stage 2+3): a transaction's reads are pinned to
+    // whatever was committed as of BEGIN. Once another transaction commits
+    // afterward, this transaction must NOT see it, even on a later read —
+    // the inverse of the old Stage-1 read-committed behavior this test used
+    // to assert.
     let (db, _b, _l) = open_db();
     create_t(&db);
     let txn_a = db.begin_txn();
@@ -327,9 +327,109 @@ fn read_committed_sees_other_transactions_committed_writes() {
     .unwrap();
     db.commit_txn(&txn_b).unwrap();
 
-    // A, still open and un-snapshotted, now sees B's committed write.
-    assert_eq!(count(&db, Some(&txn_a)), 1);
+    // A, pinned to its BEGIN-time snapshot, must not see B's commit.
+    assert_eq!(count(&db, Some(&txn_a)), 0);
     db.rollback_txn(&txn_a);
+    // Once A is gone, a fresh (autocommit) read sees B's committed row.
+    assert_eq!(count(&db, None), 1);
+}
+
+#[test]
+fn snapshot_pinned_across_multiple_statements_despite_concurrent_commits() {
+    let (db, _b, _l) = open_db();
+    create_t(&db);
+    let txn_a = db.begin_txn();
+    assert_eq!(count(&db, Some(&txn_a)), 0);
+
+    let txn_b1 = db.begin_txn();
+    execute_parsed_as(
+        crate::sql::parse("INSERT INTO t VALUES (1)").unwrap(),
+        db.clone(),
+        &[],
+        &crate::executor::rbac::Actor::unrestricted(),
+        Some(&txn_b1),
+    )
+    .unwrap();
+    db.commit_txn(&txn_b1).unwrap();
+    // A's first read after B's commit must still not see it.
+    assert_eq!(count(&db, Some(&txn_a)), 0);
+
+    let txn_b2 = db.begin_txn();
+    execute_parsed_as(
+        crate::sql::parse("INSERT INTO t VALUES (2)").unwrap(),
+        db.clone(),
+        &[],
+        &crate::executor::rbac::Actor::unrestricted(),
+        Some(&txn_b2),
+    )
+    .unwrap();
+    db.commit_txn(&txn_b2).unwrap();
+    // A's second read, after a second concurrent commit, still sees nothing
+    // — the snapshot doesn't advance statement to statement.
+    assert_eq!(count(&db, Some(&txn_a)), 0);
+
+    db.rollback_txn(&txn_a);
+    // Once A is gone, a fresh read sees both of B's commits.
+    assert_eq!(count(&db, None), 2);
+}
+
+#[test]
+fn own_writes_visible_within_snapshot_alongside_others_hidden() {
+    let (db, _b, _l) = open_db();
+    create_t(&db);
+    let txn_a = db.begin_txn();
+
+    execute_parsed_as(
+        crate::sql::parse("INSERT INTO t VALUES (1)").unwrap(),
+        db.clone(),
+        &[],
+        &crate::executor::rbac::Actor::unrestricted(),
+        Some(&txn_a),
+    )
+    .unwrap();
+
+    // B begins after A and commits concurrently.
+    let txn_b = db.begin_txn();
+    execute_parsed_as(
+        crate::sql::parse("INSERT INTO t VALUES (2)").unwrap(),
+        db.clone(),
+        &[],
+        &crate::executor::rbac::Actor::unrestricted(),
+        Some(&txn_b),
+    )
+    .unwrap();
+    db.commit_txn(&txn_b).unwrap();
+
+    // A sees its own staged write but not B's committed one.
+    assert_eq!(count(&db, Some(&txn_a)), 1);
+
+    db.commit_txn(&txn_a).unwrap();
+    // Once A also commits, both rows exist.
+    assert_eq!(count(&db, None), 2);
+}
+
+#[test]
+fn abandoned_transaction_snapshot_is_released_on_drop() {
+    let (db, _b, _l) = open_db();
+    create_t(&db);
+    assert_eq!(db.stats().open_snapshot_count, 0);
+
+    let txn = db.begin_txn();
+    assert_eq!(
+        db.stats().open_snapshot_count,
+        1,
+        "begin_txn must register its snapshot"
+    );
+
+    // Simulate an abandoned connection: neither COMMIT nor ROLLBACK ever
+    // runs, only the handle going out of scope.
+    drop(txn);
+    assert_eq!(
+        db.stats().open_snapshot_count,
+        0,
+        "dropping an unfinished TxnHandle must release its snapshot registration, \
+         or an abandoned connection would pin compaction's GC watermark forever"
+    );
 }
 
 #[test]

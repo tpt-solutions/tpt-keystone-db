@@ -17,10 +17,8 @@ use super::graph_index::GraphIndex;
 use super::ivf_pq_index::IvfPqStorageIndex;
 use super::lease::LeaseHandle;
 use super::lsm::LsmEngine;
-use super::mvcc::MvccStore;
 use super::objectstore::ObjectStore;
 use super::ts_index::{TimeBucketPolicy, TimeIndex};
-use super::tx::TransactionManager;
 use super::vector_index::VectorIndex;
 use super::{Sequence, StorageStats, TableSchema, UserFunction};
 use crate::vector::hnsw::{HnswConfig, Metric};
@@ -108,8 +106,6 @@ impl ReaderStaleness {
 /// The main database engine that ties together LSM storage, MVCC, schemas, and indexes.
 pub struct Database {
     lsm: Arc<Mutex<LsmEngine>>,
-    mvcc: Arc<MvccStore>,
-    tx_mgr: TransactionManager,
     schemas: Arc<Mutex<HashMap<String, TableSchema>>>,
     functions: Arc<Mutex<HashMap<String, UserFunction>>>,
     sequences: Arc<Mutex<HashMap<String, Sequence>>>,
@@ -199,8 +195,6 @@ impl Database {
             store.clone(),
             lease,
         )?));
-        let mvcc = Arc::new(MvccStore::new());
-        let tx_mgr = TransactionManager::new(mvcc.clone());
         let schemas = Arc::new(Mutex::new(HashMap::new()));
         let functions = Arc::new(Mutex::new(HashMap::new()));
         let sequences = Arc::new(Mutex::new(HashMap::new()));
@@ -405,8 +399,6 @@ impl Database {
 
         Ok(Self {
             lsm,
-            mvcc,
-            tx_mgr,
             schemas,
             functions,
             sequences,
@@ -432,11 +424,6 @@ impl Database {
         })
     }
 
-    /// Get the transaction manager.
-    pub fn tx_mgr(&self) -> &TransactionManager {
-        &self.tx_mgr
-    }
-
     /// Whether `Json` columns are stored using Canopy's native binary jsonb
     /// format (`storage::jsonb`). See `set_jsonb_binary_storage`.
     pub fn jsonb_binary_storage(&self) -> bool {
@@ -452,11 +439,6 @@ impl Database {
     pub fn set_jsonb_binary_storage(&self, enabled: bool) {
         self.jsonb_binary
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Get the MVCC store.
-    pub fn mvcc(&self) -> &Arc<MvccStore> {
-        &self.mvcc
     }
 
     /// Get storage statistics.
@@ -545,45 +527,55 @@ impl Database {
     pub fn begin_txn(&self) -> crate::storage::database::txn::TxnHandle {
         use crate::storage::database::txn::TxnHandle;
         let id = super::mvcc::new_tx_id();
-        TxnHandle::new(id)
+        // Capture the snapshot watermark and register it with the LSM engine
+        // in the same locked section, so no commit can land between "read
+        // current_seq" and "register it" and go unaccounted for.
+        let snapshot_seq = {
+            let mut lsm = self.lsm.lock().unwrap();
+            let seq = lsm.current_seq();
+            lsm.register_snapshot(seq);
+            seq
+        };
+        TxnHandle::new(id, snapshot_seq, self.lsm.clone())
     }
 
     /// Commit a transaction: replay its staged writes into the committed LSM
-    /// store (plus any affected secondary indexes) atomically under the LSM
-    /// lock, then mark it finished. Returns `Ok` even for an already-finished
-    /// handle (idempotent, mirrors Postgres's "no-op COMMIT" after ROLLBACK).
+    /// store as one atomic batch (a single shared `commit_seq` — see
+    /// `LsmEngine::write_batch` — so a concurrently open snapshot never sees
+    /// a torn subset of this commit), maintain any affected secondary
+    /// indexes, then mark it finished. Returns `Ok` even for an
+    /// already-finished handle (idempotent, mirrors Postgres's "no-op
+    /// COMMIT" after ROLLBACK).
     pub fn commit_txn(&self, txn: &crate::storage::database::txn::TxnHandle) -> Result<()> {
         let staged = txn.take_staged();
         if staged.is_empty() {
             return Ok(());
         }
         self.check_writable()?;
-        let mut lsm = self.lsm.lock().unwrap();
+
+        // Extract each write's table name from its composite `table\0key`
+        // bytes up front, building the batch `write_batch` needs.
+        let mut batch: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = Vec::with_capacity(staged.len());
+        let mut per_row_indexing: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
         for (composite_key, write) in staged {
-            // Extract the table name from the composite `table\0key` bytes.
-            let table = {
-                let idx = composite_key.iter().position(|&b| b == 0);
-                match idx {
-                    Some(i) => match std::str::from_utf8(&composite_key[..i]) {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    },
-                    None => continue,
-                }
+            let idx = composite_key.iter().position(|&b| b == 0);
+            let table = match idx {
+                Some(i) => match std::str::from_utf8(&composite_key[..i]) {
+                    Ok(t) => t.to_string(),
+                    Err(_) => continue,
+                },
+                None => continue,
             };
-            match write.value {
-                Some(value) => {
-                    lsm.write(table, &composite_key, &value)?;
-                    drop(lsm);
-                    self.maintain_indexes_on_write(table, &composite_key, &value)?;
-                    lsm = self.lsm.lock().unwrap();
-                }
-                None => {
-                    lsm.delete(table, &composite_key)?;
-                }
+            if let Some(value) = &write.value {
+                per_row_indexing.push((table.clone(), composite_key.clone(), value.clone()));
             }
+            batch.push((table, composite_key, write.value));
         }
-        drop(lsm);
+
+        self.lsm.lock().unwrap().write_batch(&batch)?;
+        for (table, composite_key, value) in per_row_indexing {
+            self.maintain_indexes_on_write(&table, &composite_key, &value)?;
+        }
         Ok(())
     }
 
@@ -631,8 +623,10 @@ impl Database {
     }
 
     /// Read a row, consulting the transaction's staging buffer first so an
-    /// open transaction sees its own uncommitted writes. `txn == None` is the
-    /// legacy immediate path.
+    /// open transaction sees its own uncommitted writes, then falling
+    /// through to the committed store *as of the transaction's snapshot* —
+    /// i.e. as it stood at `BEGIN`, not whatever is committed right now.
+    /// `txn == None` reads the latest committed state (the autocommit path).
     pub fn txn_read(
         &self,
         txn: Option<&crate::storage::database::txn::TxnHandle>,
@@ -647,21 +641,23 @@ impl Database {
                 Err(()) => {}
             }
         }
-        self.lsm.lock().unwrap().read(&composite)
+        let snapshot_seq = txn.map(|t| t.snapshot_seq()).unwrap_or(u64::MAX);
+        self.lsm.lock().unwrap().read_at(&composite, snapshot_seq)
     }
 
-    /// Scan all rows of a table, merging the transaction's staged writes over
-    /// the committed snapshot: staged inserts/updates override committed
-    /// values, staged deletes are removed, and any newly-staged keys not yet
-    /// present in the committed store appear as new rows.
+    /// Scan all rows of a table as of the transaction's snapshot, merging its
+    /// staged writes over top: staged inserts/updates override the
+    /// snapshot's values, staged deletes are removed, and any newly-staged
+    /// keys not yet present in the snapshot appear as new rows.
     pub fn txn_scan(
         &self,
         txn: Option<&crate::storage::database::txn::TxnHandle>,
         table: &str,
     ) -> Result<Vec<crate::storage::KeyValue>> {
         let prefix = Self::make_prefix(table);
+        let snapshot_seq = txn.map(|t| t.snapshot_seq()).unwrap_or(u64::MAX);
         let committed: Vec<(Vec<u8>, Vec<u8>)> = {
-            let all = self.lsm.lock().unwrap().scan()?;
+            let all = self.lsm.lock().unwrap().scan_at(snapshot_seq)?;
             all.into_iter()
                 .filter(|(k, _)| k.starts_with(&prefix))
                 .collect()

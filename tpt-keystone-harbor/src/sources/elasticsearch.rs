@@ -1,10 +1,15 @@
 //! Harbor/Search — Elasticsearch source connector. Hand-written HTTP API
-//! client using the _cat and _search endpoints. Discovery introspects indices
-//! and their mappings, snapshot exports documents via scroll API, CDC is
-//! scope-cut — Elasticsearch lacks a standard change-log API.
+//! client using the _cat and _search endpoints. Discovery lists indices; each
+//! becomes a fixed `(_id TEXT PK, doc JSON)` table, GIN-indexed, and
+//! snapshot/checksums serialize each hit's whole `_source` to the `doc`
+//! column rather than flattening mapping properties into typed columns —
+//! consistent with Harbor/Mongo (`sources::mongodb`) and more faithful to a
+//! source where mappings can include unindexed/dynamic fields no static
+//! per-field schema captures. CDC is scope-cut — Elasticsearch lacks a
+//! standard change-log API.
 
 use crate::connector::{ChangeEvent, ConnectorError, SourceConnector, SourceRow};
-use crate::schema::{ColumnSchema, TableSchema};
+use crate::schema::{ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -130,13 +135,6 @@ impl EsClient {
         Ok(indices)
     }
 
-    async fn get_mapping(&mut self, index: &str) -> Result<Value> {
-        let resp = self.request("GET", &format!("/{}/_mapping", index_urlencode(index)), &json!(null)).await?;
-        
-        // Extract properties from mapping
-        Ok(resp)
-    }
-
     async fn create_scroll_search(&mut self, index: &str, body: &Value) -> Result<(String, Vec<Value>)> {
         let resp = self.request(
             "POST", 
@@ -198,79 +196,22 @@ impl SourceConnector for ElasticsearchSource {
 
     async fn discover(&mut self) -> Result<Vec<TableSchema>, ConnectorError> {
         let indices = self.client.get_indices().await.map_err(ConnectorError::Other)?;
-        
-        let mut tables = Vec::new();
-        for index in indices {
-            let mapping = self.client.get_mapping(&index).await.map_err(ConnectorError::Other)?;
-            
-            // Extract field definitions from mapping
-            let mut columns = Vec::new();
-            
-            // _id is the primary key
-            columns.push(ColumnSchema {
-                name: "_id".to_string(),
-                source_type: "keyword".to_string(),
-                keystone_type: "TEXT".to_string(),
-                nullable: false,
-                is_primary_key: true,
-            });
-            
-            // Parse mapping properties
-            if let Some(props) = extract_mapping_properties(&mapping, &index) {
-                for (field_name, field_type) in props {
-                    columns.push(ColumnSchema {
-                        name: field_name,
-                        source_type: field_type.clone(),
-                        keystone_type: map_es_type_to_keystone(&field_type),
-                        nullable: true,
-                        is_primary_key: false,
-                    });
-                }
-            }
-            
-            if columns.len() > 1 {
-                tables.push(TableSchema {
-                    schema: "elasticsearch".to_string(),
-                    name: index,
-                    columns,
-                });
-            }
-        }
-        
-        Ok(tables)
+        Ok(indices.into_iter().map(|index| document_table_schema(&index)).collect())
     }
 
     async fn snapshot_table(&mut self, table: &TableSchema, tx: Sender<Vec<SourceRow>>) -> Result<u64, ConnectorError> {
-        // Use scroll API to fetch all documents
+        // Use scroll API to fetch all documents, `_source` included so the
+        // whole hit body lands in the `doc` column.
         let query = json!({ "query": { "match_all": {} }, "size": SNAPSHOT_BATCH_SIZE as i64 });
-        
+
         let (scroll_id, hits) = self.client.create_scroll_search(&table.name, &query).await.map_err(ConnectorError::Other)?;
-        
+
         let mut total: u64 = 0;
         let mut all_hits = hits;
-        
+
         loop {
-            let batch: Vec<SourceRow> = all_hits.iter().map(|hit| {
-                let mut row = Vec::new();
-                // Add _id
-                if let Some(id) = hit.get("_id").and_then(|v| v.as_str()) {
-                    row.push(Some(id.as_bytes().to_vec()));
-                }
-                // Add _source fields
-                if let Some(source) = hit.get("_source") {
-                    for col in &table.columns {
-                        if col.name != "_id" {
-                            if let Some(val) = source.get(&col.name).or_else(|| source.get(col.name.trim_start_matches('_'))) {
-                                row.push(Some(serde_json::to_vec(val).unwrap_or_default()));
-                            } else {
-                                row.push(None);
-                            }
-                        }
-                    }
-                }
-                row
-            }).collect();
-            
+            let batch: Vec<SourceRow> = all_hits.iter().map(hit_to_row).collect();
+
             total += batch.len() as u64;
             if !batch.is_empty() {
                 if tx.send(batch).await.is_err() {
@@ -298,20 +239,18 @@ impl SourceConnector for ElasticsearchSource {
     }
 
     async fn row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError> {
-        let query = json!({ "query": { "match_all": {} }, "size": SNAPSHOT_BATCH_SIZE as i64, "_source": false });
+        // `_source` included (unlike a prior id-only version of this query)
+        // so the checksum actually covers document content, not just which
+        // ids exist.
+        let query = json!({ "query": { "match_all": {} }, "size": SNAPSHOT_BATCH_SIZE as i64 });
         let (scroll_id, hits) = self.client.create_scroll_search(&table.name, &query).await.map_err(ConnectorError::Other)?;
-        
+
         let mut checksums = Vec::new();
         let mut all_hits = hits;
-        
+
         loop {
             for hit in &all_hits {
-                let row: SourceRow = if let Some(id) = hit.get("_id").and_then(|v| v.as_str()) {
-                    vec![Some(id.as_bytes().to_vec())]
-                } else {
-                    vec![]
-                };
-                checksums.push(crate::verify::hash_row(&row));
+                checksums.push(crate::verify::hash_row(&hit_to_row(hit)));
             }
             
             if all_hits.len() < SNAPSHOT_BATCH_SIZE {
@@ -330,36 +269,59 @@ impl SourceConnector for ElasticsearchSource {
     }
 }
 
-fn extract_mapping_properties(mapping: &Value, index: &str) -> Option<Vec<(String, String)>> {
-    let mut props = Vec::new();
-    
-    // Elasticsearch mapping structure: { index: { mappings: { properties: { field: { type: "text" } } } } }
-    if let Some(props_val) = mapping.get(index)
-        .and_then(|v| v.get("mappings"))
-        .and_then(|v| v.get("properties"))
-    {
-        if let Some(obj) = props_val.as_object() {
-            for (field_name, field_def) in obj {
-                let field_type = field_def.get("type").and_then(|v| v.as_str()).unwrap_or("text").to_string();
-                props.push((field_name.clone(), field_type));
-            }
-        }
+/// The fixed table shape every Elasticsearch index migrates to: the whole
+/// hit `_source` preserved as JSON (see module doc), GIN-indexed.
+fn document_table_schema(index: &str) -> TableSchema {
+    TableSchema {
+        schema: "elasticsearch".to_string(),
+        name: index.to_string(),
+        columns: vec![
+            ColumnSchema { name: "_id".to_string(), source_type: "keyword".to_string(), keystone_type: "TEXT".to_string(), nullable: false, is_primary_key: true },
+            ColumnSchema { name: "doc".to_string(), source_type: "object".to_string(), keystone_type: "JSONB".to_string(), nullable: false, is_primary_key: false },
+        ],
+        indexes: vec![IndexSpec { columns: vec!["doc".to_string()], using: "GIN".to_string(), with: vec![] }],
     }
-    
-    Some(props)
 }
 
-fn map_es_type_to_keystone(es_type: &str) -> String {
-    match es_type {
-        "text" | "keyword" | "string" => "TEXT".to_string(),
-        "long" => "BIGINT".to_string(),
-        "integer" => "INTEGER".to_string(),
-        "short" => "SMALLINT".to_string(),
-        "double" | "float" | "half_float" | "scaled_float" => "DOUBLE PRECISION".to_string(),
-        "boolean" => "BOOLEAN".to_string(),
-        "date" => "BIGINT".to_string(), // Unix timestamp
-        "object" => "JSONB".to_string(),
-        "nested" => "JSONB".to_string(), // Simplified - would need array handling
-        _ => "JSONB".to_string(), // Unknown types as JSON
-    }.to_string()
+/// One `_search`/scroll hit → a `(_id, doc)` row, `doc` the hit's whole
+/// `_source` serialized as JSON text.
+fn hit_to_row(hit: &Value) -> SourceRow {
+    let id = hit.get("_id").and_then(|v| v.as_str()).map(|s| s.as_bytes().to_vec());
+    let body = hit.get("_source").map(|source| serde_json::to_vec(source).unwrap_or_default());
+    vec![id, body]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_schema_is_id_plus_json_with_gin_index() {
+        let t = document_table_schema("orders");
+        assert_eq!(t.columns.len(), 2);
+        assert_eq!(t.columns[0].name, "_id");
+        assert!(t.columns[0].is_primary_key);
+        assert_eq!(t.columns[1].name, "doc");
+        assert_eq!(t.columns[1].keystone_type, "JSONB");
+        assert_eq!(t.indexes.len(), 1);
+        assert_eq!(t.indexes[0].using, "GIN");
+    }
+
+    #[test]
+    fn hit_to_row_preserves_whole_source_as_json() {
+        let hit = json!({ "_id": "abc123", "_source": { "name": "Ada", "age": 30 } });
+        let row = hit_to_row(&hit);
+        assert_eq!(row[0], Some(b"abc123".to_vec()));
+        let body: Value = serde_json::from_slice(&row[1].clone().unwrap()).unwrap();
+        assert_eq!(body["name"], "Ada");
+        assert_eq!(body["age"], 30);
+    }
+
+    #[test]
+    fn hit_to_row_handles_missing_source() {
+        let hit = json!({ "_id": "abc123" });
+        let row = hit_to_row(&hit);
+        assert_eq!(row[0], Some(b"abc123".to_vec()));
+        assert_eq!(row[1], None);
+    }
 }

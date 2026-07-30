@@ -1,11 +1,15 @@
 //! Harbor/Graph — Neo4j source connector. Hand-written Bolt protocol v4+
 //! over TCP (port 7687). Discovery queries Neo4j's metadata functions
-//! (`db.labels()`, `db.relationshipTypes()`). Snapshot runs Cypher `MATCH`
-//! queries per label. CDC is scope-cut — Neo4j lacks a standard change-feed
-//! API.
+//! (`db.labels()`, `db.relationshipTypes()`) and emits one `TableSchema` per
+//! node label (`schema = "neo4j"`) plus one per relationship type
+//! (`schema = "neo4j_edges"`, columns `from_id`/`to_id`/properties, GRAPH-
+//! indexed) so relationships migrate into Plexus alongside node properties
+//! rather than being dropped. Snapshot runs Cypher `MATCH` queries per label
+//! or relationship type. CDC is scope-cut — Neo4j lacks a standard
+//! change-feed API.
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow, ChangeEvent};
-use crate::schema::{ColumnSchema, TableSchema};
+use crate::schema::{ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
@@ -470,6 +474,54 @@ impl Neo4jSource {
         let conn = BoltConn::connect(addr).await?;
         Ok(Self { conn })
     }
+
+    /// `snapshot_table` counterpart for a `schema = "neo4j_edges"` table:
+    /// pulls every relationship of `table.name`'s type as
+    /// `(from_id, to_id, ...properties)` rows, endpoints sourced from `id(a)`/
+    /// `id(b)` to match the node tables' `_node_id` (also `id(n)`).
+    async fn snapshot_edge_table(&mut self, table: &TableSchema, tx: Sender<Vec<SourceRow>>) -> Result<u64, ConnectorError> {
+        let rel_type = &table.name;
+        let cypher = format!("MATCH (a)-[r:{rel_type}]->(b) RETURN {}", edge_return_clause(table));
+        let rows = self.conn.run_cypher(&cypher).await.map_err(ConnectorError::Other)?;
+
+        let mut total: u64 = 0;
+        for chunk in rows.chunks(SNAPSHOT_BATCH_SIZE) {
+            let batch: Vec<SourceRow> = chunk.iter().map(|row| row.iter().map(|v| Some(neo4j_value_to_bytes(v))).collect()).collect();
+            total += batch.len() as u64;
+            if tx.send(batch).await.is_err() {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    /// `row_checksums` counterpart for edge tables — see `snapshot_edge_table`.
+    async fn edge_row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError> {
+        let rel_type = &table.name;
+        let cypher = format!("MATCH (a)-[r:{rel_type}]->(b) RETURN {} ORDER BY from_id, to_id", edge_return_clause(table));
+        let rows = self.conn.run_cypher(&cypher).await.map_err(ConnectorError::Other)?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let source_row: SourceRow = row.iter().map(|v| Some(neo4j_value_to_bytes(v))).collect();
+                crate::verify::hash_row(&source_row)
+            })
+            .collect())
+    }
+}
+
+/// Cypher `RETURN` clause for an edge table's columns: `id(a)`/`id(b)`
+/// aliased to `from_id`/`to_id`, plus `r.<prop>` for every relationship
+/// property column.
+fn edge_return_clause(table: &TableSchema) -> String {
+    let prop_names: Vec<&str> = table.columns.iter().filter(|c| c.name != "from_id" && c.name != "to_id").map(|c| c.name.as_str()).collect();
+    if prop_names.is_empty() {
+        "id(a) AS from_id, id(b) AS to_id".to_string()
+    } else {
+        let props = prop_names.iter().map(|p| format!("r.{p} AS {p}")).collect::<Vec<_>>().join(", ");
+        format!("id(a) AS from_id, id(b) AS to_id, {props}")
+    }
 }
 
 #[async_trait]
@@ -555,6 +607,81 @@ impl SourceConnector for Neo4jSource {
                 schema: "neo4j".to_string(),
                 name: label,
                 columns,
+                indexes: vec![],
+            });
+        }
+
+        // Relationships → edge tables, so migrated data preserves graph
+        // structure (previously node properties only — relationships were
+        // silently dropped). `schema = "neo4j_edges"` (vs. `"neo4j"` for node
+        // tables) disambiguates the two shapes for snapshot_table/
+        // row_checksums below.
+        let rel_type_rows = self
+            .conn
+            .run_cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
+            .await
+            .map_err(ConnectorError::Other)?;
+
+        for row in &rel_type_rows {
+            let rel_type = match row.first() {
+                Some(BsonValue::String(s)) => s.clone(),
+                _ => continue,
+            };
+
+            let prop_query = format!("MATCH ()-[r:{rel_type}]->() RETURN DISTINCT keys(r) AS keys LIMIT 100");
+            let prop_rows = self.conn.run_cypher(&prop_query).await.map_err(ConnectorError::Other)?;
+
+            let mut prop_names: Vec<String> = Vec::new();
+            for prop_row in &prop_rows {
+                if let Some(BsonValue::List(keys)) = prop_row.first() {
+                    for k in keys {
+                        if let BsonValue::String(s) = k {
+                            if !prop_names.contains(s) {
+                                prop_names.push(s.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let sample_query = format!("MATCH ()-[r:{rel_type}]->() RETURN r LIMIT 5");
+            let sample_rows = self.conn.run_cypher(&sample_query).await.map_err(ConnectorError::Other)?;
+
+            let mut columns = vec![
+                ColumnSchema { name: "from_id".to_string(), source_type: "integer".to_string(), keystone_type: "BIGINT".to_string(), nullable: false, is_primary_key: false },
+                ColumnSchema { name: "to_id".to_string(), source_type: "integer".to_string(), keystone_type: "BIGINT".to_string(), nullable: false, is_primary_key: false },
+            ];
+
+            for prop_name in &prop_names {
+                let mut keystone_type = "TEXT".to_string();
+                for sample_row in &sample_rows {
+                    if let Some(BsonValue::Relationship { props, .. }) = sample_row.first() {
+                        if let Some((_, v)) = props.iter().find(|(k, _)| k == prop_name) {
+                            keystone_type = match v {
+                                BsonValue::Int64(_) => "BIGINT".to_string(),
+                                BsonValue::Double(_) => "DOUBLE PRECISION".to_string(),
+                                BsonValue::Boolean(_) => "BOOLEAN".to_string(),
+                                BsonValue::String(_) => "TEXT".to_string(),
+                                _ => "TEXT".to_string(),
+                            };
+                            break;
+                        }
+                    }
+                }
+                columns.push(ColumnSchema {
+                    keystone_type,
+                    nullable: true,
+                    is_primary_key: false,
+                    name: prop_name.clone(),
+                    source_type: "property".to_string(),
+                });
+            }
+
+            tables.push(TableSchema {
+                schema: "neo4j_edges".to_string(),
+                name: rel_type,
+                columns,
+                indexes: vec![IndexSpec { columns: vec!["from_id".to_string()], using: "GRAPH".to_string(), with: vec![("to".to_string(), "to_id".to_string())] }],
             });
         }
 
@@ -562,6 +689,10 @@ impl SourceConnector for Neo4jSource {
     }
 
     async fn snapshot_table(&mut self, table: &TableSchema, tx: Sender<Vec<SourceRow>>) -> Result<u64, ConnectorError> {
+        if table.schema == "neo4j_edges" {
+            return self.snapshot_edge_table(table, tx).await;
+        }
+
         let label = &table.name;
 
         // Build property list for SELECT
@@ -604,6 +735,10 @@ impl SourceConnector for Neo4jSource {
     }
 
     async fn row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError> {
+        if table.schema == "neo4j_edges" {
+            return self.edge_row_checksums(table).await;
+        }
+
         let label = &table.name;
         let prop_names: Vec<&str> = table.columns.iter()
             .filter(|c| c.name != "_node_id")
@@ -680,5 +815,28 @@ mod tests {
             }
             other => panic!("expected Relationship, got {other:?}"),
         }
+    }
+
+    fn edge_table(columns: Vec<ColumnSchema>) -> TableSchema {
+        TableSchema { schema: "neo4j_edges".to_string(), name: "FOLLOWS".to_string(), columns, indexes: vec![] }
+    }
+
+    #[test]
+    fn edge_return_clause_with_no_properties() {
+        let t = edge_table(vec![
+            ColumnSchema { name: "from_id".into(), source_type: "integer".into(), keystone_type: "BIGINT".into(), nullable: false, is_primary_key: false },
+            ColumnSchema { name: "to_id".into(), source_type: "integer".into(), keystone_type: "BIGINT".into(), nullable: false, is_primary_key: false },
+        ]);
+        assert_eq!(edge_return_clause(&t), "id(a) AS from_id, id(b) AS to_id");
+    }
+
+    #[test]
+    fn edge_return_clause_includes_relationship_properties() {
+        let t = edge_table(vec![
+            ColumnSchema { name: "from_id".into(), source_type: "integer".into(), keystone_type: "BIGINT".into(), nullable: false, is_primary_key: false },
+            ColumnSchema { name: "to_id".into(), source_type: "integer".into(), keystone_type: "BIGINT".into(), nullable: false, is_primary_key: false },
+            ColumnSchema { name: "since".into(), source_type: "property".into(), keystone_type: "BIGINT".into(), nullable: true, is_primary_key: false },
+        ]);
+        assert_eq!(edge_return_clause(&t), "id(a) AS from_id, id(b) AS to_id, r.since AS since");
     }
 }

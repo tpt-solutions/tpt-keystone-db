@@ -14,7 +14,7 @@
 //! discovered schema) — no per-DB hybrid/namespaced extras.
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow};
-use crate::schema::{ColumnSchema, TableSchema};
+use crate::schema::{ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -341,6 +341,13 @@ fn schema_for(db_type: VectorDbType, name: &str) -> TableSchema {
                 is_primary_key: false,
             },
         ],
+        // HNSW-index the vector column so migrated embeddings are actually
+        // searchable via Prism's `vector_search()` instead of sitting as
+        // inert text. `cosine` is the common default distance for embedding
+        // models across all three source DBs; none of their discovery APIs
+        // used here report the index's configured metric, so this can't be
+        // derived per-source without extra round trips.
+        indexes: vec![IndexSpec { columns: vec!["vector".to_string()], using: "VECTOR".to_string(), with: vec![("metric".to_string(), "cosine".to_string())] }],
     }
 }
 
@@ -437,5 +444,14 @@ mod tests {
         assert_eq!(s.columns.len(), 3);
         assert_eq!(s.columns[1].keystone_type, "VECTOR");
         assert!(s.columns[0].is_primary_key);
+    }
+
+    #[test]
+    fn vector_schema_has_hnsw_index_on_vector_column() {
+        let s = schema_for(VectorDbType::Pinecone, "docs");
+        assert_eq!(s.indexes.len(), 1);
+        assert_eq!(s.indexes[0].using, "VECTOR");
+        assert_eq!(s.indexes[0].columns, vec!["vector".to_string()]);
+        assert!(s.indexes[0].with.contains(&("metric".to_string(), "cosine".to_string())));
     }
 }

@@ -1,12 +1,17 @@
 //! Harbor/Mongo — MongoDB source connector. Hand-written MongoDB OP_MSG
 //! protocol over TCP (port 27017). Discovery uses `listCollections` to
-//! enumerate collections and their field types. Snapshot uses `find` with
-//! batch cursor iteration via `getMore`. CDC is scope-cut to
-//! `Unimplemented` — MongoDB change streams/oplog tailing is a substantial
-//! protocol effort on its own.
+//! enumerate collections; each becomes a fixed `(_id TEXT PK, doc JSON)`
+//! table, GIN-indexed, and snapshot/checksums serialize each whole document
+//! to the `doc` column rather than flattening fields into typed columns —
+//! Mongo is schemaless by design, and Canopy's JSON column is built to store
+//! documents directly, so this is both more faithful (no small-sample type
+//! inference silently dropping unseen fields) and the engine-native shape.
+//! Snapshot uses `find` with batch cursor iteration via `getMore`. CDC is
+//! scope-cut to `Unimplemented` — MongoDB change streams/oplog tailing is a
+//! substantial protocol effort on its own.
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow, ChangeEvent};
-use crate::schema::{from_mongodb_type, ColumnSchema, TableSchema};
+use crate::schema::{ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
@@ -180,46 +185,29 @@ fn bson_decode_value(type_id: u8, buf: &[u8]) -> Result<(BsonValue, usize)> {
     }
 }
 
-// Infer a flat schema from a list of BSON documents — maps each unique
-// top-level field to the narrowest Keystone type that fits all observed
-// values.
-fn infer_schema(docs: &[Vec<(String, BsonValue)>]) -> Vec<(String, String)> {
-    let mut field_types: Vec<(String, String)> = Vec::new();
-
-    // Collect all unique field names across all docs
-    let mut seen_names = Vec::new();
-    for doc in docs {
-        for (name, _) in doc {
-            if !seen_names.contains(name) {
-                seen_names.push(name.clone());
-            }
-        }
+/// The fixed table shape every Mongo collection migrates to: the whole
+/// document preserved as JSON (see module doc), GIN-indexed for containment/
+/// path queries.
+fn document_table_schema(database: &str, collection: &str) -> TableSchema {
+    TableSchema {
+        schema: database.to_string(),
+        name: collection.to_string(),
+        columns: vec![
+            ColumnSchema { name: "_id".to_string(), source_type: "objectId".to_string(), keystone_type: "TEXT".to_string(), nullable: false, is_primary_key: true },
+            ColumnSchema { name: "doc".to_string(), source_type: "object".to_string(), keystone_type: "JSONB".to_string(), nullable: false, is_primary_key: false },
+        ],
+        indexes: vec![IndexSpec { columns: vec!["doc".to_string()], using: "GIN".to_string(), with: vec![] }],
     }
+}
 
-    for name in seen_names {
-        let mut keystone_type = "TEXT".to_string();
-        for doc in docs {
-            for (k, v) in doc {
-                if k == &name {
-                    let t = match v {
-                        BsonValue::Double(_) => "DOUBLE PRECISION",
-                        BsonValue::Int32(_) => "INTEGER",
-                        BsonValue::Int64(_) => "BIGINT",
-                        BsonValue::Boolean(_) => "BOOLEAN",
-                        BsonValue::String(_) => "TEXT",
-                        BsonValue::Document(_) | BsonValue::Array(_) => "JSONB",
-                        BsonValue::Null => continue,
-                        _ => "TEXT",
-                    };
-                    keystone_type = t.to_string();
-                    break;
-                }
-            }
-        }
-        field_types.push((name, keystone_type));
-    }
-
-    field_types
+/// One BSON document → a `(_id, doc)` row, `doc` the whole document
+/// serialized as JSON text (including `_id`, harmless duplication with the PK
+/// column and consistent with how nested documents/arrays already serialize
+/// via [`doc_to_json_string`]).
+fn doc_to_row(doc: &[(String, BsonValue)]) -> SourceRow {
+    let id = doc.iter().find(|(k, _)| k == "_id").map(|(_, v)| bson_value_to_bytes(v));
+    let body = Some(doc_to_json_string(doc).into_bytes());
+    vec![id, body]
 }
 
 // ── MongoDB wire protocol client ─────────────────────────────────────
@@ -382,65 +370,7 @@ impl SourceConnector for MongoSource {
                             continue;
                         }
 
-                        // Extract field types from the options.info.fields or
-                        // do a sample query to infer the schema
-                        let _fields = coll_info
-                            .iter()
-                            .find(|(k, _)| k == "options")
-                            .and_then(|(_, v)| if let BsonValue::Document(d) = v { Some(d) } else { None })
-                            .and_then(|opts| opts.iter().find(|(k, _)| k == "validator"))
-                            .and_then(|(_, v)| if let BsonValue::Document(d) = v { Some(d) } else { None });
-
-                        // Sample a few documents to infer schema
-                        let sample_cmd = bson_build_doc(vec![
-                            bson_encode_string_typed("find", &coll_name),
-                            bson_encode_string_typed("filter", "{}"),
-                            bson_encode_int64("limit", 10),
-                        ]);
-
-                        if let Ok(sample_resp) = self.conn.send_op_msg(0, &sample_cmd, 0).await {
-                            let mut sample_docs = Vec::new();
-                            if let Some((_, BsonValue::Document(cursor_doc))) = sample_resp.iter().find(|(k, _)| k == "cursor") {
-                                if let Some((_, BsonValue::Array(batch))) = cursor_doc.iter().find(|(k, _)| k == "firstBatch") {
-                                    for doc in batch {
-                                        if let BsonValue::Document(d) = doc {
-                                            sample_docs.push(d.clone());
-                                        }
-                                    }
-                                }
-                            }
-
-                            let inferred = infer_schema(&sample_docs);
-
-                            let mut columns: Vec<ColumnSchema> = Vec::new();
-                            // Always add _id as primary key
-                            columns.push(ColumnSchema {
-                                name: "_id".to_string(),
-                                source_type: "objectId".to_string(),
-                                keystone_type: "TEXT".to_string(),
-                                nullable: false,
-                                is_primary_key: true,
-                            });
-
-                            for (fname, ftype) in inferred {
-                                if fname == "_id" {
-                                    continue;
-                                }
-                                columns.push(ColumnSchema {
-                                    keystone_type: from_mongodb_type(&ftype),
-                                    nullable: true,
-                                    is_primary_key: false,
-                                    name: fname.clone(),
-                                    source_type: ftype,
-                                });
-                            }
-
-                            tables.push(TableSchema {
-                                schema: self.database.clone(),
-                                name: coll_name,
-                                columns,
-                            });
-                        }
+                        tables.push(document_table_schema(&self.database, &coll_name));
                     }
                 }
             }
@@ -469,27 +399,7 @@ impl SourceConnector for MongoSource {
         let mut batches = extract_batch(&response);
 
         loop {
-            let mut batch_rows: Vec<SourceRow> = Vec::new();
-            for doc in &batches {
-                let mut row = Vec::with_capacity(table.columns.len());
-                for col in &table.columns {
-                    if col.name == "_id" {
-                        // Extract _id from document
-                        let id_val = doc
-                            .iter()
-                            .find(|(k, _)| k == "_id")
-                            .map(|(_, v)| bson_value_to_bytes(v));
-                        row.push(id_val);
-                    } else {
-                        let val = doc
-                            .iter()
-                            .find(|(k, _)| k == &col.name)
-                            .map(|(_, v)| bson_value_to_bytes(v));
-                        row.push(val);
-                    }
-                }
-                batch_rows.push(row);
-            }
+            let batch_rows: Vec<SourceRow> = batches.iter().map(|doc| doc_to_row(doc)).collect();
 
             total += batch_rows.len() as u64;
             if !batch_rows.is_empty() {
@@ -545,18 +455,7 @@ impl SourceConnector for MongoSource {
 
         loop {
             for doc in &batches {
-                let row: SourceRow = table
-                    .columns
-                    .iter()
-                    .map(|col| {
-                        if col.name == "_id" {
-                            doc.iter().find(|(k, _)| k == "_id").map(|(_, v)| bson_value_to_bytes(v))
-                        } else {
-                            doc.iter().find(|(k, _)| k == &col.name).map(|(_, v)| bson_value_to_bytes(v))
-                        }
-                    })
-                    .collect();
-                checksums.push(crate::verify::hash_row(&row));
+                checksums.push(crate::verify::hash_row(&doc_to_row(doc)));
             }
 
             let next_cursor = extract_cursor_id(&response);
@@ -676,4 +575,44 @@ fn extract_cursor_id(response: &[(String, BsonValue)]) -> i64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_schema_is_id_plus_json_with_gin_index() {
+        let t = document_table_schema("mydb", "orders");
+        assert_eq!(t.columns.len(), 2);
+        assert_eq!(t.columns[0].name, "_id");
+        assert!(t.columns[0].is_primary_key);
+        assert_eq!(t.columns[1].name, "doc");
+        assert_eq!(t.columns[1].keystone_type, "JSONB");
+        assert_eq!(t.indexes.len(), 1);
+        assert_eq!(t.indexes[0].using, "GIN");
+        assert_eq!(t.indexes[0].columns, vec!["doc".to_string()]);
+    }
+
+    #[test]
+    fn doc_to_row_preserves_whole_document_as_json() {
+        let doc = vec![
+            ("_id".to_string(), BsonValue::String("abc123".to_string())),
+            ("name".to_string(), BsonValue::String("Ada".to_string())),
+            ("age".to_string(), BsonValue::Int32(30)),
+        ];
+        let row = doc_to_row(&doc);
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0], Some(b"abc123".to_vec()));
+        let body = String::from_utf8(row[1].clone().unwrap()).unwrap();
+        assert!(body.contains("\"name\": \"Ada\""));
+        assert!(body.contains("\"age\": 30"));
+    }
+
+    #[test]
+    fn doc_to_row_handles_missing_id() {
+        let doc = vec![("name".to_string(), BsonValue::String("Ada".to_string()))];
+        let row = doc_to_row(&doc);
+        assert_eq!(row[0], None);
+    }
 }

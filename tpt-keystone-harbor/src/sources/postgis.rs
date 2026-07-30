@@ -7,7 +7,7 @@
 
 use crate::connector::{ChangeEvent, ConnectorError, SourceConnector, SourceRow};
 use crate::pgwire::Client;
-use crate::schema::{from_postgis_type, ColumnSchema, TableSchema};
+use crate::schema::{from_postgis_type, ColumnSchema, IndexSpec, TableSchema};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 
@@ -121,7 +121,8 @@ impl SourceConnector for PostGisSource {
                 })
                 .collect();
 
-            tables.push(TableSchema { schema, name, columns });
+            let indexes = spatial_indexes(&columns);
+            tables.push(TableSchema { schema, name, columns, indexes });
         }
         Ok(tables)
     }
@@ -248,6 +249,17 @@ impl SourceConnector for PostGisSource {
 
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Spatial-index every geometry/geography column, so migrated data is
+/// actually queryable through Meridian (`ST_DWithin`/`ST_Within`) instead of
+/// sitting as inert WKT text.
+fn spatial_indexes(columns: &[ColumnSchema]) -> Vec<IndexSpec> {
+    columns
+        .iter()
+        .filter(|c| c.keystone_type == "GEOMETRY")
+        .map(|c| IndexSpec { columns: vec![c.name.clone()], using: "SPATIAL".to_string(), with: vec![] })
+        .collect()
 }
 
 // Reuse the same pgoutput decoder from the PG connector — PostGIS uses
@@ -397,4 +409,28 @@ fn decode_tuple(buf: &[u8]) -> (SourceRow, &[u8]) {
         }
     }
     (row, p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str, keystone_type: &str) -> ColumnSchema {
+        ColumnSchema { name: name.to_string(), source_type: String::new(), keystone_type: keystone_type.to_string(), nullable: true, is_primary_key: false }
+    }
+
+    #[test]
+    fn spatial_indexes_only_geometry_columns() {
+        let columns = vec![col("id", "INTEGER"), col("pos", "GEOMETRY"), col("label", "TEXT")];
+        let indexes = spatial_indexes(&columns);
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].using, "SPATIAL");
+        assert_eq!(indexes[0].columns, vec!["pos".to_string()]);
+    }
+
+    #[test]
+    fn spatial_indexes_empty_when_no_geometry_columns() {
+        let columns = vec![col("id", "INTEGER"), col("label", "TEXT")];
+        assert!(spatial_indexes(&columns).is_empty());
+    }
 }

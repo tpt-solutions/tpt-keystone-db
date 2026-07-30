@@ -27,14 +27,33 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        store is RAM-only and **not wired into any read/write path**; `TransactionManager` is currently
        dead weight. Real snapshot isolation is blocked on Stage 3 (durable multi-version storage in
        `lsm.rs`/`sstable.rs`/`wal.rs`) — tracked as the contiguous Stage 2+3 effort in the audit.
-- [ ] Storage-layer support for multiple versions of a key in `lsm.rs`/`sstable.rs`/`wal.rs`, plus
-       compaction-time GC of versions no longer visible to any open transaction — **blocked on the
-       Stage 2 audit** (`docs/mvcc_snapshot_audit.md`): the durable store cannot represent >1 version of
-       a key today; `MvccStore` is RAM-only. Treated as the contiguous Stage 2+3 effort.
-- [ ] Concurrency model: verify whether the current single coarse `Mutex<LsmEngine>` remains correct
-       under MVCC or needs finer-grained locking — **audited** in `docs/mvcc_snapshot_audit.md` §3:
-       readers should not block writers once the read path is version-chain based; lock likely narrows
-       to writes, proven out at the `StorageEngine` trait boundary in `database/mod.rs`.
+- [~] Stage 2+3: durable multi-version storage + real snapshot isolation, per the RocksDB/LevelDB-style
+       internal-key encoding approach (plan: `C:\Users\Phillip\.claude\plans\is-it-good-idea-majestic-mitten.md`).
+       New `storage/internal_key.rs` (`InternalKey{user_key,seq,tag}`, custom `Ord` comparing `user_key`
+       in isolation first so a byte-prefix relationship between two user keys can't be disturbed by the
+       version suffix). Done: `sstable.rs` (`IndexEntry` +seq/tag, bloom stays keyed on user key only,
+       `read_at`/`scan_all_versions`, `max_seq`); `wal.rs` (rewritten to batch-framed records —
+       `marker|commit_seq|count|record*count` — so `append_batch` is one write+fsync per commit and
+       `replay` accepts/discards a whole batch atomically, closing the old "torn subset of a multi-row
+       commit" gap for free, not just adding versioning); `lsm.rs` (`MemTable` keyed by `InternalKey`,
+       `next_commit_seq`/`open_snapshots` watermark tracking, `read_at`/`scan_at`/`write_batch`,
+       back-compat `read`/`scan`/`write`/`delete` wrappers so non-transactional call sites are
+       unaffected, `open()` seeds `next_commit_seq` from WAL+SSTables+manifest so a restart never
+       reissues a seq, `compact_all` rewritten to keep every version newer than the oldest open
+       snapshot plus one "floor" version below it). Still open: `storage/database/txn.rs`
+       (`snapshot_seq` field + `Drop`-based snapshot release), `storage/database/mod.rs` wiring
+       (`begin_txn` captures the snapshot, `txn_read`/`txn_scan` call `read_at`/`scan_at`, retire dead
+       `tx_mgr`/`mvcc` fields, delete `storage/tx.rs`, repurpose `storage/mvcc.rs` to just `new_tx_id()`),
+       `wire/session.rs` (extended-protocol BEGIN/COMMIT/ROLLBACK interception — today only the simple
+       query protocol manages `txn`, a real pre-existing gap this work surfaced — plus fixing `Sync`'s
+       hardcoded `TransactionStatus::Idle`), inverting `read_committed_sees_other_transactions_committed_writes`
+       in `executor/transaction_tests.rs` now that it should be the opposite, new snapshot/compaction/
+       wire tests, porting `storage/mvcc_tests.rs`'s proptest off the now-deleted `MvccStore`, and adding
+       `Manifest::max_commit_seq` (`#[serde(default)]`).
+- [ ] Concurrency model (audit's Stage 4): the current single coarse `Mutex<LsmEngine>` is **explicitly
+       out of scope** for the Stage 2+3 work above (user decision, see the plan file) — readers not
+       blocking writers once the read path is version-chain based is a separate follow-up once snapshot
+       isolation itself is proven correct, not bundled into this pass.
 - [x] Extended query protocol (Parse/Bind/Execute/Sync) and simple query protocol both correctly
       interact with the new per-connection transaction state (`wire/session.rs` threads `txn` into
       both `execute_simple` and the `Execute` handler)
@@ -188,6 +207,62 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
       Apache-2.0 text copy-pasted, with no MIT text anywhere in the crate despite `license = "MIT OR
       Apache-2.0"` in Cargo.toml — added matching `LICENSE`/`LICENSE-MIT`/`LICENSE-APACHE` (copied from
       the repo root) to all 6 crates so the dual license is actually present in what ships.
+
+## Phase 8 — Harbor: engine-native targets (Meridian/Prism/Chronos/Plexus/Canopy)
+
+Full context/rationale at `C:\Users\Phillip\.claude\plans\i-m-looking-at-harbour-typed-spark.md`. Before
+this pass, `tpt-keystone-harbor` (Phase 15's migration platform) only ever wrote plain relational
+Keystone tables — `SourceKind::target_engine()` already mapped PostGIS→Meridian, vector DBs→Prism,
+InfluxDB→Chronos, Neo4j→Plexus, MongoDB/Elasticsearch→Canopy, but that mapping was dead metadata.
+Since those five engines are SQL-extension features of `tpt-keystone` itself (not separate services),
+this didn't need new wire-protocol target clients — the existing single `KeystoneTarget`/`pgwire::Client`
+path stays as-is; it needed the right index created alongside each table, and each source connector
+handing over data already shaped the way its target engine expects.
+
+- [x] Schema Translator IR gains `IndexSpec`/`TableSchema::index_ddl()` (`tpt-keystone-harbor/src/
+      schema.rs`) — target-engine index metadata rendered as `CREATE INDEX ON ... USING <KIND> ...
+      WITH (...)`, applied by `KeystoneTarget::apply_ddl` (`targets/keystone.rs`) right after
+      `CREATE TABLE`. Left empty for sources whose native target is already plain relational
+      (Postgres/MySQL/MSSQL/Oracle/ODBC) — no behavior change for those.
+- [x] PostGIS (Meridian): every `GEOMETRY`/`GEOGRAPHY` column gets a `SPATIAL` index
+      (`sources/postgis.rs::spatial_indexes`) — previously migrated geometry landed as inert WKT text
+      with no spatial index, so `ST_DWithin`/`ST_Within` had nothing to use.
+- [x] Vector sources / Pinecone+Weaviate+Qdrant (Prism): the `vector` column gets a `VECTOR` (HNSW)
+      index, `metric = 'cosine'` default (`sources/vector.rs::schema_for`) — none of the three REST
+      APIs' discovery calls used here expose the configured distance metric without extra round trips,
+      so it isn't derived per-source in this pass.
+- [x] InfluxDB (Chronos): the timestamp column gets a `TIME` index with an explicit `value` = the first
+      numeric field column (`sources/influxdb.rs::time_index`) — Chronos's auto-pick only applies when
+      there's exactly one numeric candidate, and a measurement can have several.
+- [x] Neo4j (Plexus) — the highest-value fix: relationships were previously silently dropped entirely
+      (`discover()` only ever called `db.labels()`; node properties migrated, edges never did). Now
+      also calls `db.relationshipTypes()` and emits a `GRAPH`-indexed edge `TableSchema` per
+      relationship type (`from_id`/`to_id`/properties, `schema = "neo4j_edges"`, endpoints from `id(a)`/
+      `id(b)` to match the existing node tables' `_node_id`); `snapshot_table`/`row_checksums` dispatch
+      to `MATCH (a)-[r:TYPE]->(b)` Cypher for these tables based on `table.schema`, with no change
+      needed to `engine.rs` (it already iterates generically over however many tables `discover()`
+      returns).
+- [x] MongoDB + Elasticsearch (Canopy): replaced 10-document-sample field-flattening
+      (`infer_schema`/per-field ES mapper — silently dropped any field absent from the sample, fragile
+      on schemaless/polymorphic real-world documents) with a fixed `(_id TEXT PK, doc JSON)` schema,
+      GIN-indexed, whole document/hit preserved as JSON text. Elasticsearch's `row_checksums` also now
+      actually hashes document content (previously ID-only — a latent verification gap where content
+      drift between source and target wouldn't have been caught).
+- [x] Doc hygiene: `tpt-keystone-harbor/README.md`/`src/lib.rs` corrected — both previously claimed
+      Mongo/Graph/GIS/MySQL/MSSQL/etc. were unrunnable stubs; only CDC (`replicate()`) is actually
+      stubbed for those, and now for the reshaped Canopy/Plexus sources too.
+- [x] `cargo build`/`cargo test` (55 tests, incl. new coverage for every item above) pass clean, no
+      warnings.
+- [ ] Not done this pass: Kafka→Flux explicit `CREATE TOPIC ... WITH (partitions = ...)` — every
+      `INSERT`/`UPDATE`/`DELETE` already auto-publishes to an implicit `__cdc_<table>` topic with zero
+      extra DDL, so the plain relational target Kafka already gets today lands correctly in Flux terms;
+      this would only add an explicitly named topic matching the source's partition count. Nice-to-have,
+      not a gap.
+- [ ] No live-external-server end-to-end verification — `cargo build`/`cargo test` pass and the new
+      logic is unit-tested at the string/row-building level (matching how the rest of Harbor is tested),
+      but there's still no integration harness in this repo for a real external Postgres/Mongo/Neo4j/
+      InfluxDB/Elasticsearch/vector-DB server, so full source-side verification stays manual (extend
+      `examples/smoke.rs` against a live `tpt-keystone` node).
 
 ## Done outside this list (`cfdafce`)
 

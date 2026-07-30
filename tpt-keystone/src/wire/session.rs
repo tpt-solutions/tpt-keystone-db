@@ -363,6 +363,44 @@ async fn run_query_loop(
             }
 
             FrontendMessage::Execute { portal, max_rows } => {
+                // Transaction-control statements are intercepted here too,
+                // exactly as `handle_simple_query` does for the simple
+                // protocol — otherwise a client that only ever issues
+                // BEGIN/COMMIT/ROLLBACK via Parse/Bind/Execute would never
+                // actually open a `TxnHandle` (the executor's own handling of
+                // these is a no-op; the wire session owns the lifecycle).
+                let control_stmt = ext.portals.get(&portal).map(|p| p.stmt.clone());
+                match control_stmt {
+                    Some(Stmt::Begin) => {
+                        if txn.is_none() {
+                            txn = Some(db.begin_txn());
+                        }
+                        conn.send(&BackendMessage::CommandComplete("BEGIN".into()));
+                        conn.flush().await?;
+                        continue;
+                    }
+                    Some(Stmt::Commit) => {
+                        if let Some(t) = txn.take() {
+                            if let Err(e) = db.commit_txn(&t) {
+                                conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
+                                conn.flush().await?;
+                                continue;
+                            }
+                        }
+                        conn.send(&BackendMessage::CommandComplete("COMMIT".into()));
+                        conn.flush().await?;
+                        continue;
+                    }
+                    Some(Stmt::Rollback) => {
+                        if let Some(t) = txn.take() {
+                            db.rollback_txn(&t);
+                        }
+                        conn.send(&BackendMessage::CommandComplete("ROLLBACK".into()));
+                        conn.flush().await?;
+                        continue;
+                    }
+                    _ => {}
+                }
                 match ext.portals.get(&portal) {
                     Some(p) => match execute_parsed_as(p.stmt.clone(), db.clone(), &p.params, &actor, txn.as_ref()) {
                         Ok(result) => {
@@ -420,7 +458,16 @@ async fn run_query_loop(
             }
 
             FrontendMessage::Sync => {
-                conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+                // Mirror `handle_simple_query`'s status reporting — this
+                // used to hardcode `Idle` regardless of `txn`, which was
+                // stale as soon as a transaction was opened over the
+                // extended protocol.
+                let status = if txn.is_some() {
+                    TransactionStatus::InTransaction
+                } else {
+                    TransactionStatus::Idle
+                };
+                conn.send(&BackendMessage::ReadyForQuery(status));
                 conn.flush().await?;
             }
             FrontendMessage::Flush => {
@@ -1392,6 +1439,138 @@ mod tests {
             i += 2;
             assert_eq!(format, 1, "field format should be binary");
         }
+    }
+
+    // --- Extended-protocol transaction control (BEGIN/COMMIT/ROLLBACK) ---
+
+    /// Parse/Bind/Execute `sql` with no params and no expected result rows
+    /// (DDL/DML/transaction-control) — leaves `Sync` for the caller so it
+    /// can separately check `ReadyForQuery`'s status byte.
+    async fn parse_bind_execute(client: &mut tokio::io::DuplexStream, sql: &str) {
+        let mut parse = cstr("");
+        parse.extend_from_slice(&cstr(sql));
+        parse.extend_from_slice(&0i16.to_be_bytes());
+        wire_send(client, b'P', &parse).await;
+
+        let mut bind = cstr(""); // portal
+        bind.extend_from_slice(&cstr("")); // statement
+        bind.extend_from_slice(&0i16.to_be_bytes()); // param format count
+        bind.extend_from_slice(&0i16.to_be_bytes()); // param count
+        bind.extend_from_slice(&0i16.to_be_bytes()); // result format count
+        wire_send(client, b'B', &bind).await;
+
+        let mut exec = cstr("");
+        exec.extend_from_slice(&0i32.to_be_bytes());
+        wire_send(client, b'E', &exec).await;
+    }
+
+    /// Read backend messages until `CommandComplete`, returning its tag
+    /// string; panics on an unexpected `ErrorResponse`.
+    async fn wire_read_command_complete(stream: &mut tokio::io::DuplexStream) -> String {
+        loop {
+            let (tag, body) = wire_read_msg(stream).await;
+            match tag {
+                b'C' => {
+                    let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+                    return String::from_utf8_lossy(&body[..end]).into_owned();
+                }
+                b'E' => panic!("unexpected ErrorResponse: {}", parse_error_code(&body)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Send `Sync` and return the following `ReadyForQuery`'s status byte
+    /// (`b'I'` idle, `b'T'` in-transaction, `b'E'` failed).
+    async fn wire_sync_status(stream: &mut tokio::io::DuplexStream) -> u8 {
+        wire_send(stream, b'S', &[]).await;
+        loop {
+            let (tag, body) = wire_read_msg(stream).await;
+            if tag == b'Z' {
+                return body[0];
+            }
+        }
+    }
+
+    fn setup_int_table(db: &Arc<Database>, name: &str) {
+        execute_parsed(
+            crate::sql::parse(&format!("CREATE TABLE {name} (id INT8 PRIMARY KEY)")).unwrap(),
+            db.clone(),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn extended_protocol_begin_commit_is_a_real_transaction() {
+        let (db, _b, _l) = test_db();
+        setup_int_table(&db, "t");
+
+        let mut client = spawn_session(db.clone()).await;
+
+        parse_bind_execute(&mut client, "BEGIN").await;
+        assert_eq!(wire_read_command_complete(&mut client).await, "BEGIN");
+
+        // Two inserts under the still-open transaction.
+        parse_bind_execute(&mut client, "INSERT INTO t VALUES (1)").await;
+        wire_read_command_complete(&mut client).await;
+        parse_bind_execute(&mut client, "INSERT INTO t VALUES (2)").await;
+        wire_read_command_complete(&mut client).await;
+
+        // Neither row is visible to a second connection before COMMIT —
+        // this is the behavior that would be silently wrong (both rows
+        // "autocommitted" individually) without the `Execute`-path BEGIN
+        // interception this test exists to prove.
+        assert_eq!(db.txn_scan(None, "t").unwrap().len(), 0);
+
+        parse_bind_execute(&mut client, "COMMIT").await;
+        assert_eq!(wire_read_command_complete(&mut client).await, "COMMIT");
+
+        assert_eq!(db.txn_scan(None, "t").unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn extended_protocol_rollback_discards_writes() {
+        let (db, _b, _l) = test_db();
+        setup_int_table(&db, "t");
+        let mut client = spawn_session(db.clone()).await;
+
+        parse_bind_execute(&mut client, "BEGIN").await;
+        wire_read_command_complete(&mut client).await;
+        parse_bind_execute(&mut client, "INSERT INTO t VALUES (1)").await;
+        wire_read_command_complete(&mut client).await;
+        parse_bind_execute(&mut client, "ROLLBACK").await;
+        assert_eq!(wire_read_command_complete(&mut client).await, "ROLLBACK");
+
+        assert_eq!(db.txn_scan(None, "t").unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn sync_reports_in_transaction_status_after_extended_begin() {
+        let (db, _b, _l) = test_db();
+        let mut client = spawn_session(db.clone()).await;
+
+        assert_eq!(
+            wire_sync_status(&mut client).await,
+            b'I',
+            "idle before any BEGIN"
+        );
+
+        parse_bind_execute(&mut client, "BEGIN").await;
+        wire_read_command_complete(&mut client).await;
+        assert_eq!(
+            wire_sync_status(&mut client).await,
+            b'T',
+            "Sync must report in-transaction after an extended-protocol BEGIN"
+        );
+
+        parse_bind_execute(&mut client, "COMMIT").await;
+        wire_read_command_complete(&mut client).await;
+        assert_eq!(
+            wire_sync_status(&mut client).await,
+            b'I',
+            "idle again after COMMIT"
+        );
     }
 }
 

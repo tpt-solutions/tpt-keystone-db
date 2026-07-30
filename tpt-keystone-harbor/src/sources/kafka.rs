@@ -446,6 +446,7 @@ impl SourceConnector for KafkaSource {
             .map(|name| TableSchema {
                 schema: "kafka".to_string(),
                 name,
+                indexes: vec![],
                 columns: vec![
                     ColumnSchema {
                         name: "offset".to_string(),

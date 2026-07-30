@@ -4,16 +4,22 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use super::internal_key::{InternalKey, DELETE_TAG, PUT_TAG};
 use super::lease::LeaseHandle;
 use super::manifest::Manifest;
 use super::objectstore::ObjectStore;
 use super::sstable::SSTable;
 use super::wal::{Wal, WalRecord};
 
-/// A MemTable is an in-memory write buffer backed by a BTreeMap.
-/// When it reaches a threshold size, it is frozen and flushed to an SSTable.
+/// A MemTable is an in-memory write buffer backed by a BTreeMap, keyed by
+/// [`InternalKey`] (user key + MVCC commit-sequence + put/delete tag) rather
+/// than the raw user key — so multiple versions of the same user key can be
+/// held here at once, which is what makes an open snapshot's reads (of a key
+/// written again after the snapshot was taken) resolvable without waiting
+/// for a flush. When it reaches a threshold size, it is frozen and flushed
+/// to an SSTable.
 pub struct MemTable {
-    data: BTreeMap<Vec<u8>, (Vec<u8>, u8)>, // key -> (value, record_type)
+    data: BTreeMap<InternalKey, Vec<u8>>,
     size_bytes: usize,
     max_size: usize,
 }
@@ -27,27 +33,45 @@ impl MemTable {
         }
     }
 
-    pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>, record_type: u8) {
-        let entry_size = key.len() + value.len() + 8;
+    /// Record a new version of `user_key` at `seq`. Unlike the pre-MVCC
+    /// design, this never overwrites an existing entry in place — every
+    /// write before the next flush is a distinct `InternalKey` (a different
+    /// `seq`), because a concurrently open snapshot may need to resolve to
+    /// exactly one of the intermediate versions rather than only the latest.
+    pub fn insert(&mut self, user_key: Vec<u8>, seq: u64, value: Vec<u8>, tag: u8) {
+        let entry_size = user_key.len() + value.len() + 8 + 1;
         self.size_bytes += entry_size;
-        if let Some((old_val, _)) = self.data.insert(key, (value, record_type)) {
-            self.size_bytes = self.size_bytes.saturating_sub(old_val.len() + 8);
-        }
+        let ikey = InternalKey::new(user_key, seq, tag);
+        self.data.insert(ikey, value);
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&(Vec<u8>, u8)> {
-        self.data.get(key)
+    /// The version of `key` visible to `snapshot_seq`, if this memtable
+    /// holds any entry for it at all. `None` (outer) means "no entry here —
+    /// fall through to the next source"; `Some(None)` means "visible entry
+    /// here, and it's a tombstone" (stop: the key is deleted as of this
+    /// snapshot); `Some(Some(v))` is the visible value.
+    pub fn get_at(&self, key: &[u8], snapshot_seq: u64) -> Option<Option<&Vec<u8>>> {
+        let seek = InternalKey::seek(key, snapshot_seq);
+        let (ikey, value) = self.data.range(seek..).next()?;
+        if ikey.user_key != key {
+            return None;
+        }
+        if ikey.is_delete() {
+            Some(None)
+        } else {
+            Some(Some(value))
+        }
     }
 
     pub fn is_full(&self) -> bool {
         self.size_bytes >= self.max_size
     }
 
-    pub fn drain(&mut self) -> Vec<(Vec<u8>, Vec<u8>, u8)> {
-        let result: Vec<_> = std::mem::take(&mut self.data)
-            .into_iter()
-            .map(|(k, (v, t))| (k, v, t))
-            .collect();
+    /// Drain all entries in `InternalKey` order (user key ascending, then
+    /// seq descending within a key) — the order the SSTable format requires,
+    /// and exactly the iteration order a `BTreeMap` already gives for free.
+    pub fn drain(&mut self) -> Vec<(InternalKey, Vec<u8>)> {
+        let result: Vec<_> = std::mem::take(&mut self.data).into_iter().collect();
         self.size_bytes = 0;
         result
     }
@@ -56,11 +80,45 @@ impl MemTable {
         self.data.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], u8)> {
-        self.data
-            .iter()
-            .map(|(k, (v, t))| (k.as_slice(), v.as_slice(), *t))
+    /// Every entry, in `InternalKey` order, as `(user_key, seq, tag,
+    /// value_or_none)` — the shape [`first_visible_per_key`] expects.
+    pub fn iter_versions(&self) -> impl Iterator<Item = (Vec<u8>, u64, u8, Option<Vec<u8>>)> + '_ {
+        self.data.iter().map(|(ikey, value)| {
+            let v = if ikey.is_delete() {
+                None
+            } else {
+                Some(value.clone())
+            };
+            (ikey.user_key.clone(), ikey.seq, ikey.tag, v)
+        })
     }
+}
+
+/// Reduce a stream of `(user_key, seq, tag, value)` entries from a single
+/// source — which may hold multiple versions of the same key, arriving in
+/// `InternalKey` order (user key ascending, then seq descending within a
+/// key) — down to at most one entry per key: the newest version with
+/// `seq <= snapshot_seq`, or nothing at all if every version of that key in
+/// this source is newer than the snapshot. `value` is `None` for a
+/// tombstone. Shared by `LsmEngine::scan_at` and `compact_all`, which both
+/// need this same "resolve to the one version a snapshot/watermark can see"
+/// reduction, just over different sources.
+fn first_visible_per_key(
+    entries: impl Iterator<Item = (Vec<u8>, u64, u8, Option<Vec<u8>>)>,
+    snapshot_seq: u64,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let mut results = Vec::new();
+    let mut resolved_key: Option<Vec<u8>> = None;
+    for (key, seq, _tag, value) in entries {
+        if resolved_key.as_deref() == Some(key.as_slice()) {
+            continue; // already resolved this key from a newer version
+        }
+        if seq <= snapshot_seq {
+            results.push((key.clone(), value));
+            resolved_key = Some(key);
+        }
+    }
+    results
 }
 
 /// Spread `sst/` and `wal/` objects across hash-derived sub-prefixes so they
@@ -124,6 +182,18 @@ pub struct LsmEngine {
     /// reuses this value rather than `wal_seg_id` (which is always one ahead,
     /// pointing at the *next* segment to allocate).
     committed_wal_segment_seq: u64,
+    /// The next MVCC commit-sequence number to allocate (`write_batch`
+    /// allocates exactly one per call, shared by every row in that batch).
+    /// Seeded on `open` from the durable high-water mark across the WAL,
+    /// loaded SSTables, and the manifest, so a restart never reissues a
+    /// `commit_seq` that was ever durably attempted.
+    next_commit_seq: u64,
+    /// Currently open snapshots, refcounted by `commit_seq` watermark — a
+    /// transaction can `register_snapshot`/`release_snapshot` the same seq
+    /// more than once only if it's cloned, so this tracks how many live
+    /// holders remain rather than a plain set. `compact_all` consults the
+    /// smallest key to know how far back it must keep old versions.
+    open_snapshots: BTreeMap<u64, u32>,
 }
 
 /// Number of live SSTables that triggers a full compaction (a single merge of
@@ -165,8 +235,8 @@ impl LsmEngine {
         let mut memtable = MemTable::new(4 * 1024 * 1024);
 
         let mut recovered = 0u64;
-        wal.replay(|record: WalRecord| {
-            memtable.insert(record.key, record.value, record.record_type);
+        let wal_max_seq = wal.replay(|record: WalRecord| {
+            memtable.insert(record.key, record.seq, record.value, record.record_type);
             recovered += 1;
         })?;
         if recovered > 0 {
@@ -179,10 +249,14 @@ impl LsmEngine {
         };
 
         let mut sstables = Vec::new();
+        let mut sstable_max_seq = 0u64;
         for id in &manifest.sstable_ids {
             let key = sstable_key(*id);
             match SSTable::open_from_store(&*store, &key, *id) {
-                Ok(sst) => sstables.push(sst),
+                Ok(sst) => {
+                    sstable_max_seq = sstable_max_seq.max(sst.max_seq());
+                    sstables.push(sst);
+                }
                 Err(e) => warn!(sstable = %key, error = %e, "failed to load sstable from manifest"),
             }
         }
@@ -196,6 +270,16 @@ impl LsmEngine {
             .unwrap_or(1);
         let wal_seg_id = manifest.wal_segment_seq + 1;
         let committed_wal_segment_seq = manifest.wal_segment_seq;
+
+        // Never reissue a commit_seq that was ever durably attempted,
+        // whether it's visible in the WAL (including a torn trailing
+        // batch's header — `Wal::replay` already folds that in), in a
+        // loaded SSTable, or only recorded in the manifest (e.g. a batch
+        // that made it into an SSTable which then failed to load above).
+        let next_commit_seq = wal_max_seq
+            .max(sstable_max_seq)
+            .max(manifest.max_commit_seq)
+            + 1;
 
         info!(
             sstable_count = sstables.len(),
@@ -213,84 +297,155 @@ impl LsmEngine {
             wal_seg_id,
             manifest_etag,
             committed_wal_segment_seq,
+            next_commit_seq,
+            open_snapshots: BTreeMap::new(),
         })
     }
 
-    pub fn write(&mut self, table: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        self.wal.append(table, key, value, 0)?;
-        self.memtable.insert(key.to_vec(), value.to_vec(), 0);
+    /// The most recent `commit_seq` actually assigned — what a new
+    /// autocommit read/write or freshly begun transaction should use as "as
+    /// of now". `0` for a brand new database (before anything has ever
+    /// committed), which correctly makes every real row invisible (all real
+    /// `commit_seq`s start at 1).
+    pub fn current_seq(&self) -> u64 {
+        self.next_commit_seq - 1
+    }
+
+    /// Register an open snapshot at `seq` (refcounted — the same seq can be
+    /// registered more than once). `compact_all` will not drop a version
+    /// some registered snapshot might still need to read.
+    pub fn register_snapshot(&mut self, seq: u64) {
+        *self.open_snapshots.entry(seq).or_insert(0) += 1;
+    }
+
+    /// Release a previously registered snapshot. No-op if it was never
+    /// registered (defensive — callers should not hit this in practice).
+    pub fn release_snapshot(&mut self, seq: u64) {
+        if let Some(count) = self.open_snapshots.get_mut(&seq) {
+            *count -= 1;
+            if *count == 0 {
+                self.open_snapshots.remove(&seq);
+            }
+        }
+    }
+
+    fn oldest_open_snapshot(&self) -> Option<u64> {
+        self.open_snapshots.keys().next().copied()
+    }
+
+    /// Write every entry in `entries` as one atomic batch sharing a single,
+    /// freshly allocated `commit_seq` — returned so the caller (e.g.
+    /// `Database::commit_txn`) can use it if needed. Allocating exactly one
+    /// `commit_seq` per call (not one per entry) is what makes a
+    /// multi-row transaction's commit atomic under snapshot isolation: a
+    /// concurrently open snapshot either sees all of this batch's rows or
+    /// none of them, never a torn subset. A plain autocommit write is simply
+    /// a batch of size 1.
+    pub fn write_batch(&mut self, entries: &[(String, Vec<u8>, Option<Vec<u8>>)]) -> Result<u64> {
+        let commit_seq = self.next_commit_seq;
+        self.next_commit_seq += 1;
+
+        let wal_entries: Vec<(String, Vec<u8>, Vec<u8>, u8)> = entries
+            .iter()
+            .map(|(table, key, value)| match value {
+                Some(v) => (table.clone(), key.clone(), v.clone(), PUT_TAG),
+                None => (table.clone(), key.clone(), Vec::new(), DELETE_TAG),
+            })
+            .collect();
+        self.wal.append_batch(commit_seq, &wal_entries)?;
+
+        for (_table, key, value) in entries {
+            match value {
+                Some(v) => self
+                    .memtable
+                    .insert(key.clone(), commit_seq, v.clone(), PUT_TAG),
+                None => self
+                    .memtable
+                    .insert(key.clone(), commit_seq, Vec::new(), DELETE_TAG),
+            }
+        }
+
         if self.memtable.is_full() {
             self.trigger_flush()?;
         }
+        Ok(commit_seq)
+    }
+
+    /// Write the latest value for `key`, visible to any read from now on.
+    /// Thin wrapper over [`Self::write_batch`] — kept so every
+    /// non-transactional call site (`StorageEngine` impl, catalog
+    /// bookkeeping) is unaffected by the versioned storage underneath.
+    pub fn write(&mut self, table: &str, key: &[u8], value: &[u8]) -> Result<()> {
+        self.write_batch(&[(table.to_string(), key.to_vec(), Some(value.to_vec()))])?;
         Ok(())
     }
 
     pub fn delete(&mut self, table: &str, key: &[u8]) -> Result<()> {
-        self.wal.append(table, key, &[], 2)?;
-        self.memtable.insert(key.to_vec(), Vec::new(), 2);
-        if self.memtable.is_full() {
-            self.trigger_flush()?;
-        }
+        self.write_batch(&[(table.to_string(), key.to_vec(), None)])?;
         Ok(())
     }
 
+    /// Read the latest committed value — equivalent to `read_at(key,
+    /// current_seq())`.
     pub fn read(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if let Some((value, record_type)) = self.memtable.get(key) {
-            return match record_type {
-                2 => Ok(None),
-                _ => Ok(Some(value.clone())),
-            };
+        self.read_at(key, self.current_seq())
+    }
+
+    /// Read the version of `key` visible to `snapshot_seq`: memtable →
+    /// immutable memtable → SSTables newest-to-oldest, stopping at the first
+    /// source that has *any* version of `key` visible to this snapshot
+    /// (whether live or a tombstone) — a source with only newer, invisible
+    /// versions correctly falls through to the next, older source instead.
+    pub fn read_at(&self, key: &[u8], snapshot_seq: u64) -> Result<Option<Vec<u8>>> {
+        if let Some(v) = self.memtable.get_at(key, snapshot_seq) {
+            return Ok(v.cloned());
         }
         if let Some(ref imm) = self.immutable {
-            if let Some((value, record_type)) = imm.get(key) {
-                return match record_type {
-                    2 => Ok(None),
-                    _ => Ok(Some(value.clone())),
-                };
+            if let Some(v) = imm.get_at(key, snapshot_seq) {
+                return Ok(v.cloned());
             }
         }
         for sst in self.sstables.iter().rev() {
-            if let Some(value) = sst.read(key)? {
-                if value.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(value));
+            if let Some(v) = sst.read_at(key, snapshot_seq)? {
+                return Ok(v);
             }
         }
         Ok(None)
     }
 
+
+    /// Scan every live key at the latest committed state — equivalent to
+    /// `scan_at(current_seq())`.
     pub fn scan(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        self.scan_at(self.current_seq())
+    }
+
+    /// Scan every key visible to `snapshot_seq`. Each source (SSTables
+    /// oldest-to-newest, then immutable memtable, then memtable) is reduced
+    /// to at most one entry per key via [`first_visible_per_key`], then
+    /// overlaid in that same oldest-to-newest order so a newer source's
+    /// resolved entry for a key (including a tombstone) correctly shadows an
+    /// older source's.
+    pub fn scan_at(&self, snapshot_seq: u64) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut merged: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
         for sst in &self.sstables {
-            for (k, v) in sst.scan()? {
-                match v {
-                    Some(val) => {
-                        merged.insert(k, val);
-                    }
-                    None => {
-                        merged.remove(&k);
-                    }
-                }
+            let versions = sst.scan_all_versions()?;
+            for (key, value) in first_visible_per_key(versions.into_iter(), snapshot_seq) {
+                merged.insert(key, value);
             }
         }
         if let Some(ref imm) = self.immutable {
-            for (k, v, t) in imm.iter() {
-                if t != 2 {
-                    merged.insert(k.to_vec(), v.to_vec());
-                } else {
-                    merged.remove(k);
-                }
+            for (key, value) in first_visible_per_key(imm.iter_versions(), snapshot_seq) {
+                merged.insert(key, value);
             }
         }
-        for (k, v, t) in self.memtable.iter() {
-            if t != 2 {
-                merged.insert(k.to_vec(), v.to_vec());
-            } else {
-                merged.remove(k);
-            }
+        for (key, value) in first_visible_per_key(self.memtable.iter_versions(), snapshot_seq) {
+            merged.insert(key, value);
         }
-        Ok(merged.into_iter().collect())
+        Ok(merged
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .collect())
     }
 
     fn trigger_flush(&mut self) -> Result<()> {
@@ -302,7 +457,7 @@ impl LsmEngine {
         self.immutable = Some(old_mem);
 
         if let Some(mut imm) = self.immutable.take() {
-            let entries: Vec<_> = imm.drain();
+            let entries = imm.drain();
             if entries.is_empty() {
                 return Ok(());
             }
@@ -327,6 +482,7 @@ impl LsmEngine {
                 },
                 wal_segment_seq: self.wal_seg_id,
                 writer_fencing_token: self.lease.token(),
+                max_commit_seq: self.current_seq(),
             };
             let new_etag =
                 Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
@@ -351,13 +507,18 @@ impl LsmEngine {
         Ok(())
     }
 
-    /// Merge every current SSTable into a single new one, dropping any key
-    /// shadowed by a newer table's write or tombstone. This is a full
-    /// (size-tiered, not true multi-level) compaction — simpler than real
-    /// LSM levelling, but it does the two things that actually matter:
-    /// bounds the SSTable list so `read`/`scan` stop growing unboundedly, and
-    /// reclaims space by dropping overwritten/tombstoned keys instead of
-    /// carrying them forward forever.
+    /// Merge every current SSTable into a single new one. For each key,
+    /// keeps every version still newer than the oldest currently open
+    /// snapshot, plus exactly one older "floor" version (what that oldest
+    /// snapshot itself resolves to); everything beyond that floor is
+    /// unreachable by any open snapshot and is dropped. With no snapshots
+    /// open (the common case), the floor version is the single latest
+    /// version — the same full collapse-to-one-version behavior this method
+    /// had before MVCC, including dropping a dead tombstone entirely.
+    ///
+    /// This is a full (size-tiered, not true multi-level) compaction — every
+    /// live SSTable is scanned every time, so there's never an "older
+    /// SSTable outside this compaction pass" to worry about shadowing.
     pub fn compact_all(&mut self) -> Result<()> {
         if self.sstables.len() < 2 {
             return Ok(());
@@ -366,22 +527,36 @@ impl LsmEngine {
             bail!("fenced off: this node no longer holds the write lease");
         }
 
-        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut by_key: BTreeMap<Vec<u8>, Vec<(u64, u8, Option<Vec<u8>>)>> = BTreeMap::new();
         for sst in &self.sstables {
-            for (k, v) in sst.scan()? {
-                match v {
-                    Some(val) => {
-                        merged.insert(k, val);
-                    }
-                    None => {
-                        merged.remove(&k);
-                    }
-                }
+            for (key, seq, tag, value) in sst.scan_all_versions()? {
+                by_key.entry(key).or_default().push((seq, tag, value));
             }
         }
 
-        let entries: Vec<(Vec<u8>, Vec<u8>, u8)> =
-            merged.into_iter().map(|(k, v)| (k, v, 0u8)).collect();
+        let watermark = self.oldest_open_snapshot().unwrap_or(u64::MAX);
+        let mut entries: Vec<(InternalKey, Vec<u8>)> = Vec::new();
+        for (key, mut versions) in by_key {
+            versions.sort_by(|a, b| b.0.cmp(&a.0)); // newest (highest seq) first
+            for (seq, tag, value) in versions {
+                if seq >= watermark {
+                    entries.push((InternalKey::new(key.clone(), seq, tag), value.unwrap_or_default()));
+                    continue;
+                }
+                // First version older than the watermark: this is exactly
+                // what the oldest open snapshot resolves to. Keep it and
+                // stop — everything older is unreachable by any open
+                // snapshot — unless there are no snapshots open at all
+                // (`watermark == u64::MAX`) and this floor version is
+                // itself a dead tombstone, in which case nothing needs it
+                // either.
+                if !(watermark == u64::MAX && tag == DELETE_TAG) {
+                    entries.push((InternalKey::new(key.clone(), seq, tag), value.unwrap_or_default()));
+                }
+                break;
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0)); // InternalKey order for the SSTable format
 
         let old_keys: Vec<String> = self
             .sstables
@@ -391,12 +566,14 @@ impl LsmEngine {
 
         let new_id = self.sstable_id;
         let new_key = sstable_key(new_id);
+        let entries_len = entries.len();
         let new_sst = SSTable::create_in_store(&*self.store, &new_key, new_id, &entries)?;
 
         let new_manifest = Manifest {
             sstable_ids: vec![new_id],
             wal_segment_seq: self.committed_wal_segment_seq,
             writer_fencing_token: self.lease.token(),
+            max_commit_seq: self.current_seq(),
         };
         let new_etag =
             Manifest::save_cas(&*self.store, &new_manifest, self.manifest_etag.as_deref())
@@ -424,7 +601,7 @@ impl LsmEngine {
             }
         }
 
-        info!(merged_count, entries = entries.len(), sstable = %new_key, "compacted SSTables");
+        info!(merged_count, entries = entries_len, sstable = %new_key, "compacted SSTables");
         Ok(())
     }
 
@@ -481,6 +658,7 @@ impl LsmEngine {
             memtable_entries: self.memtable.len(),
             sstable_count: self.sstables.len(),
             total_disk_bytes: self.sstables.iter().map(|s| s.blob_size()).sum(),
+            open_snapshot_count: self.open_snapshots.len(),
         }
     }
 }
@@ -579,5 +757,94 @@ mod tests {
         assert_eq!(reader.sstables.len(), 1);
         assert_eq!(reader.read(b"a").unwrap(), Some(b"1".to_vec()));
         assert_eq!(reader.read(b"b").unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn read_at_resolves_an_older_snapshot_across_a_later_write() {
+        let bucket = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let (mut engine, _store) = open_engine(bucket.path(), local.path());
+
+        engine.write("t", b"k", b"v1").unwrap();
+        let snap = engine.current_seq();
+        engine.write("t", b"k", b"v2").unwrap();
+
+        assert_eq!(engine.read_at(b"k", snap).unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(engine.read(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn read_at_resolves_an_older_snapshot_across_a_flush() {
+        let bucket = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let (mut engine, _store) = open_engine(bucket.path(), local.path());
+
+        engine.write("t", b"k", b"v1").unwrap();
+        let snap = engine.current_seq();
+        engine.write("t", b"k", b"v2").unwrap();
+        engine.flush().unwrap();
+
+        assert_eq!(engine.read_at(b"k", snap).unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(engine.read(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn long_running_snapshot_survives_a_compaction() {
+        let bucket = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let (mut engine, _store) = open_engine(bucket.path(), local.path());
+
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TPT_COMPACTION_SSTABLE_THRESHOLD", "3");
+
+        force_flush(&mut engine, b"k", b"v1");
+        let snap = engine.current_seq();
+        engine.register_snapshot(snap);
+
+        force_flush(&mut engine, b"k", b"v2");
+        // Third flush pushes the SSTable count to the threshold and triggers
+        // compaction.
+        force_flush(&mut engine, b"k", b"v3");
+        assert_eq!(engine.sstables.len(), 1, "compaction should still have run");
+
+        assert_eq!(
+            engine.read_at(b"k", snap).unwrap(),
+            Some(b"v1".to_vec()),
+            "the old snapshot must still see its original value after compaction"
+        );
+        assert_eq!(
+            engine.read(b"k").unwrap(),
+            Some(b"v3".to_vec()),
+            "a fresh read must see the latest value"
+        );
+
+        engine.release_snapshot(snap);
+        std::env::remove_var("TPT_COMPACTION_SSTABLE_THRESHOLD");
+    }
+
+    #[test]
+    fn compaction_still_collapses_to_one_version_once_the_snapshot_is_released() {
+        let bucket = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let (mut engine, _store) = open_engine(bucket.path(), local.path());
+
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TPT_COMPACTION_SSTABLE_THRESHOLD", "2");
+
+        force_flush(&mut engine, b"k", b"v1");
+        let snap = engine.current_seq();
+        engine.register_snapshot(snap);
+        engine.release_snapshot(snap); // released immediately -- no longer pinned
+
+        force_flush(&mut engine, b"k", b"v2"); // triggers compaction at threshold 2
+        assert_eq!(engine.sstables.len(), 1);
+        assert_eq!(engine.read(b"k").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(
+            engine.read_at(b"k", snap).unwrap(),
+            None,
+            "the old version is gone once nothing holds its snapshot anymore"
+        );
+
+        std::env::remove_var("TPT_COMPACTION_SSTABLE_THRESHOLD");
     }
 }

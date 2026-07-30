@@ -7,19 +7,22 @@
 //! down) and it doesn't translate to this dev environment (`SIGKILL` isn't a
 //! real concept on Windows the way it is on Linux CI).
 //!
-//! Fault model: `wal::Wal::append` (`storage/wal.rs`) does `write_all` then
-//! `sync_all` per record — no batching, no group commit. So a real crash can
-//! only ever tear the *most recent, not-yet-synced* record; everything
-//! before it is already durable once `append` returns `Ok`. This harness
-//! simulates exactly that: perform N real (fully durable) writes, then
-//! truncate the on-disk WAL file to a byte length that lands strictly
-//! *inside* one specific record's byte range — the same shape as a crash
-//! that got partway through `write_all` for that record before power was
-//! lost — and asserts recovery on reopen lands on exactly the last fully
-//! durable prefix, with zero corruption and zero silently-partial rows.
+//! Fault model: `wal::Wal::append_batch` (`storage/wal.rs`) does one
+//! buffered `write_all` then one `sync_all` per *batch* — every row an
+//! autocommit write or a transaction's `COMMIT` durably persists together,
+//! framed as `marker|commit_seq|count|record*count`. A real crash can only
+//! ever tear the *most recent, not-yet-synced* batch; everything before it
+//! is already durable once `append_batch` returns `Ok`, and `replay` accepts
+//! or discards a torn trailing batch as a whole (never a partial subset of
+//! its records) — see `crash_mid_transaction_leaves_no_torn_state_visible`
+//! below for the multi-row case. `torn_write_recovers_exactly_the_last_durable_prefix`
+//! below predates batching but still exercises the single-row case
+//! correctly: an autocommit write is simply a batch of size 1, so "truncate
+//! strictly inside one record's byte range" and "truncate strictly inside
+//! one batch's byte range" are the same thing here.
 //!
-//! `wal::Wal::replay`/`scan_max_seq` already handle a torn trailing record
-//! by bounds-checking before every field decode and breaking cleanly (no
+//! `wal::Wal::replay` already handles a torn trailing batch by
+//! bounds-checking before every field decode and breaking cleanly (no
 //! checksum exists in this format, so *truncation* is caught structurally,
 //! not via a checksum mismatch) — this harness is what actually exercises
 //! that path against real on-disk bytes instead of just reasoning about the
@@ -168,6 +171,92 @@ fn torn_write_recovers_exactly_the_last_durable_prefix() {
             "seed {seed}: node unusable after recovery"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 1b: crash mid-transaction — a multi-row transaction's COMMIT is
+// one atomic WAL batch (`LsmEngine::write_batch`/`Wal::append_batch`); a
+// crash partway through writing that batch must leave none of its rows
+// visible, not a torn subset. This is the direct regression test for the
+// atomicity gap Stage 2+3 (durable MVCC) surfaced: before batching, each row
+// of a transaction was written with its own separate `Wal::append` call, so
+// a crash between two of them could durably persist a torn subset of a
+// commit that was supposed to be all-or-nothing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crash_mid_transaction_leaves_no_torn_state_visible() {
+    let bucket = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let wal_path = local.path().join("wal").join("wal.log");
+
+    let db = open_writer(bucket.path(), local.path(), cache.path());
+    db.create_table(
+        "t",
+        &[ColumnDef {
+            name: "id".into(),
+            col_type: ColumnType::Text,
+            nullable: false,
+            default: None,
+            is_pk: true,
+        }],
+    )
+    .unwrap();
+
+    // A row committed outside any transaction, to prove the crash below
+    // only tears the transaction's own batch, not already-durable data.
+    db.write("t", b"pre", b"existing").unwrap();
+    let before_txn_len = std::fs::metadata(&wal_path).unwrap().len();
+
+    // A five-row transaction, committed as one atomic WAL batch.
+    let txn = db.begin_txn();
+    for i in 0..5 {
+        db.txn_write(
+            Some(&txn),
+            "t",
+            format!("k{i:02}").as_bytes(),
+            format!("v{i:02}").as_bytes(),
+        )
+        .unwrap();
+    }
+    db.commit_txn(&txn).unwrap();
+    let full_len = std::fs::metadata(&wal_path).unwrap().len();
+    assert!(
+        full_len > before_txn_len,
+        "commit must have appended the transaction's batch"
+    );
+
+    drop(db); // release the file handle before mutating the file directly (matters on Windows)
+
+    // Truncate to a length strictly inside the transaction's batch —
+    // simulating a crash partway through writing it. Under the old
+    // one-write-per-key WAL format this could recover a torn subset of the
+    // 5 rows; the batch-framed format must discard the whole group instead
+    // of applying a prefix of it.
+    let truncate_at = before_txn_len + (full_len - before_txn_len) / 2;
+    assert!(truncate_at > before_txn_len && truncate_at < full_len);
+
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wal_path)
+            .unwrap();
+        f.set_len(truncate_at).unwrap();
+        f.seek(SeekFrom::Start(truncate_at)).unwrap();
+        f.flush().unwrap();
+    }
+
+    let recovered = open_writer(bucket.path(), local.path(), cache.path());
+    let rows = recovered.scan("t").unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the pre-transaction row must survive — none of the torn transaction's \
+         5 rows should appear, not even a prefix of them"
+    );
+    assert_eq!(rows[0].key, b"pre");
 }
 
 // ---------------------------------------------------------------------------

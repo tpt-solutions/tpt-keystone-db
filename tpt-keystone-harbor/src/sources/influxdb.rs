@@ -9,7 +9,7 @@
 //! `Unimplemented` — see the Harbor/PG note for the honesty precedent.
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow};
-use crate::schema::{from_influx_type, ColumnSchema, TableSchema};
+use crate::schema::{from_influx_type, ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -18,6 +18,22 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 
 const SNAPSHOT_BATCH_SIZE: usize = 5_000;
+
+/// Time-index on `time`, so migrated points get Chronos's retention/rollup/
+/// `time_bucket` machinery instead of sitting in a plain table. `value` must
+/// be explicit: a measurement can have several numeric fields, and Chronos's
+/// auto-pick only applies when there's exactly one candidate column. Returns
+/// no index if there's no numeric field column to point `value` at.
+fn time_index(columns: &[ColumnSchema]) -> Vec<IndexSpec> {
+    let value_col = columns
+        .iter()
+        .find(|c| c.name != "time" && c.source_type != "tag" && matches!(c.keystone_type.as_str(), "DOUBLE PRECISION" | "BIGINT"))
+        .map(|c| c.name.clone());
+    match value_col {
+        Some(value) => vec![IndexSpec { columns: vec!["time".to_string()], using: "TIME".to_string(), with: vec![("value".to_string(), value)] }],
+        None => vec![],
+    }
+}
 
 /// Resolve `host:port` (or `http://host:port`), defaulting the port when
 /// absent. Shared by every source connector's raw-socket client in this crate.
@@ -290,10 +306,12 @@ impl SourceConnector for InfluxDbSource {
             }
 
             if columns.len() > 1 {
+                let indexes = time_index(&columns);
                 tables.push(TableSchema {
                     schema: self.conn.database.clone(),
                     name: measurement,
                     columns,
+                    indexes,
                 });
             }
         }
@@ -421,5 +439,29 @@ mod tests {
     fn urlsafe_encoding() {
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
         assert_eq!(urlencode("keep-this_~."), "keep-this_~.");
+    }
+
+    fn col(name: &str, source_type: &str, keystone_type: &str) -> ColumnSchema {
+        ColumnSchema { name: name.to_string(), source_type: source_type.to_string(), keystone_type: keystone_type.to_string(), nullable: true, is_primary_key: false }
+    }
+
+    #[test]
+    fn time_index_picks_first_numeric_field_as_value() {
+        let columns = vec![
+            col("time", "timestamp", "BIGINT"),
+            col("host", "tag", "TEXT"),
+            col("usage", "float", "DOUBLE PRECISION"),
+        ];
+        let indexes = time_index(&columns);
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].using, "TIME");
+        assert_eq!(indexes[0].columns, vec!["time".to_string()]);
+        assert_eq!(indexes[0].with, vec![("value".to_string(), "usage".to_string())]);
+    }
+
+    #[test]
+    fn time_index_empty_without_a_numeric_field() {
+        let columns = vec![col("time", "timestamp", "BIGINT"), col("host", "tag", "TEXT")];
+        assert!(time_index(&columns).is_empty());
     }
 }

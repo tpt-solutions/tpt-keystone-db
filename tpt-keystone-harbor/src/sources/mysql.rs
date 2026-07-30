@@ -394,7 +394,7 @@ impl SourceConnector for MySqlSource {
                 })
                 .collect();
 
-            tables.push(TableSchema { schema, name, columns });
+            tables.push(TableSchema { schema, name, columns, indexes: vec![] });
         }
         Ok(tables)
     }
