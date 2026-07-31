@@ -19,23 +19,63 @@ pub struct Manifest {
     /// Fencing token of the writer that produced this manifest revision.
     pub writer_fencing_token: u64,
     /// Highest MVCC commit-sequence number durably reflected by this
-    /// manifest revision (i.e. by the SSTables it lists). `#[serde(default)]`
-    /// so a manifest written before this field existed still decodes (as
-    /// `0`, the same "nothing committed yet" sentinel a fresh database
-    /// starts with) — same precedent as `TableSchema`'s `unique_groups`/
-    /// `foreign_keys`/`json_schemas` fields.
+    /// manifest revision (i.e. by the SSTables it lists). See `ManifestV0`
+    /// for how a manifest written before this field existed still decodes.
     #[serde(default)]
     pub max_commit_seq: u64,
+}
+
+/// The pre-`max_commit_seq` on-disk shape, kept only so [`Manifest::load`]
+/// can still decode a manifest written before that field existed.
+///
+/// `#[serde(default)]` on `Manifest::max_commit_seq` does *not* by itself
+/// make this work: bincode is a positional, non-self-describing format, so
+/// decoding a shorter old blob directly as the current (longer) `Manifest`
+/// doesn't gracefully default the missing field the way a self-describing
+/// format (JSON, etc.) would — the derived decoder tries to read bytes for
+/// every field in order, and hits a clean EOF partway through the field that
+/// was never written, rather than backfilling it. `load` tries the current
+/// shape first (the common case) and only falls back to this shape — which
+/// has no trailing field to run out of bytes on — if that fails.
+///
+/// This same limitation applies to `TableSchema`'s `unique_groups`/
+/// `foreign_keys`/`json_schemas` fields (`storage/mod.rs`), which are not
+/// actually protected by their `#[serde(default)]` annotations either; this
+/// type's doc comment is the record of that finding, since fixing that path
+/// too is out of scope for the MVCC work this manifest field was added for.
+#[derive(Debug, Clone, Deserialize)]
+struct ManifestV0 {
+    sstable_ids: Vec<u64>,
+    wal_segment_seq: u64,
+    writer_fencing_token: u64,
+}
+
+impl From<ManifestV0> for Manifest {
+    fn from(v0: ManifestV0) -> Self {
+        Manifest {
+            sstable_ids: v0.sstable_ids,
+            wal_segment_seq: v0.wal_segment_seq,
+            writer_fencing_token: v0.writer_fencing_token,
+            max_commit_seq: 0,
+        }
+    }
 }
 
 impl Manifest {
     const KEY: &'static str = "manifest.bin";
 
     /// Load the current manifest and its ETag, or `None` if the database has
-    /// never flushed anything yet.
+    /// never flushed anything yet. Falls back to decoding the pre-
+    /// `max_commit_seq` shape (see [`ManifestV0`]) if the current shape
+    /// doesn't decode, so a data directory last written by an older binary
+    /// still opens.
     pub fn load(store: &dyn ObjectStore) -> Result<Option<(Manifest, String)>> {
         match store.get(Self::KEY)? {
-            Some((bytes, meta)) => Ok(Some((bincode::deserialize(&bytes)?, meta.etag))),
+            Some((bytes, meta)) => {
+                let manifest = bincode::deserialize::<Manifest>(&bytes)
+                    .or_else(|_| bincode::deserialize::<ManifestV0>(&bytes).map(Manifest::from))?;
+                Ok(Some((manifest, meta.etag)))
+            }
             None => Ok(None),
         }
     }
@@ -96,12 +136,13 @@ mod tests {
         assert_eq!(loaded2.sstable_ids, vec![1, 2, 3, 4]);
     }
 
-    /// A manifest encoded before `max_commit_seq` existed must still decode
-    /// into the current `Manifest` — this is what actually proves bincode's
-    /// positional (non-self-describing) format honors `#[serde(default)]`
-    /// for a missing *trailing* field, rather than erroring on the shorter
-    /// input, since that's not exercised by round-tripping the current shape
-    /// through itself.
+    /// A manifest encoded before `max_commit_seq` existed must still load
+    /// through `Manifest::load` (via the `ManifestV0` fallback) — proving
+    /// the fallback actually engages against a real stored object, not just
+    /// that a raw `bincode::deserialize::<Manifest>` call would (it
+    /// wouldn't: see `ManifestV0`'s doc comment for why plain
+    /// `#[serde(default)]` doesn't help bincode with a missing trailing
+    /// field, which is exactly what this test caught when first written).
     #[test]
     fn decodes_a_pre_max_commit_seq_manifest_with_the_default() {
         #[derive(Serialize)]
@@ -117,7 +158,11 @@ mod tests {
         };
         let bytes = bincode::serialize(&old).unwrap();
 
-        let decoded: Manifest = bincode::deserialize(&bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsObjectStore::open(dir.path()).unwrap();
+        store.put(Manifest::KEY, &bytes).unwrap();
+
+        let (decoded, _etag) = Manifest::load(&store).unwrap().unwrap();
         assert_eq!(decoded.sstable_ids, vec![7, 8]);
         assert_eq!(decoded.wal_segment_seq, 3);
         assert_eq!(decoded.writer_fencing_token, 2);

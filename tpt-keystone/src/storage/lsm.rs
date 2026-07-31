@@ -639,6 +639,17 @@ impl LsmEngine {
 
         self.sstables.sort_by_key(|s| s.id());
         self.manifest_etag = Some(etag);
+
+        // Advance the commit-seq watermark to at least what the manifest
+        // now reflects, so a plain (non-transactional) read on this reader
+        // node sees everything it just fetched. Without this, a reader's
+        // `current_seq()` stays frozen at whatever it was when the engine
+        // was opened, and every row the writer commits afterward — even
+        // though its SSTable gets fetched right here — stays invisible
+        // (its `seq` is above the reader's stale watermark). Refresh only
+        // ever pulls in newer state, so this never needs to move backward.
+        self.next_commit_seq = self.next_commit_seq.max(manifest.max_commit_seq + 1);
+
         if fetched > 0 || dropped > 0 {
             info!(fetched, dropped, "refreshed manifest — SSTable set changed");
         }

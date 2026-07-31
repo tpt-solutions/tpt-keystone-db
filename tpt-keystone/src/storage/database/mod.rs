@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-use crate::storage::database::txn::TxnHandle;
 use crate::storage::StorageEngine;
 
 use super::btree::BTree;

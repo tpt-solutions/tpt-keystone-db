@@ -100,9 +100,15 @@ fn commit_makes_staged_writes_visible() {
     assert_eq!(count(&db, Some(&txn)), 2);
 
     db.commit_txn(&txn).unwrap();
-    // After commit, both see the rows atomically.
+    // After commit, a fresh (autocommit) read sees both rows atomically.
     assert_eq!(count(&db, None), 2);
-    assert_eq!(count(&db, Some(&txn)), 2);
+    // Reading through the now-finished `txn` handle itself isn't a real
+    // usage pattern (the wire session always drops its `TxnHandle` on
+    // COMMIT), but for completeness: its snapshot stays pinned to BEGIN
+    // time, so it does NOT advance to see its own just-finished commit —
+    // the same "snapshot is fixed at BEGIN" invariant snapshot isolation
+    // relies on everywhere else (see `snapshot_isolation_hides_other_transactions_later_commits`).
+    assert_eq!(count(&db, Some(&txn)), 0);
 }
 
 #[test]
