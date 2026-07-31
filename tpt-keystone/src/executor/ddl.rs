@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use super::eval;
+#[cfg(feature = "wasm-udf")]
 use super::udf;
 use super::QueryResult;
 use crate::sql::ast::{Expr, Literal, UnOp};
@@ -447,6 +448,10 @@ fn udf_column_type(name: &str) -> anyhow::Result<ColumnType> {
     }
 }
 
+// The trailing `Ok(...)` is unreachable when the `wasm-udf` feature is off
+// (the `#[cfg(not(...))]` branch below always bails) — intentional, not a
+// bug, since `CREATE FUNCTION` can never succeed in that build.
+#[cfg_attr(not(feature = "wasm-udf"), allow(unreachable_code))]
 pub(super) fn execute_create_function(
     cf: crate::sql::ast::CreateFunctionStmt,
     db: Arc<Database>,
@@ -470,20 +475,31 @@ pub(super) fn execute_create_function(
         .decode(cf.body_base64.trim())
         .map_err(|e| anyhow::anyhow!("CREATE FUNCTION body is not valid base64: {e}"))?;
 
-    udf::validate_module(
-        &wasm_bytes,
-        &cf.name,
-        &arg_types,
-        &return_type,
-        db.udf_config().max_module_bytes,
-    )?;
+    #[cfg(feature = "wasm-udf")]
+    {
+        udf::validate_module(
+            &wasm_bytes,
+            &cf.name,
+            &arg_types,
+            &return_type,
+            db.udf_config().max_module_bytes,
+        )?;
 
-    db.create_function(crate::storage::UserFunction {
-        name: cf.name,
-        arg_types,
-        return_type,
-        wasm_bytes,
-    })?;
+        db.create_function(crate::storage::UserFunction {
+            name: cf.name,
+            arg_types,
+            return_type,
+            wasm_bytes,
+        })?;
+    }
+    #[cfg(not(feature = "wasm-udf"))]
+    {
+        let _ = (db, wasm_bytes, arg_types, return_type);
+        anyhow::bail!(
+            "WASM UDF support was not compiled into this build (rebuild with `--features wasm-udf`)"
+        );
+    }
+
     Ok(QueryResult {
         fields: vec![],
         rows: vec![],

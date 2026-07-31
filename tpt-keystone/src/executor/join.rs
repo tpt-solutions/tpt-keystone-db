@@ -65,29 +65,46 @@ fn split_join_keys(
     None
 }
 
-/// Evaluate a join's ON predicate against one combined (left ++ right) row,
-/// with table scopes so qualified column references resolve to the correct
-/// side even when both sides share a column name.
-fn eval_join_predicate(
-    on_expr: &Expr,
-    left_row: &[Option<Vec<u8>>],
-    right_row: &[Option<Vec<u8>>],
+/// Precomputed, row-independent context for evaluating a join's ON
+/// predicate many times over a nested-loop's row pairs: the merged schema
+/// and table scopes only depend on the two schemas and `right_alias`, never
+/// on row values, so callers build this once per join instead of per pair.
+struct JoinPredicateCtx {
+    merged_schema: Option<Arc<TableSchema>>,
+    scopes: Vec<(String, std::ops::Range<usize>)>,
+}
+
+fn build_join_predicate_ctx(
     left_schema: &Option<Arc<TableSchema>>,
     right_schema: &Option<Arc<TableSchema>>,
     left_scopes: &[(String, std::ops::Range<usize>)],
     right_alias: &str,
+    left_len: usize,
+) -> JoinPredicateCtx {
+    let merged_schema = merge_schema(left_schema, right_schema);
+    let right_len = right_schema.as_ref().map(|s| s.columns.len()).unwrap_or(0);
+    let mut scopes = left_scopes.to_vec();
+    scopes.push((right_alias.to_string(), left_len..left_len + right_len));
+    JoinPredicateCtx {
+        merged_schema,
+        scopes,
+    }
+}
+
+/// Evaluate a join's ON predicate against one combined (left ++ right) row,
+/// with table scopes so qualified column references resolve to the correct
+/// side even when both sides share a column name. `ctx` is built once per
+/// join (see [`build_join_predicate_ctx`]), not per row pair.
+fn eval_join_predicate(
+    on_expr: &Expr,
+    left_row: &[Option<Vec<u8>>],
+    right_row: &[Option<Vec<u8>>],
+    ctx: &JoinPredicateCtx,
 ) -> bool {
     let mut combined = left_row.to_vec();
     combined.extend(right_row.iter().cloned());
-    let merged = merge_schema(left_schema, right_schema);
-    let right_len = right_schema.as_ref().map(|s| s.columns.len()).unwrap_or(0);
-    let mut scopes = left_scopes.to_vec();
-    scopes.push((
-        right_alias.to_string(),
-        left_row.len()..left_row.len() + right_len,
-    ));
-    RowContext::new(combined, merged)
-        .with_table_scopes(scopes)
+    RowContext::new(combined, ctx.merged_schema.clone())
+        .with_table_scopes(ctx.scopes.clone())
         .eval(on_expr)
         .map(|v| v.is_truthy())
         .unwrap_or(false)
@@ -341,18 +358,12 @@ pub(super) fn apply_join(
                     false,
                 )
             } else {
+                let ctx =
+                    build_join_predicate_ctx(left_schema, right_schema, left_scopes, right_alias, left_len);
                 let mut result = Vec::new();
                 for left_row in &left_rows {
                     for right_row in &right_rows {
-                        if eval_join_predicate(
-                            on_expr,
-                            left_row,
-                            right_row,
-                            left_schema,
-                            right_schema,
-                            left_scopes,
-                            right_alias,
-                        ) {
+                        if eval_join_predicate(on_expr, left_row, right_row, &ctx) {
                             let mut combined = left_row.clone();
                             combined.extend(right_row.iter().cloned());
                             result.push(combined);
@@ -440,19 +451,13 @@ pub(super) fn apply_join(
                     false,
                 )
             } else {
+                let ctx =
+                    build_join_predicate_ctx(left_schema, right_schema, left_scopes, right_alias, left_len);
                 let mut result = Vec::new();
                 for left_row in &left_rows {
                     let mut matched = false;
                     for right_row in &right_rows {
-                        if eval_join_predicate(
-                            on_expr,
-                            left_row,
-                            right_row,
-                            left_schema,
-                            right_schema,
-                            left_scopes,
-                            right_alias,
-                        ) {
+                        if eval_join_predicate(on_expr, left_row, right_row, &ctx) {
                             matched = true;
                             let mut combined = left_row.clone();
                             combined.extend(right_row.iter().cloned());
@@ -545,19 +550,13 @@ pub(super) fn apply_join(
                     true,
                 )
             } else {
+                let ctx =
+                    build_join_predicate_ctx(left_schema, right_schema, left_scopes, right_alias, left_len);
                 let mut result = Vec::new();
                 for right_row in &right_rows {
                     let mut matched = false;
                     for left_row in &left_rows {
-                        if eval_join_predicate(
-                            on_expr,
-                            left_row,
-                            right_row,
-                            left_schema,
-                            right_schema,
-                            left_scopes,
-                            right_alias,
-                        ) {
+                        if eval_join_predicate(on_expr, left_row, right_row, &ctx) {
                             matched = true;
                             let mut combined = left_row.clone();
                             combined.extend(right_row.iter().cloned());

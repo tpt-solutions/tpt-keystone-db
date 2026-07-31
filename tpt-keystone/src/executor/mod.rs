@@ -12,7 +12,7 @@ pub mod eval;
 mod flux_tests;
 #[cfg(test)]
 mod geo_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu"))]
 mod gpu_join_tests;
 mod gql;
 mod graph_fn;
@@ -43,6 +43,7 @@ mod select;
 mod stats;
 #[cfg(test)]
 mod synapse_tests;
+#[cfg(feature = "wasm-udf")]
 mod udf;
 
 use std::collections::HashMap;

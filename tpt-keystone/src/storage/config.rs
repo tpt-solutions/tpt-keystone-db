@@ -5,7 +5,9 @@
 //! still works exactly as before — just routed through the object-store +
 //! cache seam instead of raw `std::fs`.
 
-use super::objectstore::{LocalFsObjectStore, ObjectStore, S3ObjectStore};
+#[cfg(feature = "s3")]
+use super::objectstore::S3ObjectStore;
+use super::objectstore::{LocalFsObjectStore, ObjectStore};
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
@@ -201,6 +203,7 @@ impl StorageConfig {
     pub async fn build_object_store(&self) -> Result<Arc<dyn ObjectStore>> {
         match &self.backend {
             StorageBackend::Local { dir } => Ok(Arc::new(LocalFsObjectStore::open(dir)?)),
+            #[cfg(feature = "s3")]
             StorageBackend::S3 {
                 bucket,
                 region,
@@ -215,6 +218,13 @@ impl StorageConfig {
                 )
                 .await?;
                 Ok(Arc::new(store))
+            }
+            #[cfg(not(feature = "s3"))]
+            StorageBackend::S3 { .. } => {
+                anyhow::bail!(
+                    "TPT_STORAGE_BACKEND=s3 requires the \"s3\" Cargo feature, which was not \
+                     compiled into this build (rebuild with `--features s3`)"
+                )
             }
         }
     }

@@ -19,8 +19,26 @@ path = "src/lib.rs"
 name = "tpt-keystone"
 path = "src/main.rs"
 
+[features]
+default = ["wasm-udf", "gpu", "s3", "otlp"]
+# Sandboxed WASM UDFs (`CREATE FUNCTION ... LANGUAGE wasm`, executor/udf.rs).
+# Pulls in wasmtime + cranelift (~24 transitive crates).
+wasm-udf = ["dep:wasmtime"]
+# GPU offload for vector k-NN / spatial joins (vector/gpu.rs, geo/gpu.rs) —
+# purely a performance path, every call site already falls back to CPU when
+# no adapter is available. Pulls in wgpu + naga/ash/windows backend crates.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# S3-compatible object store backend (TPT_STORAGE_BACKEND=s3). Pulls in
+# ~25 aws-* crates; the default `local` backend (LocalFsObjectStore) needs
+# none of them.
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+# OTLP/gRPC span export (only active when OTEL_EXPORTER_OTLP_ENDPOINT is
+# set — tracing always goes to stdout regardless). Pulls in tonic/hyper/h2/
+# prost on top of the opentelemetry crates themselves.
+otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "time", "sync"] }
 bytes = "1"
 anyhow = "1"
 tracing = "0.1"
@@ -32,24 +50,28 @@ bloomfilter = "1"
 sha2 = "0.10"
 sha1 = "0.10"
 hex = "0.4"
-aws-sdk-s3 = "1"
-aws-config = "1"
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 rand = "0.8"
-wasmtime = "26"
+wasmtime = { version = "26", optional = true }
 base64 = "0.22"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 rustls = "0.23"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
-opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["trace", "grpc-tonic"] }
-tracing-opentelemetry = "0.33.0"
-wgpu = { version = "22", default-features = false, features = ["wgsl"] }
-pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.33.0", optional = true }
+wgpu = { version = "22", default-features = false, features = ["wgsl"], optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 regex = "1"
+# Lock-free concurrent memtable (storage/lsm.rs) so reads never block on a
+# writer's fsync/flush/compaction. Its own transitive deps (crossbeam-epoch,
+# crossbeam-utils) are tiny and single-purpose either way.
+crossbeam-skiplist = "0.1"
 
 # Linux-only: io_uring WAL backend (storage/io_backend.rs). Pulled in only when
 # building for Linux; the portable std backend is used on every other platform.
@@ -68,3 +90,8 @@ harness = false
 
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

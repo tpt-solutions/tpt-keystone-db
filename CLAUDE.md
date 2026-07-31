@@ -28,7 +28,10 @@ checking `TODO.md` first.
 Every "implemented" item has real, scoped caveats — wire-level SCRAM-SHA-256 auth and TLS exist but are
 opt-in (empty `_tpt_roles`/no `TPT_TLS_CERT_PATH`+`TPT_TLS_KEY_PATH` keeps the old no-auth/no-TLS
 zero-config default), no distributed secondary indexes (all six extension engines' indexes are
-local/single-node), no benchmark harness. **`TODO.md` is the authoritative phase-by-phase status** — it documents
+local/single-node). A real Criterion benchmark harness exists (`tpt-keystone/benches/keystone_bench.rs`,
+run via `cargo bench` from `tpt-keystone/`) — it measures Keystone's own engine-only throughput/latency
+in-process against `LocalFsObjectStore`, not real S3/NVMe I/O or a head-to-head against another database.
+**`TODO.md` is the authoritative phase-by-phase status** — it documents
 scope cuts and what's actually been verified (often "unit/integration-tested in-process," not "run
 against a real external server" or "run at scale") vs. just claimed; read the relevant phase there before
 assuming a feature is missing, complete, or production-ready. `PHASE2_PLAN.md` (root and duplicated in
@@ -76,6 +79,21 @@ native test path since it's browser-only. TypeScript packages (`packages/*`) use
 `.github/workflows/ci.yml` runs the test suite; no `rustfmt.toml`/`clippy.toml` exist yet, so use
 `cargo fmt` / `cargo clippy` at your own discretion but there is no enforced formatting/lint convention
 to match.
+
+### Cargo features (`tpt-keystone/Cargo.toml`)
+
+Four capabilities that are already runtime-optional/fail-safe are gated behind Cargo features, **all
+default-on** (so plain `cargo build`/`cargo run`/`cargo test` are unchanged): `wasm-udf` (sandboxed WASM
+UDFs, `executor/udf.rs`, pulls in `wasmtime`+`cranelift`), `gpu` (GPU offload for vector k-NN/spatial
+joins, `vector/gpu.rs`+`geo/gpu.rs`, pulls in `wgpu`), `s3` (the `TPT_STORAGE_BACKEND=s3` object-store
+backend, `storage/objectstore.rs`'s `S3ObjectStore`, pulls in `aws-sdk-s3`+`aws-config`), and `otlp`
+(OTLP/gRPC span export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, `telemetry.rs`, pulls in
+`opentelemetry-otlp`'s `tonic`/`hyper`/`h2`/`prost` stack). A lean build that skips all four —
+`cargo build --no-default-features` — cuts the dependency graph from ~379 to ~71 unique crates; disabled
+capabilities fail with a clear runtime error (`CREATE FUNCTION ... LANGUAGE wasm`,
+`TPT_STORAGE_BACKEND=s3`) or a clean no-op fallback (GPU paths take the existing "no adapter" CPU path;
+OTLP logs a warning and stays stdout-only) rather than a compile error reaching an unrelated build. Pick
+a subset explicitly with `--no-default-features --features wasm-udf,s3` etc.
 
 ### Running two nodes against shared storage (Phase 3 cloud-native mode)
 

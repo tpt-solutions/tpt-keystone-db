@@ -104,7 +104,7 @@ impl ReaderStaleness {
 
 /// The main database engine that ties together LSM storage, MVCC, schemas, and indexes.
 pub struct Database {
-    lsm: Arc<Mutex<LsmEngine>>,
+    lsm: Arc<LsmEngine>,
     schemas: Arc<Mutex<HashMap<String, TableSchema>>>,
     functions: Arc<Mutex<HashMap<String, UserFunction>>>,
     sequences: Arc<Mutex<HashMap<String, Sequence>>>,
@@ -189,11 +189,7 @@ impl Database {
     ) -> Result<Self> {
         std::fs::create_dir_all(local_dir)?;
 
-        let lsm = Arc::new(Mutex::new(LsmEngine::open(
-            &local_dir.join("wal"),
-            store.clone(),
-            lease,
-        )?));
+        let lsm = Arc::new(LsmEngine::open(&local_dir.join("wal"), store.clone(), lease)?);
         let schemas = Arc::new(Mutex::new(HashMap::new()));
         let functions = Arc::new(Mutex::new(HashMap::new()));
         let sequences = Arc::new(Mutex::new(HashMap::new()));
@@ -442,7 +438,7 @@ impl Database {
 
     /// Get storage statistics.
     pub fn stats(&self) -> StorageStats {
-        self.lsm.lock().unwrap().stats()
+        self.lsm.stats()
     }
 
     /// Force the active memtable to flush to a new SSTable in the shared
@@ -450,7 +446,7 @@ impl Database {
     /// hold a valid write lease.
     pub fn flush(&self) -> Result<()> {
         self.check_writable()?;
-        self.lsm.lock().unwrap().flush()
+        self.lsm.flush()
     }
 
     /// Poll the shared manifest and schema catalog for changes made by the
@@ -462,7 +458,7 @@ impl Database {
     #[tracing::instrument(skip_all)]
     pub fn refresh(&self) -> Result<()> {
         let result: Result<()> = (|| {
-            self.lsm.lock().unwrap().refresh()?;
+            self.lsm.refresh()?;
             for key in self.store.list("schemas/")? {
                 if let Some((data, _meta)) = self.store.get(&key)? {
                     if let Ok(schema) = TableSchema::decode(&data) {
@@ -526,15 +522,11 @@ impl Database {
     pub fn begin_txn(&self) -> crate::storage::database::txn::TxnHandle {
         use crate::storage::database::txn::TxnHandle;
         let id = super::mvcc::new_tx_id();
-        // Capture the snapshot watermark and register it with the LSM engine
-        // in the same locked section, so no commit can land between "read
-        // current_seq" and "register it" and go unaccounted for.
-        let snapshot_seq = {
-            let mut lsm = self.lsm.lock().unwrap();
-            let seq = lsm.current_seq();
-            lsm.register_snapshot(seq);
-            seq
-        };
+        // `snapshot_now` reads the current commit-seq watermark and
+        // registers it as an open snapshot in one `LsmEngine`-internal lock
+        // acquisition, so no commit can land in between and go unaccounted
+        // for.
+        let snapshot_seq = self.lsm.snapshot_now();
         TxnHandle::new(id, snapshot_seq, self.lsm.clone())
     }
 
@@ -571,7 +563,18 @@ impl Database {
             batch.push((table, composite_key, write.value));
         }
 
-        self.lsm.lock().unwrap().write_batch(&batch)?;
+        let (_, pending) = self.lsm.write_batch(&batch)?;
+        // The SSTable build+upload (the expensive part of a flush) runs
+        // here with no lock held, so concurrent readers/writers aren't
+        // blocked for its duration — only `commit_flush` briefly re-takes
+        // the internal write lock.
+        if let Some(pending) = pending {
+            let sst = LsmEngine::finish_flush(&pending)?;
+            if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                let merged = LsmEngine::finish_compact(&pc)?;
+                self.lsm.commit_compact(pc, merged)?;
+            }
+        }
         for (table, composite_key, value) in per_row_indexing {
             self.maintain_indexes_on_write(&table, &composite_key, &value)?;
         }
@@ -641,7 +644,7 @@ impl Database {
             }
         }
         let snapshot_seq = txn.map(|t| t.snapshot_seq()).unwrap_or(u64::MAX);
-        self.lsm.lock().unwrap().read_at(&composite, snapshot_seq)
+        self.lsm.read_at(&composite, snapshot_seq)
     }
 
     /// Scan all rows of a table as of the transaction's snapshot, merging its
@@ -656,7 +659,7 @@ impl Database {
         let prefix = Self::make_prefix(table);
         let snapshot_seq = txn.map(|t| t.snapshot_seq()).unwrap_or(u64::MAX);
         let committed: Vec<(Vec<u8>, Vec<u8>)> = {
-            let all = self.lsm.lock().unwrap().scan_at(snapshot_seq)?;
+            let all = self.lsm.scan_at(snapshot_seq)?;
             all.into_iter()
                 .filter(|(k, _)| k.starts_with(&prefix))
                 .collect()

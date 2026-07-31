@@ -39,7 +39,7 @@ pub(super) fn execute_select_with_cte(
         rows.extend(right_result.rows);
         if op == UnionOp::Union {
             let mut seen = std::collections::HashSet::new();
-            rows.retain(|r| seen.insert(format!("{r:?}")));
+            rows.retain(|r| seen.insert(r.clone()));
         }
         let row_count = rows.len();
         return Ok(QueryResult {

@@ -250,6 +250,11 @@ fn visit_dir(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
 /// `ObjectStore` trait via `tokio::task::block_in_place` + the captured
 /// runtime handle, so callers on a multi-threaded Tokio runtime can call it
 /// like any other blocking storage call.
+///
+/// Gated behind the `s3` Cargo feature (default on) — the `aws-sdk-s3`/
+/// `aws-config` crates and their ~25 transitive dependencies are only worth
+/// paying for in builds that actually intend to use `TPT_STORAGE_BACKEND=s3`.
+#[cfg(feature = "s3")]
 pub struct S3ObjectStore {
     client: aws_sdk_s3::Client,
     bucket: String,
@@ -257,6 +262,7 @@ pub struct S3ObjectStore {
     handle: tokio::runtime::Handle,
 }
 
+#[cfg(feature = "s3")]
 impl S3ObjectStore {
     /// Build a client from the ambient AWS config (env vars / instance
     /// profile / etc), optionally pointed at a custom endpoint (e.g. MinIO).
@@ -303,6 +309,7 @@ impl S3ObjectStore {
     }
 }
 
+#[cfg(feature = "s3")]
 impl ObjectStore for S3ObjectStore {
     fn get(&self, key: &str) -> Result<Option<(Vec<u8>, ObjectMeta)>> {
         let full = self.full_key(key);

@@ -46,6 +46,10 @@
 //! see each module's doc for the honest scope of what that does and doesn't
 //! mean in a still-single-node-query-path engine.
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+#[cfg(not(feature = "gpu"))]
+#[path = "gpu_stub.rs"]
 pub mod gpu;
 pub mod hnsw;
 pub mod ivf_pq;

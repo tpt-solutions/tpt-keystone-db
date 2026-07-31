@@ -37,6 +37,15 @@ psql -h localhost -p 55432
 Override the listen address with `TPT_PG_ADDR`. Storage defaults to `tpt-data/` on local disk;
 set `TPT_STORAGE_BACKEND=s3` and `TPT_S3_BUCKET`/`TPT_S3_REGION` for S3.
 
+### Lean builds
+
+WASM UDFs, GPU offload, S3 storage, and OTLP export are each gated behind a Cargo feature
+(`wasm-udf`/`gpu`/`s3`/`otlp`), all **default-on** so `cargo build`/`cargo run` behave exactly as above
+with no flags. If you don't need one or more of those, `cargo build --no-default-features --features
+<subset>` skips their dependencies entirely — e.g. `--no-default-features --features wasm-udf` for a
+local-only build with no `aws-sdk-s3`/`wgpu`/OTLP-exporter deps, cutting the dependency graph from
+~379 to ~71 crates with none of the four enabled.
+
 ## Two-node cloud-native mode
 
 ```bash

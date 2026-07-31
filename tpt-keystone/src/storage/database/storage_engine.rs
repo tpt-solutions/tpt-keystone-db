@@ -10,6 +10,7 @@ use tracing::info;
 use crate::geo::geometry::Geometry;
 use crate::storage::btree::BTree;
 use crate::storage::canopy_index::collect_json_strings;
+use crate::storage::lsm::LsmEngine;
 use crate::storage::ColumnDef;
 use crate::storage::KeyValue;
 use crate::storage::StorageEngine;
@@ -20,27 +21,42 @@ impl StorageEngine for Database {
     fn write(&self, table: &str, key: &[u8], value: &[u8]) -> Result<()> {
         self.check_writable()?;
         let composite_key = Self::make_key(table, key);
-        self.lsm
-            .lock()
-            .unwrap()
-            .write(table, &composite_key, value)?;
+        let pending = self.lsm.write(table, &composite_key, value)?;
+        // The SSTable build+upload (the expensive part of a flush) runs here
+        // with no lock held, so concurrent readers/writers aren't blocked
+        // for its duration — only `commit_flush` briefly re-takes the
+        // internal write lock.
+        if let Some(pending) = pending {
+            let sst = LsmEngine::finish_flush(&pending)?;
+            if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                let merged = LsmEngine::finish_compact(&pc)?;
+                self.lsm.commit_compact(pc, merged)?;
+            }
+        }
         self.maintain_indexes_on_write(table, &composite_key, value)
     }
 
     fn read(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let composite_key = Self::make_key(table, key);
-        self.lsm.lock().unwrap().read(&composite_key)
+        self.lsm.read(&composite_key)
     }
 
     fn delete(&self, table: &str, key: &[u8]) -> Result<()> {
         self.check_writable()?;
         let composite_key = Self::make_key(table, key);
-        self.lsm.lock().unwrap().delete(table, &composite_key)?;
+        let pending = self.lsm.delete(table, &composite_key)?;
+        if let Some(pending) = pending {
+            let sst = LsmEngine::finish_flush(&pending)?;
+            if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                let merged = LsmEngine::finish_compact(&pc)?;
+                self.lsm.commit_compact(pc, merged)?;
+            }
+        }
         Ok(())
     }
 
     fn scan(&self, table: &str) -> Result<Vec<KeyValue>> {
-        let all = self.lsm.lock().unwrap().scan()?;
+        let all = self.lsm.scan()?;
         let prefix = Self::make_prefix(table);
         let results = all
             .into_iter()
@@ -110,14 +126,26 @@ impl Database {
     /// (B-Tree, spatial, time, graph, JSON-path, full-text, vector). Shared
     /// by both the immediate `StorageEngine::write` path and the transaction
     /// `COMMIT` replay path, so a committed transaction's writes keep indexes
-    /// consistent exactly as an autocommit write does. `key` is the composite
-    /// `table\0key` bytes.
+    /// consistent exactly as an autocommit write does. `key` arrives as the
+    /// composite `table\0key` bytes (both call sites already have it in that
+    /// form for the row write itself).
     pub(crate) fn maintain_indexes_on_write(
         &self,
         table: &str,
         key: &[u8],
         value: &[u8],
     ) -> Result<()> {
+        // Every index below must store the *raw* row key, not the composite
+        // one: `CREATE INDEX`'s backfill (`self.scan()`) already strips this
+        // same prefix, and lookups (`index_lookup`, `vector_knn_query`,
+        // `rows_by_keys`) hand whatever's stored here straight to
+        // `Database::read`, which re-applies the table prefix itself.
+        // Passing the composite key through unstripped double-prefixes it on
+        // lookup, so a row indexed *after* its index already exists (as
+        // opposed to backfilled at `CREATE INDEX` time) would never resolve.
+        let prefix = Self::make_prefix(table);
+        let key: &[u8] = key.strip_prefix(prefix.as_slice()).unwrap_or(key);
+
         // Maintain any B-Tree indexes defined on this table.
         let indexed_cols: Vec<(String, usize)> = {
             let schemas = self.schemas.lock().unwrap();

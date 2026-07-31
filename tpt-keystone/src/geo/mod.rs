@@ -39,6 +39,10 @@
 //!   import, no raster algebra).
 
 pub mod geometry;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+#[cfg(not(feature = "gpu"))]
+#[path = "gpu_stub.rs"]
 pub mod gpu;
 pub mod h3;
 pub mod raster;

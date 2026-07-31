@@ -113,6 +113,62 @@ fn alter_table_add_column_backfills_rows() {
     assert_eq!(String::from_utf8(res.rows[0][0].clone().unwrap()).unwrap(), "y");
 }
 
+/// Phase 1 Stage 4 (lock-free read path) accepted a narrow race window as a
+/// side effect: `ALTER TABLE ADD/DROP COLUMN`/`DROP TABLE` used to
+/// incidentally block every concurrent read of the table for their whole
+/// rewrite duration, purely because that rewrite held the single engine-wide
+/// lock that reads also needed — never a deliberate guarantee. Now that reads
+/// no longer need any lock `ALTER TABLE` holds, a concurrent scan racing an
+/// in-flight `ADD COLUMN` can observe a mix of old-shape and new-shape rows
+/// within one scan. This test characterizes that race rather than
+/// eliminating it (see `storage::database::catalog::alter_table_add_column`'s
+/// doc comment): it asserts the query engine handles the interleaving
+/// cleanly (no panic, no dropped/duplicated rows), not that every row is
+/// seen in a specific shape.
+#[test]
+fn concurrent_read_during_add_column_does_not_panic_or_lose_rows() {
+    let (db, _b, _l) = test_db();
+    execute_query("CREATE TABLE t (id INT8 PRIMARY KEY)", db.clone()).unwrap();
+
+    const ROW_COUNT: i64 = 5000;
+    for chunk in &(1..=ROW_COUNT).collect::<Vec<i64>>().chunks(500).collect::<Vec<_>>() {
+        let values: Vec<String> = chunk.iter().map(|i| format!("({i})")).collect();
+        execute_query(
+            &format!("INSERT INTO t VALUES {}", values.join(", ")),
+            db.clone(),
+        )
+        .unwrap();
+    }
+
+    let reader_db = db.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_stop = stop.clone();
+    let reader = std::thread::spawn(move || {
+        while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let res = execute_query("SELECT id FROM t", reader_db.clone()).unwrap();
+            assert_eq!(
+                res.rows.len() as i64,
+                ROW_COUNT,
+                "a concurrent scan during ADD COLUMN must never lose or duplicate \
+                 rows -- only their shape (old vs. new column count) may race"
+            );
+        }
+    });
+
+    execute_query(
+        "ALTER TABLE t ADD COLUMN tag TEXT DEFAULT 'x'",
+        db.clone(),
+    )
+    .unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.join().unwrap();
+
+    let schema = db.get_table("t").unwrap().unwrap();
+    assert!(schema.columns.iter().any(|c| c.name == "tag"));
+    let res = execute_query("SELECT id, tag FROM t", db.clone()).unwrap();
+    assert_eq!(res.rows.len() as i64, ROW_COUNT);
+}
+
 #[test]
 fn alter_table_drop_column_backfills_rows() {
     let (db, _b, _l) = test_db();

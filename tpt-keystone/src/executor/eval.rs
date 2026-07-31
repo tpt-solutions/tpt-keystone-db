@@ -1408,7 +1408,17 @@ impl RowContext {
                     .iter()
                     .map(|a| self.eval(a))
                     .collect::<anyhow::Result<_>>()?;
-                super::udf::call(db.udf_config(), &uf, &arg_vals)
+                #[cfg(feature = "wasm-udf")]
+                {
+                    super::udf::call(db.udf_config(), &uf, &arg_vals)
+                }
+                #[cfg(not(feature = "wasm-udf"))]
+                {
+                    let _ = (db, uf, arg_vals);
+                    anyhow::bail!(
+                        "WASM UDF support was not compiled into this build (rebuild with `--features wasm-udf`)"
+                    )
+                }
             }
         }
     }

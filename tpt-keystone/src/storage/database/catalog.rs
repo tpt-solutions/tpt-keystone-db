@@ -3,6 +3,7 @@ use anyhow::Result;
 use super::Database;
 use crate::sql::ast::Stmt;
 use crate::storage::config::UdfConfig;
+use crate::storage::lsm::LsmEngine;
 use crate::storage::ColumnDef;
 use crate::storage::ForeignKey;
 use crate::storage::JsonSchemaRule;
@@ -126,15 +127,20 @@ impl Database {
     /// every existing row and re-persisting it. `default_cell` is the
     /// wire-encoded default value for the new column (or `None` for NULL),
     /// already resolved by the executor (so `nextval()`/`DEFAULT` expressions
-    /// work). The whole scan-rewrite pass holds the LSM mutex once to avoid
-    /// interleaving with concurrent writers; it does not re-enter the
-    /// `StorageEngine` trait methods (which would re-lock and could mutate
-    /// indexes mid-rewrite).
+    /// work). Does not re-enter the `StorageEngine` trait methods (which
+    /// would mutate indexes mid-rewrite).
     ///
     /// Non-crash-atomicity is a documented limitation: a crash mid-rewrite
-    /// leaves a partially-migrated table. The whole pass is serialized under
-    /// the global LSM lock, so concurrent readers see either all-old or
-    /// all-new rows but never a torn mix at the row level.
+    /// leaves a partially-migrated table. Unlike before the lock-free read
+    /// path (Phase 1 Stage 4), this rewrite no longer holds one continuous
+    /// lock across the whole scan+rewrite pass — `LsmEngine` synchronizes
+    /// each individual `scan`/`write` call internally, not the sequence of
+    /// them — so a concurrent read racing an in-flight `ADD COLUMN` can now
+    /// observe a mix of old-shape and new-shape rows within one scan. This
+    /// is an accepted, narrow race window (`ALTER TABLE` is a rare,
+    /// administrative operation), not a correctness bug in the new rows
+    /// themselves: each individual row transitions atomically from old shape
+    /// to new shape, just not all rows as one indivisible unit anymore.
     pub fn alter_table_add_column(
         &self,
         table: &str,
@@ -149,16 +155,20 @@ impl Database {
             anyhow::bail!("column \"{}\" of relation \"{}\" already exists", new_col.name, table);
         }
 
-        let mut lsm = self.lsm.lock().unwrap();
         let prefix = Self::make_prefix(table);
-        let rows = lsm.scan()?;
+        let rows = self.lsm.scan()?;
         for (composite_key, value) in rows.iter().filter(|(k, _)| k.starts_with(&prefix)) {
             let mut cells = Self::decode_row_cells(value);
             cells.push(default_cell.clone());
             let new_value = Self::encode_row_cells(&cells);
-            lsm.write(table, composite_key, &new_value)?;
+            if let Some(pending) = self.lsm.write(table, composite_key, &new_value)? {
+                let sst = LsmEngine::finish_flush(&pending)?;
+                if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                    let merged = LsmEngine::finish_compact(&pc)?;
+                    self.lsm.commit_compact(pc, merged)?;
+                }
+            }
         }
-        drop(lsm);
 
         schema.columns.push(new_col);
         self.update_table_schema(schema)?;
@@ -168,9 +178,9 @@ impl Database {
 
     /// Apply `ALTER TABLE ... DROP COLUMN`. Rejects dropping a column that
     /// participates in the primary key, a UNIQUE group, a FOREIGN KEY, or a
-    /// secondary index (B-Tree). Like `alter_table_add_column`, the whole
-    /// scan-rewrite pass holds the LSM mutex once and does not re-enter the
-    /// `StorageEngine` trait methods.
+    /// secondary index (B-Tree). Like `alter_table_add_column`, does not
+    /// re-enter the `StorageEngine` trait methods, and carries the same
+    /// accepted narrow concurrent-read race window described there.
     pub fn alter_table_drop_column(&self, table: &str, column: &str) -> Result<()> {
         self.check_writable()?;
         let mut schema = self
@@ -201,16 +211,20 @@ impl Database {
             anyhow::bail!("cannot drop column \"{column}\" because an index depends on it");
         }
 
-        let mut lsm = self.lsm.lock().unwrap();
         let prefix = Self::make_prefix(table);
-        let rows = lsm.scan()?;
+        let rows = self.lsm.scan()?;
         for (composite_key, value) in rows.iter().filter(|(k, _)| k.starts_with(&prefix)) {
             let mut cells = Self::decode_row_cells(value);
             cells.remove(idx);
             let new_value = Self::encode_row_cells(&cells);
-            lsm.write(table, composite_key, &new_value)?;
+            if let Some(pending) = self.lsm.write(table, composite_key, &new_value)? {
+                let sst = LsmEngine::finish_flush(&pending)?;
+                if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                    let merged = LsmEngine::finish_compact(&pc)?;
+                    self.lsm.commit_compact(pc, merged)?;
+                }
+            }
         }
-        drop(lsm);
 
         schema.columns.remove(idx);
         schema.pk_columns.retain(|&c| c != idx);
@@ -258,12 +272,16 @@ impl Database {
 
         // Purge all rows for this table from the durable LSM store.
         let prefix = Self::make_prefix(name);
-        let all = self.lsm.lock().unwrap().scan()?;
-        let mut lsm = self.lsm.lock().unwrap();
+        let all = self.lsm.scan()?;
         for (key, _value) in all.iter().filter(|(k, _)| k.starts_with(&prefix)) {
-            lsm.delete(name, key)?;
+            if let Some(pending) = self.lsm.delete(name, key)? {
+                let sst = LsmEngine::finish_flush(&pending)?;
+                if let Some(pc) = self.lsm.commit_flush(pending, sst)? {
+                    let merged = LsmEngine::finish_compact(&pc)?;
+                    self.lsm.commit_compact(pc, merged)?;
+                }
+            }
         }
-        drop(lsm);
 
         // Remove the schema from the shared object store and in-memory map.
         self.store.delete(&format!("schemas/{name}.bin"))?;

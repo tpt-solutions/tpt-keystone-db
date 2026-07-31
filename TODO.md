@@ -27,11 +27,11 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        store is RAM-only and **not wired into any read/write path**; `TransactionManager` is currently
        dead weight. Real snapshot isolation is blocked on Stage 3 (durable multi-version storage in
        `lsm.rs`/`sstable.rs`/`wal.rs`) — tracked as the contiguous Stage 2+3 effort in the audit.
-- [~] Stage 2+3: durable multi-version storage + real snapshot isolation, per the RocksDB/LevelDB-style
+- [x] Stage 2+3: durable multi-version storage + real snapshot isolation, per the RocksDB/LevelDB-style
        internal-key encoding approach (plan: `C:\Users\Phillip\.claude\plans\is-it-good-idea-majestic-mitten.md`).
        New `storage/internal_key.rs` (`InternalKey{user_key,seq,tag}`, custom `Ord` comparing `user_key`
        in isolation first so a byte-prefix relationship between two user keys can't be disturbed by the
-       version suffix). Done: `sstable.rs` (`IndexEntry` +seq/tag, bloom stays keyed on user key only,
+       version suffix). `sstable.rs` (`IndexEntry` +seq/tag, bloom stays keyed on user key only,
        `read_at`/`scan_all_versions`, `max_seq`); `wal.rs` (rewritten to batch-framed records —
        `marker|commit_seq|count|record*count` — so `append_batch` is one write+fsync per commit and
        `replay` accepts/discards a whole batch atomically, closing the old "torn subset of a multi-row
@@ -40,16 +40,21 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        back-compat `read`/`scan`/`write`/`delete` wrappers so non-transactional call sites are
        unaffected, `open()` seeds `next_commit_seq` from WAL+SSTables+manifest so a restart never
        reissues a seq, `compact_all` rewritten to keep every version newer than the oldest open
-       snapshot plus one "floor" version below it). Still open: `storage/database/txn.rs`
-       (`snapshot_seq` field + `Drop`-based snapshot release), `storage/database/mod.rs` wiring
-       (`begin_txn` captures the snapshot, `txn_read`/`txn_scan` call `read_at`/`scan_at`, retire dead
-       `tx_mgr`/`mvcc` fields, delete `storage/tx.rs`, repurpose `storage/mvcc.rs` to just `new_tx_id()`),
-       `wire/session.rs` (extended-protocol BEGIN/COMMIT/ROLLBACK interception — today only the simple
-       query protocol manages `txn`, a real pre-existing gap this work surfaced — plus fixing `Sync`'s
-       hardcoded `TransactionStatus::Idle`), inverting `read_committed_sees_other_transactions_committed_writes`
-       in `executor/transaction_tests.rs` now that it should be the opposite, new snapshot/compaction/
-       wire tests, porting `storage/mvcc_tests.rs`'s proptest off the now-deleted `MvccStore`, and adding
-       `Manifest::max_commit_seq` (`#[serde(default)]`).
+       snapshot plus one "floor" version below it). Closed out this pass: `storage/database/txn.rs` has
+       the `snapshot_seq` field, released via `lsm.release_snapshot()` on `Drop`; `storage/database/mod.rs`
+       wires `begin_txn` to capture the snapshot and routes `txn_read`/`txn_scan` through `read_at`/
+       `scan_at`; the dead `tx_mgr`/`mvcc` fields are retired, `storage/tx.rs` is deleted, and
+       `storage/mvcc.rs` is down to just `new_tx_id()`; `wire/session.rs` now intercepts
+       BEGIN/COMMIT/ROLLBACK over the extended query protocol too (previously only the simple query
+       protocol managed `txn` — a real pre-existing gap this work surfaced), including `Sync`'s
+       transaction-status reporting; `executor/transaction_tests.rs` replaces the old
+       `read_committed_sees_other_transactions_committed_writes` with
+       `snapshot_isolation_hides_other_transactions_later_commits` plus new coverage
+       (`snapshot_pinned_across_multiple_statements_despite_concurrent_commits`,
+       `own_writes_visible_within_snapshot_alongside_others_hidden`,
+       `abandoned_transaction_snapshot_is_released_on_drop`); `storage/mvcc_tests.rs`'s proptest was
+       ported off the deleted `MvccStore`; and `Manifest::max_commit_seq` (`#[serde(default)]`) was added,
+       with back-compat decode tests in `storage/manifest.rs`.
 - [ ] Concurrency model (audit's Stage 4): the current single coarse `Mutex<LsmEngine>` is **explicitly
        out of scope** for the Stage 2+3 work above (user decision, see the plan file) — readers not
        blocking writers once the read path is version-chain based is a separate follow-up once snapshot

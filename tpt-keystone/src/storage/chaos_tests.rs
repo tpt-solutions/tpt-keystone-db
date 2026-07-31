@@ -920,7 +920,7 @@ fn zombie_writer_flush_rejected_after_lease_takeover() {
     // shows token=1 (no renewal ran, so `is_valid()` alone would not catch
     // this — see `lease.rs`'s doc comment on why fencing relies on the
     // manifest CAS, not that flag). The memtable must be non-empty here:
-    // `trigger_flush` returns `Ok(())` early for an empty memtable *before*
+    // `begin_flush` returns `None` early for an empty memtable *before*
     // ever reaching the CAS (`lsm.rs`), so a flush with nothing new to write
     // would trivially "succeed" without exercising fencing at all.
     db_a.write("t", b"k3", b"from-zombie-writer-a").unwrap();

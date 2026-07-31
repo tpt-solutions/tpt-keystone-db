@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use super::super::lsm::LsmEngine;
 
+
 /// A staged write: `Some(value)` is an insert/update, `None` is a delete
 /// tombstone. Keyed by the composite `table\0key` bytes `Database` uses
 /// internally, so staging is table-agnostic and commit just replays entries.
@@ -48,15 +49,13 @@ pub struct TransactionState {
     pub staged: BTreeMap<Vec<u8>, StagedWrite>,
     /// Held so `Drop` can release this transaction's snapshot registration
     /// even if neither `COMMIT` nor `ROLLBACK` ever ran.
-    lsm: Arc<Mutex<LsmEngine>>,
+    lsm: Arc<LsmEngine>,
 }
 
 impl Drop for TransactionState {
     fn drop(&mut self) {
         if !self.finished {
-            if let Ok(mut lsm) = self.lsm.lock() {
-                lsm.release_snapshot(self.snapshot_seq);
-            }
+            self.lsm.release_snapshot(self.snapshot_seq);
         }
     }
 }
@@ -77,7 +76,7 @@ impl TxnHandle {
     /// (`Database::begin_txn`) before constructing this handle — the handle
     /// only owns *releasing* that registration, not creating it, so the two
     /// stay clearly paired at the one call site that opens a transaction.
-    pub fn new(id: u64, snapshot_seq: u64, lsm: Arc<Mutex<LsmEngine>>) -> Self {
+    pub fn new(id: u64, snapshot_seq: u64, lsm: Arc<LsmEngine>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(TransactionState {
                 id,
@@ -168,9 +167,7 @@ impl TxnHandle {
             return;
         }
         state.finished = true;
-        if let Ok(mut lsm) = state.lsm.lock() {
-            lsm.release_snapshot(state.snapshot_seq);
-        }
+        state.lsm.release_snapshot(state.snapshot_seq);
     }
 
     /// Number of pending writes (for tests/observability).
