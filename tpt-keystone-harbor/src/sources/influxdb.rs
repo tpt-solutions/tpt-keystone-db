@@ -312,6 +312,7 @@ impl SourceConnector for InfluxDbSource {
                     name: measurement,
                     columns,
                     indexes,
+                    topic_partitions: None,
                 });
             }
         }

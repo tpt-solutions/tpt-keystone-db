@@ -351,7 +351,7 @@ impl SourceConnector for OracleSource {
                 .collect();
 
             if !columns.is_empty() {
-                tables.push(TableSchema { schema: owner, name, columns, indexes: vec![] });
+                tables.push(TableSchema { schema: owner, name, columns, indexes: vec![], topic_partitions: None });
             }
         }
         Ok(tables)

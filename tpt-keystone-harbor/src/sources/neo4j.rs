@@ -608,6 +608,7 @@ impl SourceConnector for Neo4jSource {
                 name: label,
                 columns,
                 indexes: vec![],
+                topic_partitions: None,
             });
         }
 
@@ -682,6 +683,7 @@ impl SourceConnector for Neo4jSource {
                 name: rel_type,
                 columns,
                 indexes: vec![IndexSpec { columns: vec!["from_id".to_string()], using: "GRAPH".to_string(), with: vec![("to".to_string(), "to_id".to_string())] }],
+                topic_partitions: None,
             });
         }
 
@@ -818,7 +820,7 @@ mod tests {
     }
 
     fn edge_table(columns: Vec<ColumnSchema>) -> TableSchema {
-        TableSchema { schema: "neo4j_edges".to_string(), name: "FOLLOWS".to_string(), columns, indexes: vec![] }
+        TableSchema { schema: "neo4j_edges".to_string(), name: "FOLLOWS".to_string(), columns, indexes: vec![], topic_partitions: None }
     }
 
     #[test]

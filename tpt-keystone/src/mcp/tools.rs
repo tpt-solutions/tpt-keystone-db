@@ -47,7 +47,7 @@ fn arg_table(args: &Json) -> Result<&str> {
 }
 
 fn tables(db: &Arc<Database>) -> Result<Json> {
-    Ok(json!(db.list_tables()?))
+    Ok(json!(db.list_user_tables()?))
 }
 
 fn columns(db: &Arc<Database>, args: &Json) -> Result<Json> {
@@ -71,7 +71,7 @@ fn schema(db: &Arc<Database>) -> Result<Json> {
     let indexes = db.list_indexes();
     let mut tables_json = Vec::new();
     let mut graph_edges = Vec::new();
-    for name in db.list_tables()? {
+    for name in db.list_user_tables()? {
         if let Some(t) = db.get_table(&name)? {
             let indexed_columns: Vec<&String> = indexes
                 .iter()
@@ -100,7 +100,7 @@ fn schema(db: &Arc<Database>) -> Result<Json> {
     }
     Ok(json!({
         "tables": tables_json,
-        "relationship_graph": {"nodes": db.list_tables()?, "edges": graph_edges},
+        "relationship_graph": {"nodes": db.list_user_tables()?, "edges": graph_edges},
     }))
 }
 
@@ -290,7 +290,7 @@ fn related(db: &Arc<Database>, actor: &Actor, args: &Json) -> Result<Json> {
                 next_frontier.push((fk.ref_table.clone(), fk_val));
             }
 
-            'incoming: for other_name in db.list_tables()? {
+            'incoming: for other_name in db.list_user_tables()? {
                 let Some(other_schema) = db.get_table(&other_name)? else {
                     continue;
                 };

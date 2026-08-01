@@ -129,7 +129,7 @@ fn handle_query(db: &Arc<Database>, body: &[u8], actor: &Actor) -> Vec<u8> {
 }
 
 fn handle_schema(db: &Arc<Database>) -> Vec<u8> {
-    let tables = match db.list_tables() {
+    let tables = match db.list_user_tables() {
         Ok(t) => t,
         Err(e) => return json_response(500, &json!({"error": e.to_string()})),
     };
@@ -212,9 +212,17 @@ async fn read_request(
         anyhow::ensure!(buf.len() <= 16_384, "HTTP request headers too large");
     }
     let head = String::from_utf8_lossy(&buf);
-    let mut lines = head.lines();
+    // Collected once into a `Vec` rather than kept as a single `Lines`
+    // iterator: `Iterator::find` consumes everything it scans past, so two
+    // sequential `.find()` calls on the *same* iterator (as this used to do,
+    // one for `Content-Length` then one for `Authorization`) would silently
+    // lose whichever header comes first whenever the other `.find()` runs
+    // first and scans past it — real requests here send `Authorization`
+    // before `Content-Length`, which made every `Authorization` header
+    // vanish. A `Vec` lets each header be searched for independently.
+    let lines: Vec<&str> = head.lines().collect();
     let request_line = lines
-        .next()
+        .first()
         .ok_or_else(|| anyhow::anyhow!("empty request"))?;
     let mut parts = request_line.split_whitespace();
     let method = parts
@@ -224,12 +232,14 @@ async fn read_request(
     let path = parts.next().unwrap_or("/").to_string();
 
     let content_length: usize = lines
+        .iter()
         .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
         .and_then(|line| line.splitn(2, ':').nth(1))
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
 
     let authorization: Option<String> = lines
+        .iter()
         .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
         .and_then(|line| line.splitn(2, ':').nth(1))
         .map(|v| v.trim().to_string());
@@ -246,6 +256,7 @@ fn json_response(status: u16, body: &serde_json::Value) -> Vec<u8> {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         _ => "Internal Server Error",
     };

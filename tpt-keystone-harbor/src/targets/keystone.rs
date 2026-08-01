@@ -58,6 +58,9 @@ impl TargetConnector for KeystoneTarget {
         for index_ddl in table.index_ddl() {
             self.client.execute(&index_ddl).await.map_err(ConnectorError::Other)?;
         }
+        if let Some(topic_ddl) = table.topic_ddl() {
+            self.client.execute(&topic_ddl).await.map_err(ConnectorError::Other)?;
+        }
         Ok(())
     }
 
@@ -159,6 +162,7 @@ mod tests {
                 ColumnSchema { name: "email".into(), source_type: "text".into(), keystone_type: "TEXT".into(), nullable: true, is_primary_key: false },
             ],
             indexes: vec![],
+            topic_partitions: None,
         }
     }
 

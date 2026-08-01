@@ -134,7 +134,7 @@ fn pg_tables(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
     let indexed_tables: std::collections::HashSet<String> =
         db.list_indexes().into_iter().map(|(t, _)| t).collect();
     let rows = db
-        .list_tables()?
+        .list_user_tables()?
         .into_iter()
         .map(|t| {
             let has_idx = indexed_tables.contains(&t);
@@ -186,7 +186,7 @@ fn pg_class(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
     );
     let public_ns = synthetic_oid("public");
     let mut rows: Vec<Row> = db
-        .list_tables()?
+        .list_user_tables()?
         .into_iter()
         .map(|t| {
             vec![
@@ -247,7 +247,7 @@ fn pg_attribute(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
         ],
     );
     let mut rows = Vec::new();
-    for t in db.list_tables()? {
+    for t in db.list_user_tables()? {
         if let Some(table_schema) = db.get_table(&t)? {
             let relid = synthetic_oid(&t);
             for (i, c) in table_schema.columns.iter().enumerate() {
@@ -375,7 +375,7 @@ fn pg_constraint(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
         ],
     );
     let mut rows = Vec::new();
-    for t in db.list_tables()? {
+    for t in db.list_user_tables()? {
         let Some(table_schema) = db.get_table(&t)? else {
             continue;
         };
@@ -446,7 +446,7 @@ fn information_schema_tables(db: &Arc<Database>) -> anyhow::Result<VirtualTable>
         ],
     );
     let rows = db
-        .list_tables()?
+        .list_user_tables()?
         .into_iter()
         .map(|t| vec![text("tpt"), text("public"), text(t), text("BASE TABLE")])
         .collect();
@@ -467,7 +467,7 @@ fn information_schema_columns(db: &Arc<Database>) -> anyhow::Result<VirtualTable
         ],
     );
     let mut rows = Vec::new();
-    for t in db.list_tables()? {
+    for t in db.list_user_tables()? {
         if let Some(table_schema) = db.get_table(&t)? {
             for (i, c) in table_schema.columns.iter().enumerate() {
                 rows.push(vec![
@@ -604,4 +604,40 @@ fn pg_auth_members(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
         ]);
     }
     Ok((s, rows))
+}
+
+#[cfg(test)]
+mod internal_table_leak_tests {
+    use super::*;
+    use crate::storage::test_support::test_db;
+
+    /// Regression test: `pg_tables`/`information_schema.tables` (the
+    /// Postgres-wire-protocol introspection surfaces, e.g. `\dt`) must not
+    /// leak the internal `_tpt_roles`/`_tpt_role_members`/`_tpt_privileges`
+    /// RBAC catalogs once `RoleStore::new` has created them, mirroring the
+    /// same leak that was previously visible via the MCP `tables` tool.
+    #[test]
+    fn pg_tables_and_information_schema_hide_internal_catalogs() {
+        let (db, _b, _l) = test_db();
+        crate::wire::roles::RoleStore::new(db.clone()).unwrap();
+        crate::executor::execute_query(
+            "CREATE TABLE widgets (id INT8 PRIMARY KEY)",
+            db.clone(),
+        )
+        .unwrap();
+
+        let (_, pg_tables_rows) = pg_tables(&db).unwrap();
+        let names: Vec<String> = pg_tables_rows
+            .iter()
+            .map(|r| String::from_utf8(r[1].clone().unwrap()).unwrap())
+            .collect();
+        assert_eq!(names, vec!["widgets".to_string()]);
+
+        let (_, info_rows) = information_schema_tables(&db).unwrap();
+        let names: Vec<String> = info_rows
+            .iter()
+            .map(|r| String::from_utf8(r[2].clone().unwrap()).unwrap())
+            .collect();
+        assert_eq!(names, vec!["widgets".to_string()]);
+    }
 }

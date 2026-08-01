@@ -122,7 +122,7 @@ impl SourceConnector for PostGisSource {
                 .collect();
 
             let indexes = spatial_indexes(&columns);
-            tables.push(TableSchema { schema, name, columns, indexes });
+            tables.push(TableSchema { schema, name, columns, indexes, topic_partitions: None });
         }
         Ok(tables)
     }

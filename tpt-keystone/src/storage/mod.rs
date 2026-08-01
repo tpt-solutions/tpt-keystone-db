@@ -69,8 +69,41 @@ pub trait StorageEngine: Send + Sync {
     fn get_table(&self, name: &str) -> Result<Option<TableSchema>>;
     /// List all tables.
     fn list_tables(&self) -> Result<Vec<String>>;
+    /// All tables minus this engine's own internal `_tpt_*` catalogs — what
+    /// user-facing introspection (MCP, `\dt`, `information_schema.*`, Canvas)
+    /// should show.
+    fn list_user_tables(&self) -> Result<Vec<String>> {
+        Ok(self.list_tables()?.into_iter().filter(|t| !is_internal_table(t)).collect())
+    }
     /// Create a B-Tree index on a column.
     fn create_index(&self, table: &str, column: &str) -> Result<()>;
+}
+
+/// Internal/system catalog tables (`_tpt_roles`, `_tpt_role_members`,
+/// `_tpt_privileges`) that exist as real rows in `list_tables()` but
+/// shouldn't surface through user-facing introspection.
+pub fn is_internal_table(name: &str) -> bool {
+    name.starts_with("_tpt_")
+}
+
+#[cfg(test)]
+mod internal_table_tests {
+    use super::is_internal_table;
+
+    #[test]
+    fn recognizes_tpt_prefixed_names() {
+        assert!(is_internal_table("_tpt_roles"));
+        assert!(is_internal_table("_tpt_role_members"));
+        assert!(is_internal_table("_tpt_privileges"));
+    }
+
+    #[test]
+    fn does_not_flag_user_tables() {
+        assert!(!is_internal_table("widgets"));
+        // Precise `_tpt_` prefix only, not the broader bare-`_` convention
+        // used by `executor::stats`'s ANALYZE default-target filter.
+        assert!(!is_internal_table("_underscored_user_table"));
+    }
 }
 
 /// Column definition for DDL.

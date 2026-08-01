@@ -348,6 +348,7 @@ fn schema_for(db_type: VectorDbType, name: &str) -> TableSchema {
         // used here report the index's configured metric, so this can't be
         // derived per-source without extra round trips.
         indexes: vec![IndexSpec { columns: vec!["vector".to_string()], using: "VECTOR".to_string(), with: vec![("metric".to_string(), "cosine".to_string())] }],
+        topic_partitions: None,
     }
 }
 

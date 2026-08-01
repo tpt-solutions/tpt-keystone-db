@@ -514,7 +514,7 @@ impl SourceConnector for MsSqlSource {
                 })
                 .collect();
 
-            tables.push(TableSchema { schema, name, columns, indexes: vec![] });
+            tables.push(TableSchema { schema, name, columns, indexes: vec![], topic_partitions: None });
         }
         Ok(tables)
     }

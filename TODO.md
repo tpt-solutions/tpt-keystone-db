@@ -55,18 +55,37 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        `abandoned_transaction_snapshot_is_released_on_drop`); `storage/mvcc_tests.rs`'s proptest was
        ported off the deleted `MvccStore`; and `Manifest::max_commit_seq` (`#[serde(default)]`) was added,
        with back-compat decode tests in `storage/manifest.rs`.
-- [ ] Concurrency model (audit's Stage 4): the current single coarse `Mutex<LsmEngine>` is **explicitly
-       out of scope** for the Stage 2+3 work above (user decision, see the plan file) — readers not
-       blocking writers once the read path is version-chain based is a separate follow-up once snapshot
-       isolation itself is proven correct, not bundled into this pass.
+- [x] Concurrency model (audit's Stage 4): `LsmEngine` now splits the old coarse `Mutex<LsmEngine>` into
+       a `write: Mutex<WriteState>` (WAL append/commit-seq/memtable-insert bookkeeping only) and a
+       `view: Mutex<Arc<EngineView>>` (held only for a nanosecond `Arc` clone on the read path) — reads
+       never take `write`, and flush/compaction upload their SSTable blob lock-free between a brief
+       `begin_*`/`commit_*` pair. Audited in `docs/concurrency_model_audit.md`: readers don't block
+       writers and vice versa (proven by `finish_flush_does_not_block_a_concurrent_read`/
+       `finish_compact_does_not_block_a_concurrent_read` in `storage/lsm.rs`); writers still serialize on
+       `write` (accepted — single-writer-node model per Phase 3 lease fencing) and per-engine index
+       locks (BTree/Geo/Graph/etc.) remain per-structure, both explicitly out of scope as follow-ups.
 - [x] Extended query protocol (Parse/Bind/Execute/Sync) and simple query protocol both correctly
       interact with the new per-connection transaction state (`wire/session.rs` threads `txn` into
       both `execute_simple` and the `Execute` handler)
 - [x] Extend the test suite with atomicity/isolation tests (`executor/transaction_tests.rs`); crash-
       mid-transaction coverage is partially implied by ROLLBACK-discard tests but not yet a dedicated
       `chaos_tests.rs` crash case
-- [ ] Manual verification: concurrent `BEGIN`/`COMMIT`/`ROLLBACK` from two `psql` sessions (needs a
-      running node; not yet scripted)
+- [x] Manual verification: concurrent `BEGIN`/`COMMIT`/`ROLLBACK` from two `psql` sessions — scripted
+       in `tools/verify_transactions.sh` (bash) + `tools/verify_transactions.ps1` (PowerShell); covers
+       isolation, snapshot pinning, COMMIT visibility, ROLLBACK discard, and concurrent two-session
+       isolation. Actually run against a live `cargo build`-ed node this pass (not just written) — doing
+       so surfaced and fixed three real, previously-unverified wire-protocol bugs no in-process Rust test
+       had caught: (1) `wire/session.rs`'s zero-config auth path never sent `AuthenticationOk` (dropped
+       by the Phase 20 RBAC refactor, `9db38d7`), so every real Postgres client failed the handshake
+       against an unauthenticated node; (2) the simple-query protocol only ever executed the *first*
+       statement of a `;`-separated batch and silently dropped the rest (`sql::parse`/`parse_stmt` was
+       never looped) — fixed with `sql::parse_all`/`Parser::parse_all_stmts` plus a batch-aware
+       `StatementCache::parse_all`, and `wire::session::handle_simple_query` now loops over every
+       statement, sending one `ReadyForQuery` only after the whole batch; (3) `pg_sleep` was a no-op
+       (`Ok(Value::Null)`, ignored its argument) and, once implemented for real, an initial
+       `std::thread::sleep` blocked whichever Tokio worker happened to be driving the runtime's I/O at
+       that moment — stalling *all* connections including the accept loop, not just the sleeping one —
+       fixed by wrapping it in `tokio::task::block_in_place`.
 
 ## Phase 2 — DDL/catalog bug fixes ✅ done (`cfdafce`)
 
@@ -109,6 +128,55 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [x] Extend `tools/verify_flux_grpc.py` to exercise the gRPC Basic-auth gate when
       `TPT_AUTH_BOOTSTRAP_USER`/`TPT_AUTH_BOOTSTRAP_PASSWORD` are set (asserts a request without the
       header is rejected with UNAUTHENTICATED); zero-config path unchanged
+- [x] **Found and fixed:** `wire::http_query_tests::query_requires_basic_auth_when_roles_configured`
+      hung indefinitely — a true deadlock (confirmed reproducing alone, single-threaded, past 60s),
+      found while running the full `cargo test --lib` suite during an unrelated pass, pre-existing since
+      `cfdafce`. Root-caused to two stacked bugs, both fixed this pass:
+      1. **Test bug (the actual deadlock trigger):** the test declared `Content-Length: 31` for a body
+         that's actually 25 bytes (`{"sql": "select 1 as ok"}`). `http_query.rs`'s `read_request` does
+         `stream.read_exact(content_length)`, so it blocked forever waiting for 6 bytes the test's
+         `raw_request` helper never sent (having already `write_all`'d its whole request), while the
+         client blocked in `read_to_end` waiting for a response the server never got to write — a real
+         mutual deadlock, not slowness. Fixed by correcting the length to 25 (all 3 occurrences) and
+         documenting why it must match exactly.
+      2. **Real production bug this exposed once the deadlock stopped masking it:** `read_request`
+         searched the same `head.lines()` iterator twice — once via `.find()` for `Content-Length`, then
+         again via `.find()` for `Authorization` — but `Iterator::find` consumes everything it scans
+         past. Since every real request here sends `Authorization` *before* `Content-Length`, the first
+         `.find()` call always consumed past (and lost) the `Authorization` line before the second
+         `.find()` ever ran, so **the HTTP query bridge silently ignored `Authorization` headers sent
+         before `Content-Length`** — any such request fell through to "missing or malformed
+         Authorization header" regardless of what was actually sent. Fixed by collecting `head.lines()`
+         into a `Vec` once and searching it independently for each header (`wire::websocket`'s
+         equivalent handshake parser already did this correctly — only `http_query.rs` had the bug).
+         Also fixed while in the same function: `json_response`'s reason-phrase table fell through to
+         `"Internal Server Error"` for `401` responses (cosmetic — the status code itself was always
+         correct; no caller keyed behavior off the reason phrase).
+      Full `cargo test --lib` now completes in ~30s (559 passed) instead of hanging forever.
+      **Newly found while verifying this fix, fixed in a later pass:** `mcp::tests::tables_columns_schema_reflect_created_table`
+      failed (reproduces alone) — `db.list_tables()` returned `_tpt_roles`/`_tpt_role_members`/
+      `_tpt_privileges` alongside the test's own `widgets` table. Root cause: `RoleStore::new` (via
+      `bridge_auth::actor_for_mcp`, called on every MCP request even in zero-config mode to check
+      `roles.is_empty()`) unconditionally creates all three RBAC catalog tables as a side effect the
+      first time any MCP request is handled, and `list_tables()` didn't filter internal `_tpt_*`
+      catalogs from its output. Also pre-existing since `cfdafce` — likely never visible before because
+      the deadlock above always prevented a full-suite run from reaching this far. The leak turned out
+      to reach 9 user-facing call sites, not just MCP — also `wire/http_query.rs`'s Canvas `GET /schema`
+      and 6 Postgres-wire-protocol catalog builders in `executor/catalog.rs` (`pg_tables`, `pg_class`,
+      `pg_attribute`, `pg_constraint`, `information_schema.tables`, `information_schema.columns`, plus
+      `pg_table_is_visible()` in `eval.rs`) — meaning `\dt`/`information_schema.*` over the real Postgres
+      wire protocol leaked the same three tables. **Fixed:** `storage/mod.rs` gained a free
+      `is_internal_table(name)` helper (the precise `_tpt_` prefix, matching `executor::rbac`'s existing
+      convention rather than `executor::stats`'s broader bare-`_` one) and a default `StorageEngine`
+      method `list_user_tables()` filtering through it; all 9 user-facing call sites now call
+      `list_user_tables()` instead of `list_tables()`, while the `CREATE TABLE IF NOT EXISTS` collision
+      check (`executor/ddl.rs`) and `ANALYZE`'s default target list (`executor/stats.rs`, already filtered
+      more broadly) were deliberately left on the raw `list_tables()`. `executor/rbac.rs`'s
+      `references_system_table` was also switched to call the new shared helper instead of inlining the
+      same `_tpt_` prefix check. Covered by a new `storage::internal_table_tests` unit test suite and a
+      `executor::catalog::internal_table_leak_tests` regression test proving `pg_tables`/
+      `information_schema.tables` hide the RBAC catalogs after a `RoleStore` is constructed; the
+      previously-failing `mcp::tests::tables_columns_schema_reflect_created_table` now passes.
 
 ## Phase 4 — Canvas frontend build-out
 
@@ -129,16 +197,31 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        result-shape translator) — already implemented; no server changes needed
 - [x] Design tokens/theming (`theme.rs` + CSS variables) for `document.rs`/`vector_search.rs`/
        `agent_monitor.rs` — already implemented (`Theme::light/dark` + `apply_theme`)
-- [~] Fix `document.rs`'s UPDATE escaping (done: `build_jsonb_set` now parses/re-serialises JSON and
-       quote-doubles correctly, with tests) — `window.prompt()` inline-edit UX remains (architectural
-       simplification, acceptable; revisit if a richer editor is wanted)
+- [x] Fix `document.rs`'s UPDATE escaping (`build_jsonb_set` parses/re-serialises JSON and quote-doubles
+       correctly, with tests) — `window.prompt()` inline-edit UX implemented and accepted as the
+       deliberate architectural simplification
 - [x] Heatmap render mode for `CanvasMap` (`kernel_density` + `heat_color`, no external dependency) —
        already implemented
 - [x] Auto topic-inference for `use_keystone_query` (`infer_topic_from_sql` FROM-clause extractor,
        single-table only; JOIN rejection strengthened this pass) — already implemented
-- [ ] WebGPU rendering proof-of-concept on `CanvasTimeSeries` first (stretch goal: extend to
-       `CanvasMap`/`CanvasGraph`) — not started (Canvas2D is the deliberate scope cut in `lib.rs`);
-       listed as a stretch goal, deferred
+- [x] WebGPU rendering proof-of-concept on `CanvasTimeSeries` — new `webgpu.rs` (`GpuRenderer`):
+       feature-detects `navigator.gpu`, negotiates an adapter/device, builds a fixed
+       `line-strip` render pipeline (one hardcoded-color WGSL shader, no uniforms/bind groups —
+       `GpuAutoLayoutMode::Auto`), and redraws by re-uploading a vertex buffer + encoding one render
+       pass per frame. Deliberately narrow scope: connecting line only, no point markers/axis text/
+       per-series color (Canvas2D still draws those on every other component). Real constraint this
+       surfaced: a `<canvas>` element commits permanently to its first successfully-requested context
+       type (`"2d"` xor `"webgpu"`), so `CanvasTimeSeries::new` can no longer mount Canvas2D
+       synchronously up front — it now defers context selection to an async task
+       (`wasm_bindgen_futures::spawn_local`) that tries WebGPU first and only falls back to Canvas2D
+       if that fails *before* any context was requested; a `redraw_trigger` signal forces one repaint
+       once the async decision resolves, even for a non-realtime query. `web-sys`'s `Gpu*` bindings are
+       gated behind `--cfg=web_sys_unstable_apis` (new `tpt-keystone-canvas/.cargo/config.toml`).
+       Extending to `CanvasMap`/`CanvasGraph` remains unstarted (needs a real pan/zoom transform +
+       multiple draw calls). **Not browser-tested** — no headless-WebGPU harness in this repo, same
+       caveat as the rest of this WASM-only crate; verified only by `cargo build --target
+       wasm32-unknown-unknown` compiling clean (zero warnings) and `cargo test` (34 host-target tests,
+       unrelated to WebGPU itself) passing.
 - [x] Thin JSX authoring layer wrapping the existing WASM classes — lives in `packages/sdk-web/src/
        react.tsx` (exported as `@tpt/sdk-web/react`), already implemented; the TODO's
        `packages/canvas-react/` maps to this existing module
@@ -180,7 +263,13 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done.
        `tpt-sdk`/`tpt-cli` dry-run only fails on their not-yet-published path deps (`tpt-canvas` /
        `tpt-sdk` respectively) — expected on first publish; resolves once published in dependency order
        (canvas → sdk → cli), which the leaf dry-runs already validate.
-- [ ] No automated release pipeline in this pass — manual `cargo publish` when ready
+- [x] Automated release pipeline: `.github/workflows/publish.yml` — triggers on `v*` tags or manual
+      `workflow_dispatch` (with a `dry_run` input), three jobs in dependency order (leaf crates in
+      parallel → `tpt-keystone-sdk` → `tpt-keystone-cli`), `unixodbc-dev` installed for
+      `tpt-keystone-harbor`'s `odbc-api` dep. Fixed this pass: the working tree had a
+      `Setup cargo publish credentials` step invoking `rust-lang/audit-patched-rust-action@v1`, which
+      does not exist on the Marketplace (verified by search) — replaced with the standard, no-action
+      approach of passing `CARGO_REGISTRY_TOKEN` directly as an env var to each `cargo publish` step.
 - [x] Renamed every non-core Rust crate (directory + Cargo.toml `name`) to carry a `tpt-keystone-`
       prefix ahead of crates.io publish, to claim an unambiguous namespace and avoid name collisions:
       `tpt-canvas` → `tpt-keystone-canvas`, `tpt-harbor` → `tpt-keystone-harbor`, `tpt-cli` →
@@ -258,11 +347,24 @@ handing over data already shaped the way its target engine expects.
       stubbed for those, and now for the reshaped Canopy/Plexus sources too.
 - [x] `cargo build`/`cargo test` (55 tests, incl. new coverage for every item above) pass clean, no
       warnings.
-- [ ] Not done this pass: Kafka→Flux explicit `CREATE TOPIC ... WITH (partitions = ...)` — every
-      `INSERT`/`UPDATE`/`DELETE` already auto-publishes to an implicit `__cdc_<table>` topic with zero
-      extra DDL, so the plain relational target Kafka already gets today lands correctly in Flux terms;
-      this would only add an explicitly named topic matching the source's partition count. Nice-to-have,
-      not a gap.
+- [x] Kafka→Flux explicit `CREATE TOPIC IF NOT EXISTS ... WITH (partitions = 'n')` — Harbor-only change,
+      since Keystone's own SQL engine already fully supported this DDL end to end
+      (`sql/ast.rs`/`parser.rs`/`executor/ddl.rs`/`storage/database/flux.rs`) with no engine-side work
+      needed. `TableSchema` (`tpt-keystone-harbor/src/schema.rs`) gained a `topic_partitions: Option<u32>`
+      field and a `topic_ddl()` render method (mirroring `IndexSpec`/`index_ddl()`'s existing pattern),
+      targeting the exact same `__cdc_<table>` name `Database::ensure_cdc_topic` auto-creates so this
+      only fixes the partition count rather than creating a second, orphaned topic — and using
+      `IF NOT EXISTS` since the implicit auto-topic may already have landed first. `sources/kafka.rs`'s
+      `discover()` now calls the already-existing (previously private-use-only) `metadata_partitions`
+      per topic to populate the field, falling back to `None` (implicit 1-partition behavior) on a
+      lookup error or an empty partition list rather than failing discovery outright. `targets/
+      keystone.rs::apply_ddl` executes `topic_ddl()` after the existing index-DDL loop; `engine/mod.rs`
+      needed no changes, since `apply_ddl` was already the single per-table DDL choke point. Every other
+      source's `TableSchema` literal got `topic_partitions: None` (Rust struct-literal fields are all
+      mandatory, no `..Default::default()` used for this type). Tested at the string-rendering level
+      (`schema.rs`'s `topic_ddl_renders_partitions_when_present`/`topic_ddl_none_when_absent`), matching
+      this crate's existing test depth for DDL-building helpers — no live Kafka broker in this repo to
+      verify `discover()`'s new wiring end to end.
 - [ ] No live-external-server end-to-end verification — `cargo build`/`cargo test` pass and the new
       logic is unit-tested at the string/row-building level (matching how the rest of Harbor is tested),
       but there's still no integration harness in this repo for a real external Postgres/Mongo/Neo4j/

@@ -197,6 +197,7 @@ fn document_table_schema(database: &str, collection: &str) -> TableSchema {
             ColumnSchema { name: "doc".to_string(), source_type: "object".to_string(), keystone_type: "JSONB".to_string(), nullable: false, is_primary_key: false },
         ],
         indexes: vec![IndexSpec { columns: vec!["doc".to_string()], using: "GIN".to_string(), with: vec![] }],
+        topic_partitions: None,
     }
 }
 

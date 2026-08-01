@@ -52,6 +52,13 @@ pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
     #[serde(default)]
     pub indexes: Vec<IndexSpec>,
+    /// Partition count for the Kafka source's own topic, so `apply_ddl` can
+    /// emit an explicit `CREATE TOPIC ... WITH (partitions = n)` matching
+    /// it, instead of relying on the implicit `__cdc_<table>` auto-create
+    /// (`Database::ensure_cdc_topic`) which always hardcodes 1 partition.
+    /// `None` for every non-Kafka source.
+    #[serde(default)]
+    pub topic_partitions: Option<u32>,
 }
 
 impl TableSchema {
@@ -84,6 +91,24 @@ impl TableSchema {
     /// `CREATE INDEX` statement, to run after `to_keystone_ddl()`.
     pub fn index_ddl(&self) -> Vec<String> {
         self.indexes.iter().map(|idx| idx.to_ddl(&self.name)).collect()
+    }
+
+    /// `CREATE TOPIC IF NOT EXISTS "__cdc_<name>" WITH (partitions = '<n>')`,
+    /// targeting the same topic name `Database::ensure_cdc_topic` would
+    /// auto-create on first INSERT/UPDATE/DELETE, so this only fixes the
+    /// partition count rather than creating a second, orphaned topic.
+    /// `None` for every source that doesn't report its own partition count
+    /// (i.e. everything but Kafka). Quoted as a string literal, not a bare
+    /// integer, since Keystone's `WITH (...)` option-value grammar only
+    /// accepts a string literal or identifier.
+    pub fn topic_ddl(&self) -> Option<String> {
+        self.topic_partitions.map(|n| {
+            format!(
+                "CREATE TOPIC IF NOT EXISTS {} WITH (partitions = '{}')",
+                quote_ident(&format!("__cdc_{}", self.name)),
+                n,
+            )
+        })
     }
 }
 
@@ -339,6 +364,7 @@ mod tests {
             indexes: vec![
                 IndexSpec { columns: vec!["embedding".into()], using: "VECTOR".into(), with: vec![("metric".into(), "cosine".into())] },
             ],
+            topic_partitions: None,
         };
         let stmts = t.index_ddl();
         assert_eq!(stmts.len(), 1);
@@ -347,8 +373,23 @@ mod tests {
 
     #[test]
     fn table_schema_with_no_indexes_renders_no_index_ddl() {
-        let t = TableSchema { schema: "public".into(), name: "users".into(), columns: vec![], indexes: vec![] };
+        let t = TableSchema { schema: "public".into(), name: "users".into(), columns: vec![], indexes: vec![], topic_partitions: None };
         assert!(t.index_ddl().is_empty());
+    }
+
+    #[test]
+    fn topic_ddl_renders_partitions_when_present() {
+        let t = TableSchema { schema: "kafka".into(), name: "orders".into(), columns: vec![], indexes: vec![], topic_partitions: Some(3) };
+        assert_eq!(
+            t.topic_ddl(),
+            Some("CREATE TOPIC IF NOT EXISTS \"__cdc_orders\" WITH (partitions = '3')".to_string())
+        );
+    }
+
+    #[test]
+    fn topic_ddl_none_when_absent() {
+        let t = TableSchema { schema: "public".into(), name: "users".into(), columns: vec![], indexes: vec![], topic_partitions: None };
+        assert!(t.topic_ddl().is_none());
     }
 
     #[test]
@@ -361,6 +402,7 @@ mod tests {
                 ColumnSchema { name: "email".into(), source_type: "text".into(), keystone_type: "TEXT".into(), nullable: true, is_primary_key: false },
             ],
             indexes: vec![],
+            topic_partitions: None,
         };
         let ddl = t.to_keystone_ddl();
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS \"users\""));

@@ -250,7 +250,7 @@ fn references_system_table(stmt: &Stmt) -> bool {
         Stmt::CreateIndex(c) => tables.push(c.table.clone()),
         _ => {}
     }
-    tables.iter().any(|t| t.starts_with("_tpt_"))
+    tables.iter().any(|t| crate::storage::is_internal_table(t))
 }
 
 /// `CREATE ROLE name [SUPERUSER|NOSUPERUSER] [LOGIN|NOLOGIN]

@@ -441,12 +441,23 @@ impl SourceConnector for KafkaSource {
             .map_err(ConnectorError::Other)?;
         let topics = parse_metadata_topic_names(&resp);
 
-        Ok(topics
-            .into_iter()
-            .map(|name| TableSchema {
+        let mut tables = Vec::with_capacity(topics.len());
+        for name in topics {
+            // Best-effort: an explicit partition count lets `apply_ddl` emit
+            // a `CREATE TOPIC ... WITH (partitions = n)` matching the source
+            // instead of relying on Keystone's implicit auto-topic (which
+            // always hardcodes 1 partition). Falling back to `None` here
+            // just means that fallback behavior, not a discovery failure.
+            let partitions = self.conn.metadata_partitions(&name).await.ok();
+            let topic_partitions = match partitions {
+                Some(p) if !p.is_empty() => Some(p.len() as u32),
+                _ => None,
+            };
+            tables.push(TableSchema {
                 schema: "kafka".to_string(),
                 name,
                 indexes: vec![],
+                topic_partitions,
                 columns: vec![
                     ColumnSchema {
                         name: "offset".to_string(),
@@ -477,8 +488,9 @@ impl SourceConnector for KafkaSource {
                         is_primary_key: false,
                     },
                 ],
-            })
-            .collect())
+            });
+        }
+        Ok(tables)
     }
 
     async fn snapshot_table(&mut self, table: &TableSchema, tx: Sender<Vec<SourceRow>>) -> Result<u64, ConnectorError> {

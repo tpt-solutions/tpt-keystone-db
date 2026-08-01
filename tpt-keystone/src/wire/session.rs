@@ -101,7 +101,9 @@ async fn run(
     // zero-config quickstart (`psql -h localhost -p 5432`, no flags) keeps
     // working unchanged. Once at least one role exists, every connecting
     // user must complete a real SCRAM-SHA-256 exchange.
-    if !roles.is_empty()? {
+    if roles.is_empty()? {
+        conn.send(&BackendMessage::AuthenticationOk);
+    } else {
         if let Err(e) = authenticate(conn, &roles, &user).await {
             debug!(%peer, %user, error = %e, "authentication failed");
             conn.send_error(ErrorInfo::fatal(
@@ -512,8 +514,13 @@ async fn handle_simple_query(
         return Ok(());
     }
 
-    let stmt = match db.parse_cached(sql) {
-        Ok(stmt) => stmt,
+    // The simple-query protocol allows a client to pack several `;`-separated
+    // commands into one `Query` message (`psql -c "BEGIN; INSERT ...; COMMIT;"`
+    // is exactly this) — every statement executes in order, each with its own
+    // RowDescription/DataRow*/CommandComplete group, and only one
+    // `ReadyForQuery` is sent at the very end, after the whole batch.
+    let stmts = match db.parse_all_cached(sql) {
+        Ok(stmts) => stmts,
         Err(e) => {
             conn.send_error(ErrorInfo::new("42601", e.to_string()));
             conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
@@ -521,70 +528,76 @@ async fn handle_simple_query(
             return Ok(());
         }
     };
-
-    // COPY takes over the connection for a sub-protocol of CopyData/CopyDone
-    // messages, so it's handled directly here rather than through
-    // `execute_simple`'s uniform QueryResult shape.
-    match stmt {
-        Stmt::CopyIn(copy) => return handle_copy_in(conn, copy, db).await,
-        Stmt::CopyOut(copy) => return handle_copy_out(conn, copy, db).await,
-        _ => {}
+    if stmts.is_empty() {
+        conn.send(&BackendMessage::EmptyQueryResponse);
+        conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
+        conn.flush().await?;
+        return Ok(());
     }
 
-    // Transaction-control statements are intercepted here so the per-connection
-    // `txn` handle is managed on the wire side; the executor only sees them as
-    // no-ops (the actual staged-write flush/discard happens here via COMMIT/
-    // ROLLBACK). `BEGIN` is idempotent (a second BEGIN just keeps the open
-    // transaction), matching Postgres's implicit-transaction semantics.
-    match &stmt {
-        Stmt::Begin => {
-            if txn.is_none() {
-                *txn = Some(db.begin_txn());
-            }
-            conn.send(&BackendMessage::CommandComplete("BEGIN".into()));
-            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::InTransaction));
-            conn.flush().await?;
-            return Ok(());
+    // Postgres aborts the remainder of a multi-statement batch on the first
+    // error rather than running the rest against a possibly-inconsistent
+    // state.
+    let mut error_hit = false;
+    for stmt in stmts {
+        if error_hit {
+            break;
         }
-        Stmt::Commit => {
-            if let Some(t) = txn.take() {
-                if let Err(e) = db.commit_txn(&t) {
-                    conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
-                    conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
-                    conn.flush().await?;
-                    return Ok(());
+
+        // COPY takes over the connection for a sub-protocol of CopyData/
+        // CopyDone messages, including sending its own final
+        // `ReadyForQuery` — handled directly here rather than through
+        // `execute_simple`'s uniform QueryResult shape, and returning
+        // immediately since it fully owns the rest of the exchange (a
+        // COPY elsewhere in a batch than last is not supported).
+        match stmt {
+            Stmt::CopyIn(copy) => return handle_copy_in(conn, copy, db).await,
+            Stmt::CopyOut(copy) => return handle_copy_out(conn, copy, db).await,
+            // Transaction-control statements are intercepted here so the
+            // per-connection `txn` handle is managed on the wire side; the
+            // executor only sees them as no-ops (the actual staged-write
+            // flush/discard happens here via COMMIT/ROLLBACK). `BEGIN` is
+            // idempotent (a second BEGIN just keeps the open transaction),
+            // matching Postgres's implicit-transaction semantics.
+            Stmt::Begin => {
+                if txn.is_none() {
+                    *txn = Some(db.begin_txn());
                 }
+                conn.send(&BackendMessage::CommandComplete("BEGIN".into()));
             }
-            conn.send(&BackendMessage::CommandComplete("COMMIT".into()));
-            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
-            conn.flush().await?;
-            return Ok(());
-        }
-        Stmt::Rollback => {
-            if let Some(t) = txn.take() {
-                db.rollback_txn(&t);
+            Stmt::Commit => {
+                if let Some(t) = txn.take() {
+                    if let Err(e) = db.commit_txn(&t) {
+                        conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
+                        error_hit = true;
+                        continue;
+                    }
+                }
+                conn.send(&BackendMessage::CommandComplete("COMMIT".into()));
             }
-            conn.send(&BackendMessage::CommandComplete("ROLLBACK".into()));
-            conn.send(&BackendMessage::ReadyForQuery(TransactionStatus::Idle));
-            conn.flush().await?;
-            return Ok(());
+            Stmt::Rollback => {
+                if let Some(t) = txn.take() {
+                    db.rollback_txn(&t);
+                }
+                conn.send(&BackendMessage::CommandComplete("ROLLBACK".into()));
+            }
+            other => match execute_simple(other, db.clone(), cursors, listening, txn.as_ref(), actor) {
+                Ok(result) => {
+                    conn.send(&BackendMessage::RowDescription(result.fields));
+                    for row in result.rows {
+                        conn.send(&BackendMessage::DataRow(row));
+                    }
+                    conn.send(&BackendMessage::CommandComplete(result.tag));
+                }
+                Err(e) => {
+                    error!("query error: {e}");
+                    conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
+                    error_hit = true;
+                }
+            },
         }
-        _ => {}
     }
 
-    match execute_simple(stmt, db, cursors, listening, txn.as_ref(), actor) {
-        Ok(result) => {
-            conn.send(&BackendMessage::RowDescription(result.fields));
-            for row in result.rows {
-                conn.send(&BackendMessage::DataRow(row));
-            }
-            conn.send(&BackendMessage::CommandComplete(result.tag));
-        }
-        Err(e) => {
-            error!("query error: {e}");
-            conn.send_error(ErrorInfo::new(sqlstate_for(&e), e.to_string()));
-        }
-    }
     // Report InTransaction when a transaction is open so a client can tell it
     // is still inside one (mirrors Postgres's ReadyForQuery status byte).
     let status = if txn.is_some() {

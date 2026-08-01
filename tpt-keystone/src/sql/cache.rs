@@ -18,12 +18,23 @@ struct Entry {
     last_access: u64,
 }
 
+struct BatchEntry {
+    stmts: Vec<Stmt>,
+    last_access: u64,
+}
+
 /// An LRU-by-count cache (same recency-clock eviction shape as
 /// `storage::cache::NvmeCache`, but bounded by entry count rather than
 /// bytes, since a `Stmt` doesn't have a meaningful byte size to budget by).
 pub struct StatementCache {
     max_entries: usize,
     entries: Mutex<HashMap<String, Entry>>,
+    // Separate from `entries`: the simple-query protocol may send several
+    // `;`-separated statements in one `Query` message (`parse_all`), which
+    // is a different cache key shape (`Vec<Stmt>`) from every other call
+    // site's single `Stmt`, so it gets its own table rather than forcing
+    // single-statement lookups to unwrap a one-element `Vec` on every hit.
+    batch_entries: Mutex<HashMap<String, BatchEntry>>,
     clock: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -34,6 +45,7 @@ impl StatementCache {
         Self {
             max_entries,
             entries: Mutex::new(HashMap::new()),
+            batch_entries: Mutex::new(HashMap::new()),
             clock: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -84,5 +96,42 @@ impl StatementCache {
             self.hits.load(Ordering::Relaxed),
             self.misses.load(Ordering::Relaxed),
         )
+    }
+
+    /// Parse a `;`-separated batch of statements, reusing a cached
+    /// `Vec<Stmt>` for identical SQL text when available. Cache misses fall
+    /// through to `super::parse_all` and populate the cache; parse errors
+    /// are never cached.
+    pub fn parse_all(&self, sql: &str) -> anyhow::Result<Vec<Stmt>> {
+        {
+            let mut entries = self.batch_entries.lock().unwrap();
+            if let Some(entry) = entries.get_mut(sql) {
+                entry.last_access = self.clock.fetch_add(1, Ordering::Relaxed);
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(entry.stmts.clone());
+            }
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let stmts = super::parse_all(sql)?;
+
+        let mut entries = self.batch_entries.lock().unwrap();
+        let tick = self.clock.fetch_add(1, Ordering::Relaxed);
+        entries.insert(
+            sql.to_string(),
+            BatchEntry {
+                stmts: stmts.clone(),
+                last_access: tick,
+            },
+        );
+        if entries.len() > self.max_entries {
+            if let Some(victim) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_access)
+                .map(|(k, _)| k.clone())
+            {
+                entries.remove(&victim);
+            }
+        }
+        Ok(stmts)
     }
 }

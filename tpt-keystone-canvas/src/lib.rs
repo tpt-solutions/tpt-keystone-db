@@ -9,12 +9,19 @@
 //! rather than silently dropped:
 //!
 //! - **Rendering backend is Canvas2D (`web_sys::CanvasRenderingContext2d`,
-//!   see `render.rs`), not WebGPU.** Real WebGPU pipelines (shaders, buffer
-//!   layouts, render passes) for four different visualisations is an order
-//!   of magnitude more code than the rest of this crate combined, and
-//!   `web-sys`'s WebGPU bindings are still a rough edge of the ecosystem.
-//!   Canvas2D is genuinely hardware-accelerated by the browser and gets
-//!   every component actually drawing today.
+//!   see `render.rs`) for every component except an opt-in WebGPU
+//!   proof-of-concept on `CanvasTimeSeries` (`webgpu.rs`).** Real WebGPU
+//!   pipelines (shaders, buffer layouts, render passes) for four different
+//!   visualisations would still be an order of magnitude more code than the
+//!   rest of this crate combined, so only one component got the PoC, scoped
+//!   to a single line-strip draw call with no text/markers/theming — see
+//!   `webgpu.rs`'s module docs for the exact cut list. It's feature-detected
+//!   and additive: `CanvasTimeSeries` always mounts Canvas2D synchronously
+//!   first (unchanged behavior/API), then asynchronously tries WebGPU and
+//!   switches future redraws to it only if negotiation succeeds — Canvas2D
+//!   remains the guaranteed-working path on every browser. Not
+//!   browser-tested (no headless-WebGPU harness here), and extending the PoC
+//!   to `CanvasMap`/`CanvasGraph` is unstarted.
 //! - **No plugin API / custom WebGPU shader hooks** — falls out of the
 //!   Canvas2D decision above; there's no shader pipeline to hook into.
 //! - **`useKeystoneQuery`-equivalent (`client::KeystoneClient::use_keystone_query`)
@@ -40,6 +47,7 @@
     pub mod reactive;
     pub mod render;
     pub mod theme;
+    pub mod webgpu;
 
 
 #[cfg(target_arch = "wasm32")]

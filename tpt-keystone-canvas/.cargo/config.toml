@@ -1,0 +1,8 @@
+# `web-sys`'s WebGPU bindings (`src/webgpu.rs`, `Gpu*` types) are gated
+# behind wasm-bindgen's "unstable APIs" opt-in — the WebGPU spec was still
+# evolving when these bindings were added, so web-sys doesn't commit to
+# semver stability for them yet. Every other component in this crate still
+# builds/runs unaffected; this only unlocks the `Gpu*` type names for
+# `webgpu.rs` to use.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

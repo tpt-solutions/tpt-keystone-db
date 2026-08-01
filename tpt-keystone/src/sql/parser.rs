@@ -185,6 +185,22 @@ impl Parser {
         Ok(stmt)
     }
 
+    /// Parse a `;`-separated batch of statements (the simple-query protocol
+    /// allows a client to send several commands in one `Query` message; the
+    /// extended protocol's `Parse` must keep using `parse_stmt` directly,
+    /// since a prepared statement may only ever contain one command).
+    pub fn parse_all_stmts(&mut self) -> anyhow::Result<Vec<Stmt>> {
+        let mut stmts = Vec::new();
+        loop {
+            while self.eat(&Token::Semicolon) {}
+            if matches!(self.peek(), Token::Eof) {
+                break;
+            }
+            stmts.push(self.parse_stmt()?);
+        }
+        Ok(stmts)
+    }
+
     fn parse_ctes(&mut self, recursive: bool) -> anyhow::Result<Vec<Cte>> {
         let mut ctes = vec![self.parse_cte(recursive)?];
         while self.eat(&Token::Comma) {

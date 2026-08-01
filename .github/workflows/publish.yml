@@ -1,0 +1,109 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "If true, run cargo publish --dry-run only (no actual publish)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  publish-keystones:
+    name: publish (keystone + harbor + operator + canvas)
+    runs-on: ubuntu-latest
+    # These four crates have no internal path dependencies on each other,
+    # so they can publish in parallel. tpt-keystone-cli and tpt-keystone-sdk
+    # depend on the others (in order) and run as a second job.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-keystone
+      - name: Install unixODBC (tpt-keystone-harbor's odbc-api dep)
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+      - name: Publish crates (leaf, parallel)
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          for crate in tpt-keystone tpt-keystone-canvas tpt-keystone-operator; do
+            echo "=== publishing $crate ==="
+            (
+              cd "$crate"
+              if [ "$DRY_RUN" = "true" ]; then
+                cargo publish --dry-run
+              else
+                cargo publish
+              fi
+            )
+          done
+          echo "=== publishing tpt-keystone-harbor ==="
+          (
+            cd tpt-keystone-harbor
+            if [ "$DRY_RUN" = "true" ]; then
+              cargo publish --dry-run
+            else
+              cargo publish
+            fi
+          )
+
+  publish-sdk:
+    name: publish (sdk, depends on canvas)
+    needs: publish-keystones
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-keystone-sdk
+      - name: Publish tpt-keystone-sdk
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd tpt-keystone-sdk
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish --dry-run
+          else
+            cargo publish
+          fi
+
+  publish-cli:
+    name: publish (cli, depends on sdk)
+    needs: publish-sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tpt-keystone-cli
+      - name: Publish tpt-keystone-cli
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd tpt-keystone-cli
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish --dry-run
+          else
+            cargo publish
+          fi

@@ -457,6 +457,15 @@ impl Database {
         self.stmt_cache.parse(sql)
     }
 
+    /// Parse `sql` as a `;`-separated batch of statements, reusing a cached
+    /// `Vec<Stmt>` for identical SQL text — the simple-query protocol's
+    /// entry point (`wire::session::handle_simple_query`), which must
+    /// execute every statement a client sends in one `Query` message, not
+    /// just the first.
+    pub fn parse_all_cached(&self, sql: &str) -> anyhow::Result<Vec<Stmt>> {
+        self.stmt_cache.parse_all(sql)
+    }
+
     /// `(entry_count, hits, misses)` for the shared statement cache — for
     /// tests/observability.
     pub fn stmt_cache_stats(&self) -> (usize, u64, u64) {

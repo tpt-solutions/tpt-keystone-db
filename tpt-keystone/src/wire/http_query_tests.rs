@@ -199,10 +199,18 @@ async fn auth_test_server(
 async fn query_requires_basic_auth_when_roles_configured() {
     let (addr, user, pass, _b, _l) = auth_test_server().await;
 
+    // Every request body below is `{"sql": "select 1 as ok"}` (25 bytes) —
+    // Content-Length must match exactly. `read_request` (`http_query.rs`)
+    // does `read_exact(content_length)`, so an overstated length here hangs
+    // the server waiting for bytes `raw_request`'s `write_all` never sends,
+    // while the client hangs in `read_to_end` waiting for a response the
+    // server never gets to write — a real deadlock this test hit once
+    // already with a stale `Content-Length: 31`.
+
     // No Authorization header -> 401.
     let response = raw_request(
         addr,
-        "POST /query HTTP/1.1\r\nContent-Length: 31\r\n\r\n{\"sql\": \"select 1 as ok\"}",
+        "POST /query HTTP/1.1\r\nContent-Length: 25\r\n\r\n{\"sql\": \"select 1 as ok\"}",
     )
     .await;
     assert!(response.starts_with("HTTP/1.1 401"), "got: {response}");
@@ -213,7 +221,7 @@ async fn query_requires_basic_auth_when_roles_configured() {
     let response = raw_request(
         addr,
         &format!(
-            "POST /query HTTP/1.1\r\nAuthorization: Basic {bad_b64}\r\nContent-Length: 31\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
+            "POST /query HTTP/1.1\r\nAuthorization: Basic {bad_b64}\r\nContent-Length: 25\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
         ),
     )
     .await;
@@ -225,7 +233,7 @@ async fn query_requires_basic_auth_when_roles_configured() {
     let response = raw_request(
         addr,
         &format!(
-            "POST /query HTTP/1.1\r\nAuthorization: Basic {good_b64}\r\nContent-Length: 31\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
+            "POST /query HTTP/1.1\r\nAuthorization: Basic {good_b64}\r\nContent-Length: 25\r\n\r\n{{\"sql\": \"select 1 as ok\"}}"
         ),
     )
     .await;

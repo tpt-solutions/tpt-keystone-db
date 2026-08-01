@@ -642,7 +642,27 @@ impl RowContext {
         let norm = raw.strip_prefix("pg_catalog.").unwrap_or(&raw);
         match norm {
             "version" => Ok(Value::Text("TPT Keystone 0.1.0 on Rust".into())),
-            "pg_sleep" => Ok(Value::Null),
+            "pg_sleep" => {
+                let secs = match args.first() {
+                    Some(e) => self.eval(e)?.as_f64()?,
+                    None => 0.0,
+                };
+                // Clamped so a client can't wedge a connection (and the
+                // executor thread running it) indefinitely.
+                let secs = secs.clamp(0.0, 60.0);
+                if secs > 0.0 {
+                    // A plain `std::thread::sleep` here would block whichever
+                    // Tokio worker thread happens to be driving I/O for the
+                    // whole runtime at that moment — starving every other
+                    // connection (including the accept loop) until it wakes
+                    // up, not just this one. `block_in_place` hands this
+                    // thread's other work off to the rest of the pool first.
+                    tokio::task::block_in_place(|| {
+                        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                    });
+                }
+                Ok(Value::Null)
+            }
             "now" | "current_timestamp" => Ok(Value::Text("2026-06-30 00:00:00+00".into())),
             "current_date" => Ok(Value::Text("2026-06-30".into())),
             "current_user" | "user" | "session_user" => Ok(Value::Text("postgres".into())),
@@ -672,7 +692,7 @@ impl RowContext {
                     ),
                 };
                 let visible = {
-                    let tables = db.list_tables().unwrap_or_default();
+                    let tables = db.list_user_tables().unwrap_or_default();
                     let indexes = db.list_indexes();
                     tables
                         .iter()

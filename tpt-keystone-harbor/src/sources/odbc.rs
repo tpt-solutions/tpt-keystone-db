@@ -136,7 +136,7 @@ impl SourceConnector for OdbcSource {
                         });
                     }
 
-                    tables.push(TableSchema { schema: schema_name, name: table_name, columns, indexes: vec![] });
+                    tables.push(TableSchema { schema: schema_name, name: table_name, columns, indexes: vec![], topic_partitions: None });
                 }
 
                 Ok(tables)
