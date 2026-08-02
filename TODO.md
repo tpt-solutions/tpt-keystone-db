@@ -371,6 +371,128 @@ handing over data already shaped the way its target engine expects.
       InfluxDB/Elasticsearch/vector-DB server, so full source-side verification stays manual (extend
       `examples/smoke.rs` against a live `tpt-keystone` node).
 
+## Phase 9 — Harbor: MSSQL + MongoDB live CDC
+
+Full context/rationale at `C:\Users\phill\.claude\plans\oh-for-harbour-did-jolly-thacker.md`. Of the
+nine Harbor source connectors whose `replicate()` (live CDC) is stubbed to `ConnectorError::Unimplemented`,
+MSSQL and MongoDB have the best effort/risk ratio — both can reuse existing connection plumbing (MSSQL's
+`TdsConn::query`, Mongo's `send_op_msg`/`getMore` cursor loop) rather than needing a new protocol layer
+from scratch. MySQL (binlog, comparable in size to the Postgres `pgoutput` decoder) and Oracle (LogMiner,
+additionally blocked on `oracle.rs`'s own TTC protocol layer being an unverified "best-effort
+reconstruction") are deliberately deferred to a later phase. Elasticsearch/Neo4j/InfluxDB/vector stores
+have no native change-feed API at all and stay snapshot-only by design — no polling-based pseudo-CDC.
+
+- [x] MSSQL TDS row-parser fix (`sources/mssql.rs`, `parse_result_set`) — blocking prerequisite for CDC
+      and a latent correctness fix for `snapshot_table`/`row_checksums`: the old ROW-token handling
+      ignored COLMETADATA entirely and returned one opaque blob per row instead of per-column cells.
+      Replaced with full TYPE_INFO parsing (fixed-length, `BYTELEN_TYPE`, `USHORTLEN_TYPE`,
+      `LONGLEN_TYPE`, PLP `MAX` types) and typed-to-text cell decoding (`ColumnMeta`/`parse_type_info`/
+      `read_cell` + per-type converters). Also fixed the pre-existing COLMETADATA walker itself, which
+      never skipped each column's UserType(4)+Flags(2)+ColName per MS-TDS §2.2.7.4 and used a
+      nonstandard column-count encoding — both would have misaligned on any multi-column result.
+      `NBCROW` (`0xD2`, row compression) is an explicit `bail!` rather than silently mis-parsed, since
+      Harbor doesn't negotiate the capability that triggers it.
+- [x] MSSQL CDC (`sources/mssql.rs::replicate`) — `check_cdc_enabled` preflight (`sys.databases.
+      is_cdc_enabled`, `cdc.change_tables`) with a clear DBA-facing error naming the exact
+      `sp_cdc_enable_db`/`_table` commands to run, rather than Harbor enabling CDC itself; poll-based
+      loop (`CDC_POLL_INTERVAL` = 2s) over `cdc.fn_cdc_get_all_changes_<capture_instance>`,
+      `map_cdc_operation` mapping `__$operation` to `ChangeEvent::Insert/Update/Delete` (op 3,
+      update-before-image, is skipped as informational-only); `lsn_to_hex`/`hex_to_lsn` resume-token
+      codec (SQL Server's native `0x`-hex LSN convention).
+- [x] MongoDB change-stream CDC (`sources/mongodb.rs::replicate`) — replica-set preflight via the
+      `hello` response's `setName` field (captured at connect time); new nested BSON encoders
+      (`bson_encode_document`/`bson_encode_array`) building a whole-database `{aggregate: 1, pipeline:
+      [{$changeStream: {fullDocument: 'updateLookup'[, resumeAfter: {...}]}}]}` over the existing
+      `getMore` cursor loop; `map_change_event` mapping insert/update/replace/delete/invalidate to
+      `ChangeEvent` (filtered against `known_tables` by each event's `ns.coll`); `_data` resume-token
+      passthrough via `extract_resume_token`. Found and fixed three pre-existing bugs in the process,
+      all of which would have broken this same `getMore` mechanism (and, for the first two, already
+      silently broke `snapshot_table`/`row_checksums` pagination past the first batch):
+      **(1)** `bson_build_doc`'s declared document length omitted the 4 bytes of the length field
+      itself, under-reporting every BSON document this crate has ever built by 4 bytes and corrupting
+      the tail of any nested document/array a decoder bounds by it (caught by the first test that
+      round-trips `bson_build_doc` output back through `bson_decode_doc` — no prior test did);
+      **(2)** `extract_batch` only read `firstBatch`, but `getMore` responses carry the same cursor
+      batch under `nextBatch` instead — now checks both; **(3)** `getMore`'s cursor-id argument was
+      encoded as a BSON string instead of the int64 the wire protocol requires. Also added `$db` (a
+      mandatory OP_MSG field this connector never sent) to every command this file builds
+      (`hello`/`listCollections`/`find`/`getMore`/the new `aggregate`).
+- [x] Unit tests: MSSQL TYPE_INFO decode fixtures per type category (int/nvarchar/decimal/bigint/
+      datetime/date/null), `lsn_to_hex`/`hex_to_lsn` round trip, `civil_from_days`/`days_from_civil`
+      round trip, `map_cdc_operation` (10 tests total, `sources/mssql.rs`); MongoDB nested BSON encoder
+      round trip, `map_change_event` fixtures incl. the missing-`fullDocument` edge case and the
+      unknown-collection filter, resume-token round trip (13 tests total, `sources/mongodb.rs`).
+      `parse_result_set` was changed from a method requiring a live `TdsConn` to an associated function
+      so it's callable directly from fixtures. No live external SQL Server/MongoDB server in this repo,
+      so end-to-end verification stays manual (`examples/smoke.rs`), consistent with the rest of
+      Harbor's connectors.
+- [x] Doc touch-ups: `sources/mod.rs`, `src/lib.rs`, `README.md`, and `Cargo.toml`'s `description` all
+      updated so MSSQL/Mongo are no longer listed among CDC-stubbed connectors.
+
+## Phase 10 — Canvas: extend WebGPU PoC from CanvasTimeSeries to CanvasMap/CanvasGraph
+
+Full context/rationale at `C:\Users\phill\.claude\plans\is-there-anything-left-rustling-peach.md`.
+`webgpu.rs`'s existing PoC (single hardcoded-color `line-strip` pipeline, no bind groups/uniforms,
+async context-selection race vs. Canvas2D) covers only `CanvasTimeSeries` today; its own module docs
+call extending it to `CanvasMap`/`CanvasGraph` "unstarted," needing "a real pan/zoom transform +
+multiple draw calls." Confirmed neither component has any pan/zoom or theming today (whole-crate grep
+for `wheel|zoom|pan|transform|matrix` turns up nothing relevant). This phase builds a shared,
+backend-agnostic pan/zoom transform once, then adds one new WebGPU pipeline per component mirroring
+the existing single-purpose-struct, no-bind-groups, hardcoded-color style.
+
+- [x] `view_transform.rs` (new, host-testable): `ViewTransform` (scale/translate, `to_screen`/
+      `to_data`/`pan`/`zoom`/`screen_to_data_distance`), `normalized_to_clip`, `quad_vertices_clip`,
+      `zoom_factor_from_wheel_delta`, with unit tests (round-trip, zoom-pivot-fixed, scale clamping) —
+      8 tests, all pure `f64`/`f32` math, no `#[cfg(target_arch = "wasm32")]` gate needed
+- [x] `render::canvas_dimensions` — reads canvas pixel size without committing to a context type,
+      needed before the WebGPU-vs-Canvas2D async race decides which context to request
+- [x] Split `webgpu.rs` into a directory module (`webgpu/{mod,timeseries,map,graph}.rs`), extracting
+      shared `GpuContext::negotiate`/`upload_vertices`/`begin_pass`/`end_and_submit` out of the
+      3x-duplicated adapter/device/context negotiation (`GpuContext` also now captures the canvas's
+      pixel `width`/`height` at negotiation time, needed by the two new renderers below to size
+      markers/nodes in clip space); `GpuRenderer` (timeseries) keeps its exact public API — zero
+      behavior change to the working `CanvasTimeSeries` path
+- [x] `GpuMapRenderer` (`webgpu/map.rs`): `TriangleList` marker-quad pipeline (CPU-expanded quads via
+      `quad_vertices_clip`), hardcoded blue matching Canvas2D markers
+- [x] `GpuGraphRenderer` (`webgpu/graph.rs`): `LineList` edge pipeline + `TriangleList` node-quad
+      pipeline in one render pass, hardcoded gray/green matching Canvas2D edges/nodes
+- [x] `components/map.rs`: `Renderer` enum + async race (mirroring `timeseries.rs`); both `heatmap`
+      *and* `cluster` force synchronous Canvas2D (kernel-density fill and variable-radius/count-label
+      cluster bubbles both stay out of WebGPU scope this pass — only plain point markers get a GPU
+      path, so this widens the TODO's original "heatmap-only" cut slightly, documented in `new`'s doc
+      comment and `webgpu/map.rs`'s module docs); `install_click_handler` → `install_pointer_handlers`
+      (adds wheel-to-zoom, promotes click to a 3-event mousedown/move/up state machine for
+      pan-vs-click disambiguation via a `PAN_THRESHOLD_PX` move-distance gate)
+- [x] `components/graph.rs`: `Renderer` enum + async race for both `new`/`new_from_match` (factored
+      into a shared `init_renderer` helper rather than duplicated); `install_drag_handler` →
+      `install_pointer_handlers` (wheel-to-zoom, mousedown hit-tests via `view.to_data`/
+      `screen_to_data_distance`, picks node-drag vs. pan); bundled fix: node-drag mousemove now
+      writes through `view.to_data` instead of raw screen coords, and fires `redraw_trigger` on every
+      drag/pan move (previously dragging a node didn't visibly redraw until an unrelated data refetch
+      happened). Node layout positions (`fruchterman_reingold` output) are now stored in unzoomed data
+      space and mapped through `view.to_screen` at draw time, so panning/zooming never distorts the
+      cached layout itself.
+- [x] `Cargo.toml`: added `"WheelEvent"`/`"Event"` to the `web-sys` feature list (for `WheelEvent::
+      delta_y`/`Event::prevent_default`); no new `Gpu*` bindings needed (`TriangleList`/`LineList` are
+      existing `GpuPrimitiveTopology` variants)
+- [x] Updated stale module docs: `lib.rs` no longer claims "CanvasTimeSeries always mounts Canvas2D
+      synchronously first" (was already wrong vs. the actual WebGPU-first race) and now describes all
+      three canvas-drawing components' shared async-race behavior; `webgpu/mod.rs`/`webgpu/map.rs`
+      module docs updated for the directory split and the `cluster`-also-forces-Canvas2D decision
+      above.
+- [x] Verify: `cargo test` (host) passes 42/42, including 8 new `view_transform` tests plus the
+      existing `kernel_density`/`cluster_grid`/`fruchterman_reingold`/etc. suites unaffected;
+      `cargo build --target wasm32-unknown-unknown` compiles the whole crate clean (zero warnings). No
+      headless-WebGPU harness exists in this repo (no `wasm-bindgen` CLI available in this environment
+      either), so actual GPU-path rendering correctness/interaction feel stays manual/unverified, same
+      caveat as the existing timeseries PoC.
+
+Explicitly out of scope this pass (documented, not silent cuts, matching this crate's established
+PoC precedent): heatmap *and* cluster rendering in WebGPU (both stay Canvas2D-only, see above),
+node-id/cluster-count text in the GPU path (no glyph atlas), per-instance/data-driven coloring (one
+hardcoded color per pipeline, no uniforms/bind groups), and `GpuVertexStepMode` instancing
+(CPU-expanded quads instead).
+
 ## Done outside this list (`cfdafce`)
 
 - [x] `tpt-harbor`: ODBC source connector (`sources/odbc.rs`, `SourceKind::Odbc`) — vendor-agnostic

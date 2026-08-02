@@ -9,19 +9,27 @@
 //! rather than silently dropped:
 //!
 //! - **Rendering backend is Canvas2D (`web_sys::CanvasRenderingContext2d`,
-//!   see `render.rs`) for every component except an opt-in WebGPU
-//!   proof-of-concept on `CanvasTimeSeries` (`webgpu.rs`).** Real WebGPU
-//!   pipelines (shaders, buffer layouts, render passes) for four different
-//!   visualisations would still be an order of magnitude more code than the
-//!   rest of this crate combined, so only one component got the PoC, scoped
-//!   to a single line-strip draw call with no text/markers/theming — see
-//!   `webgpu.rs`'s module docs for the exact cut list. It's feature-detected
-//!   and additive: `CanvasTimeSeries` always mounts Canvas2D synchronously
-//!   first (unchanged behavior/API), then asynchronously tries WebGPU and
-//!   switches future redraws to it only if negotiation succeeds — Canvas2D
-//!   remains the guaranteed-working path on every browser. Not
-//!   browser-tested (no headless-WebGPU harness here), and extending the PoC
-//!   to `CanvasMap`/`CanvasGraph` is unstarted.
+//!   see `render.rs`) by default, with an opt-in WebGPU proof-of-concept on
+//!   all three "drawn to a canvas" components — `CanvasTimeSeries`, `CanvasMap`,
+//!   `CanvasGraph` (`webgpu/{timeseries,map,graph}.rs`).** Real WebGPU
+//!   pipelines (shaders, buffer layouts, render passes) for a general-purpose
+//!   renderer would still be an order of magnitude more code than the rest of
+//!   this crate combined, so each component's PoC pipeline is narrowly scoped
+//!   (one hardcoded color, no text, no per-instance uniforms — see
+//!   `webgpu/mod.rs`'s module docs for the exact cut list, and `view_transform.rs`
+//!   for the shared pan/zoom math both backends use). It's feature-detected
+//!   and additive: on construction, each component's `<canvas>` element hasn't
+//!   requested a rendering context yet, so an async task
+//!   (`wasm_bindgen_futures::spawn_local`) races WebGPU negotiation first and
+//!   only falls back to Canvas2D — which is *not* attempted until after WebGPU
+//!   negotiation fails — if that fails, since a `<canvas>` commits permanently
+//!   to whichever context type ("2d" xor "webgpu") is requested on it first.
+//!   Canvas2D remains the guaranteed-working path on every browser; nothing is
+//!   drawn until the async race resolves, at which point a `redraw_trigger`
+//!   signal forces one repaint. Not browser-tested (no headless-WebGPU harness
+//!   here) — verified only by `cargo build --target wasm32-unknown-unknown`
+//!   compiling clean and `cargo test`'s host-side coverage of the pure
+//!   math (`view_transform.rs`, `components/*.rs`'s projection/layout helpers).
 //! - **No plugin API / custom WebGPU shader hooks** — falls out of the
 //!   Canvas2D decision above; there's no shader pipeline to hook into.
 //! - **`useKeystoneQuery`-equivalent (`client::KeystoneClient::use_keystone_query`)
@@ -47,6 +55,7 @@
     pub mod reactive;
     pub mod render;
     pub mod theme;
+    pub mod view_transform;
     pub mod webgpu;
 
 

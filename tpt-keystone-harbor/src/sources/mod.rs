@@ -1,10 +1,14 @@
 //! Source connector registry. Each module implements
 //! [`crate::connector::SourceConnector`] for its source database/service.
-//! The Postgres connector (`postgres`) is the most complete (including
-//! `pgoutput` logical replication CDC); other connectors implement
-//! discovery, snapshot, and checksums, with CDC scope-cut to
-//! `ConnectorError::Unimplemented` where the source lacks a standard
-//! change-feed API.
+//! Every connector implements discovery, snapshot, and checksums; live CDC
+//! (`replicate`) is implemented for `postgres`/`postgis` (`pgoutput` logical
+//! replication), `kafka` (its native log is itself a change feed), `mssql`
+//! (polls `cdc.fn_cdc_get_all_changes_*`, requires CDC enabled on the
+//! source), and `mongodb` (`$changeStream` aggregate, requires a replica
+//! set/sharded cluster). It's scope-cut to `ConnectorError::Unimplemented`
+//! for `mysql`/`oracle` (binlog/LogMiner CDC not yet written — a real
+//! backlog item, unlike the next group) and for `elasticsearch`/`neo4j`/
+//! `influxdb`/`vector`/`odbc`, which lack a standard change-feed API at all.
 
 pub mod elasticsearch;
 pub mod influxdb;

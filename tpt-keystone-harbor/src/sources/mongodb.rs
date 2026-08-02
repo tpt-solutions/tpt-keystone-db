@@ -6,20 +6,28 @@
 //! Mongo is schemaless by design, and Canopy's JSON column is built to store
 //! documents directly, so this is both more faithful (no small-sample type
 //! inference silently dropping unseen fields) and the engine-native shape.
-//! Snapshot uses `find` with batch cursor iteration via `getMore`. CDC is
-//! scope-cut to `Unimplemented` — MongoDB change streams/oplog tailing is a
-//! substantial protocol effort on its own.
+//! Snapshot uses `find` with batch cursor iteration via `getMore`. CDC
+//! (`replicate`) opens a whole-database `$changeStream` aggregate cursor —
+//! just another command over the same `send_op_msg`/`getMore` cursor loop
+//! `snapshot_table` uses, cheaper than a from-scratch oplog-tailing
+//! implementation — and requires the source to be a replica set or sharded
+//! cluster (change streams don't exist against a standalone `mongod`).
 
 use crate::connector::{ConnectorError, SourceConnector, SourceRow, ChangeEvent};
 use crate::schema::{ColumnSchema, IndexSpec, TableSchema};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, BytesMut};
+use std::collections::HashSet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 
 const SNAPSHOT_BATCH_SIZE: i64 = 1_000;
+const CHANGE_STREAM_BATCH_SIZE: i32 = 1_000;
+/// `getMore`'s `maxTimeMS` — how long the server long-polls for new change
+/// events before returning an empty batch, so the client isn't spinning.
+const CHANGE_STREAM_MAX_TIME_MS: i32 = 10_000;
 
 // ── Minimal BSON encoder ─────────────────────────────────────────────
 
@@ -60,13 +68,40 @@ fn bson_encode_string_typed(name: &str, val: &str) -> Vec<u8> {
     out
 }
 
+/// `elements` are already-encoded child elements (each carrying its own
+/// field name, e.g. from `bson_encode_string_typed`/`bson_encode_document`)
+/// — this just wraps them as one nested-document-typed element named `name`.
+fn bson_encode_document(name: &str, elements: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut out = vec![0x03]; // type: document
+    out.extend_from_slice(&bson_encode_cstring(name));
+    out.extend_from_slice(&bson_build_doc(elements));
+    out
+}
+
+/// Same as [`bson_encode_document`] but tagged as a BSON array — callers
+/// must key each element "0", "1", ... (e.g. via `bson_encode_document("0", ...)`)
+/// since BSON arrays are documents with stringified-index keys.
+fn bson_encode_array(name: &str, elements: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut out = vec![0x04]; // type: array
+    out.extend_from_slice(&bson_encode_cstring(name));
+    out.extend_from_slice(&bson_build_doc(elements));
+    out
+}
+
 fn bson_build_doc(elements: Vec<Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::new();
     for el in elements {
         out.extend_from_slice(&el);
     }
     out.push(0); // terminator
-    let total = out.len() as i32;
+    // BSON's declared document length includes its own 4-byte length
+    // field (spec: "total number of bytes comprising the document");
+    // omitting that +4 under-reported every document this crate has ever
+    // built by 4 bytes, corrupting the tail of any nested document/array a
+    // decoder tried to bound by it — caught by the first test that actually
+    // round-trips `bson_build_doc` output back through `bson_decode_doc`
+    // (previously nothing did; existing tests construct `BsonValue` by hand).
+    let total = out.len() as i32 + 4;
     let mut doc = total.to_le_bytes().to_vec();
     doc.extend_from_slice(&out);
     doc
@@ -218,6 +253,9 @@ struct MongoConn {
     read_buf: BytesMut,
     write_buf: BytesMut,
     request_id: i32,
+    /// `hello`'s `setName` field — present only for a replica-set/sharded
+    /// member, absent on a standalone `mongod`. Change streams need this.
+    set_name: Option<String>,
 }
 
 impl MongoConn {
@@ -228,12 +266,14 @@ impl MongoConn {
             read_buf: BytesMut::with_capacity(65536),
             write_buf: BytesMut::with_capacity(65536),
             request_id: 1,
+            set_name: None,
         };
 
         // OP_MSG hello/ismaster
         let cmd = bson_build_doc(vec![
             bson_encode_string_typed("hello", "1"),
             bson_encode_int32("helloOk", 1),
+            bson_encode_string_typed("$db", "admin"),
         ]);
         let response = conn.send_op_msg(1, &cmd, 0).await?;
 
@@ -243,6 +283,8 @@ impl MongoConn {
                 bail!("MongoDB hello failed: ok={v}");
             }
         }
+
+        conn.set_name = response.iter().find(|(k, _)| k == "setName").and_then(|(_, v)| if let BsonValue::String(s) = v { Some(s.clone()) } else { None });
 
         Ok(conn)
     }
@@ -347,6 +389,7 @@ impl SourceConnector for MongoSource {
         let cmd = bson_build_doc(vec![
             bson_encode_string_typed("listCollections", "1"),
             bson_encode_int32("cursor", 0),
+            bson_encode_string_typed("$db", &self.database),
         ]);
 
         let response = self
@@ -388,6 +431,7 @@ impl SourceConnector for MongoSource {
         let cmd = bson_build_doc(vec![
             bson_encode_string_typed("find", &table.name),
             bson_encode_int64("batchSize", batch_size),
+            bson_encode_string_typed("$db", &self.database),
         ]);
 
         let response = self
@@ -398,6 +442,7 @@ impl SourceConnector for MongoSource {
 
         // Extract firstBatch
         let mut batches = extract_batch(&response);
+        let mut next_cursor = extract_cursor_id(&response);
 
         loop {
             let batch_rows: Vec<SourceRow> = batches.iter().map(|doc| doc_to_row(doc)).collect();
@@ -409,17 +454,17 @@ impl SourceConnector for MongoSource {
                 }
             }
 
-            // Check if there's a next batch
-            let next_cursor = extract_cursor_id(&response);
-            if next_cursor == 0 || batches.is_empty() {
+            if next_cursor == 0 {
                 break;
             }
 
-            // getMore
+            // getMore — cursor id is BSON int64, not a string (a strict
+            // server rejects a mistyped `getMore` field).
             let getmore_cmd = bson_build_doc(vec![
-                bson_encode_string_typed("getMore", &next_cursor.to_string()),
+                bson_encode_int64("getMore", next_cursor),
                 bson_encode_string_typed("collection", &table.name),
                 bson_encode_int64("batchSize", batch_size),
+                bson_encode_string_typed("$db", &self.database),
             ]);
 
             let resp = self
@@ -429,13 +474,74 @@ impl SourceConnector for MongoSource {
                 .map_err(ConnectorError::Other)?;
 
             batches = extract_batch(&resp);
+            next_cursor = extract_cursor_id(&resp);
         }
 
         Ok(total)
     }
 
-    async fn replicate(&mut self, _tables: &[TableSchema], _resume_token: Option<String>, _tx: Sender<ChangeEvent>) -> Result<(), ConnectorError> {
-        Err(ConnectorError::Unimplemented { connector: "Harbor/Mongo", detail: "MongoDB change stream CDC not yet written" })
+    async fn replicate(&mut self, tables: &[TableSchema], resume_token: Option<String>, tx: Sender<ChangeEvent>) -> Result<(), ConnectorError> {
+        if self.conn.set_name.is_none() {
+            return Err(ConnectorError::Other(anyhow::anyhow!(
+                "MongoDB change streams require a replica set or sharded cluster (no setName in the hello response); \
+                 this server looks like a standalone mongod. Run rs.initiate() to enable Harbor's live CDC."
+            )));
+        }
+
+        let known_tables: HashSet<&str> = tables.iter().map(|t| t.name.as_str()).collect();
+
+        let mut stage_fields = vec![bson_encode_string_typed("fullDocument", "updateLookup")];
+        if let Some(token) = &resume_token {
+            stage_fields.push(bson_encode_document("resumeAfter", vec![bson_encode_string_typed("_data", token)]));
+        }
+        let pipeline = bson_encode_array("pipeline", vec![bson_encode_document("0", vec![bson_encode_document("$changeStream", stage_fields)])]);
+        let cursor_opt = bson_encode_document("cursor", vec![bson_encode_int32("batchSize", CHANGE_STREAM_BATCH_SIZE)]);
+        // Whole-database stream (aggregate: 1, not a specific collection) so
+        // one cursor covers every migrating table — events are filtered
+        // against `known_tables` below by their own `ns.coll` field.
+        let cmd = bson_build_doc(vec![
+            bson_encode_int32("aggregate", 1),
+            pipeline,
+            cursor_opt,
+            bson_encode_string_typed("$db", &self.database),
+        ]);
+
+        let mut response = self.conn.send_op_msg(0, &cmd, 0).await.map_err(ConnectorError::Other)?;
+        let collection = extract_cursor_ns(&response)
+            .and_then(|ns| ns.splitn(2, '.').nth(1).map(|s| s.to_string()))
+            .unwrap_or_else(|| "$cmd.aggregate".to_string());
+
+        loop {
+            for doc in extract_batch(&response) {
+                match map_change_event(&doc, &known_tables).map_err(ConnectorError::Other)? {
+                    Some(MappedChange::Event(event)) => {
+                        if tx.send(event).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Some(MappedChange::Invalidate) => return Ok(()),
+                    None => {}
+                }
+                if let Some(token) = extract_resume_token(&doc) {
+                    if tx.send(ChangeEvent::CommitLsn(token)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+
+            let cursor_id = extract_cursor_id(&response);
+            if cursor_id == 0 {
+                return Ok(());
+            }
+
+            let getmore_cmd = bson_build_doc(vec![
+                bson_encode_int64("getMore", cursor_id),
+                bson_encode_string_typed("collection", &collection),
+                bson_encode_int32("maxTimeMS", CHANGE_STREAM_MAX_TIME_MS),
+                bson_encode_string_typed("$db", &self.database),
+            ]);
+            response = self.conn.send_op_msg(0, &getmore_cmd, 0).await.map_err(ConnectorError::Other)?;
+        }
     }
 
     async fn row_checksums(&mut self, table: &TableSchema) -> Result<Vec<u64>, ConnectorError> {
@@ -444,6 +550,7 @@ impl SourceConnector for MongoSource {
         let cmd = bson_build_doc(vec![
             bson_encode_string_typed("find", &table.name),
             bson_encode_int64("batchSize", 1000),
+            bson_encode_string_typed("$db", &self.database),
         ]);
 
         let response = self
@@ -453,21 +560,22 @@ impl SourceConnector for MongoSource {
             .map_err(ConnectorError::Other)?;
 
         let mut batches = extract_batch(&response);
+        let mut next_cursor = extract_cursor_id(&response);
 
         loop {
             for doc in &batches {
                 checksums.push(crate::verify::hash_row(&doc_to_row(doc)));
             }
 
-            let next_cursor = extract_cursor_id(&response);
-            if next_cursor == 0 || batches.is_empty() {
+            if next_cursor == 0 {
                 break;
             }
 
             let getmore_cmd = bson_build_doc(vec![
-                bson_encode_string_typed("getMore", &next_cursor.to_string()),
+                bson_encode_int64("getMore", next_cursor),
                 bson_encode_string_typed("collection", &table.name),
                 bson_encode_int64("batchSize", 1000),
+                bson_encode_string_typed("$db", &self.database),
             ]);
 
             let resp = self
@@ -477,6 +585,7 @@ impl SourceConnector for MongoSource {
                 .map_err(ConnectorError::Other)?;
 
             batches = extract_batch(&resp);
+            next_cursor = extract_cursor_id(&resp);
         }
 
         Ok(checksums)
@@ -555,10 +664,15 @@ fn base64_encode(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A `find`/`aggregate` response's cursor batch is `firstBatch`; a
+/// `getMore` response's is `nextBatch` — different field names for the
+/// same purpose, so both are checked (using either name unconditionally
+/// broke `getMore` pagination for any collection larger than one batch).
 fn extract_batch(response: &[(String, BsonValue)]) -> Vec<Vec<(String, BsonValue)>> {
     let mut result = Vec::new();
     if let Some((_, BsonValue::Document(cursor_doc))) = response.iter().find(|(k, _)| k == "cursor") {
-        if let Some((_, BsonValue::Array(batch))) = cursor_doc.iter().find(|(k, _)| k == "firstBatch") {
+        let batch_field = cursor_doc.iter().find(|(k, _)| k == "firstBatch").or_else(|| cursor_doc.iter().find(|(k, _)| k == "nextBatch"));
+        if let Some((_, BsonValue::Array(batch))) = batch_field {
             for item in batch {
                 if let BsonValue::Document(d) = item {
                     result.push(d.clone());
@@ -576,6 +690,85 @@ fn extract_cursor_id(response: &[(String, BsonValue)]) -> i64 {
         }
     }
     0
+}
+
+/// The cursor's `ns` (`"<database>.<collection>"`), needed so `getMore`
+/// against a whole-database `aggregate: 1` cursor targets the exact
+/// collection name the server assigned (typically `$cmd.aggregate`) rather
+/// than a guessed constant.
+fn extract_cursor_ns(response: &[(String, BsonValue)]) -> Option<String> {
+    let cursor_doc = response.iter().find(|(k, _)| k == "cursor").and_then(|(_, v)| if let BsonValue::Document(d) = v { Some(d) } else { None })?;
+    cursor_doc.iter().find(|(k, _)| k == "ns").and_then(|(_, v)| if let BsonValue::String(s) = v { Some(s.clone()) } else { None })
+}
+
+enum MappedChange {
+    Event(ChangeEvent),
+    /// The stream ended (collection/database dropped or renamed, or the
+    /// resume token aged out) — `replicate()` treats this as a clean stop,
+    /// matching how Postgres's own `replicate()` treats logical-replication
+    /// stream end.
+    Invalidate,
+}
+
+fn bson_doc_field<'a>(doc: &'a [(String, BsonValue)], key: &str) -> Option<&'a Vec<(String, BsonValue)>> {
+    doc.iter().find(|(k, _)| k == key).and_then(|(_, v)| if let BsonValue::Document(d) = v { Some(d) } else { None })
+}
+
+fn bson_str_field(doc: &[(String, BsonValue)], key: &str) -> Option<String> {
+    doc.iter().find(|(k, _)| k == key).and_then(|(_, v)| if let BsonValue::String(s) = v { Some(s.clone()) } else { None })
+}
+
+/// Maps one MongoDB change-stream event document to a `ChangeEvent`,
+/// filtering out events for collections not in `known_tables` (the
+/// whole-database stream covers every collection, not just migrating
+/// tables) and events this simplification doesn't handle: `"update"`
+/// without a resolvable `fullDocument` (the document was deleted again
+/// before `updateLookup` could resolve it — a real edge case even with
+/// that option set) is dropped rather than fabricated from the partial
+/// `updateDescription` diff; `"drop"`/`"rename"`/`"dropDatabase"` are
+/// dropped as out of scope for a per-row migration feed.
+fn map_change_event(doc: &[(String, BsonValue)], known_tables: &HashSet<&str>) -> Result<Option<MappedChange>> {
+    let Some(op_type) = bson_str_field(doc, "operationType") else { return Ok(None) };
+
+    if op_type == "invalidate" {
+        return Ok(Some(MappedChange::Invalidate));
+    }
+    if !matches!(op_type.as_str(), "insert" | "update" | "replace" | "delete") {
+        return Ok(None);
+    }
+
+    let Some(table) = bson_doc_field(doc, "ns").and_then(|ns| bson_str_field(ns, "coll")) else { return Ok(None) };
+    if !known_tables.contains(table.as_str()) {
+        return Ok(None);
+    }
+
+    let full_document = bson_doc_field(doc, "fullDocument").cloned();
+    let document_key = bson_doc_field(doc, "documentKey").cloned();
+
+    let event = match op_type.as_str() {
+        "insert" | "replace" => match full_document {
+            Some(full) => ChangeEvent::Insert { table, row: doc_to_row(&full) },
+            None => return Ok(None),
+        },
+        "update" => match (full_document, document_key) {
+            (Some(full), Some(key)) => ChangeEvent::Update { table, key: doc_to_row(&key), row: doc_to_row(&full) },
+            _ => return Ok(None),
+        },
+        "delete" => match document_key {
+            Some(key) => ChangeEvent::Delete { table, key: doc_to_row(&key) },
+            None => return Ok(None),
+        },
+        _ => unreachable!("filtered above"),
+    };
+    Ok(Some(MappedChange::Event(event)))
+}
+
+/// A change event's `_id` is itself a BSON document whose `_data` field is,
+/// per the MongoDB change-streams spec, always a printable string — used
+/// directly as Harbor's resume token (no extra encoding needed) and passed
+/// back verbatim as `resumeAfter._data` to resume.
+fn extract_resume_token(doc: &[(String, BsonValue)]) -> Option<String> {
+    bson_doc_field(doc, "_id").and_then(|id_doc| bson_str_field(id_doc, "_data"))
 }
 
 #[cfg(test)]
@@ -615,5 +808,134 @@ mod tests {
         let doc = vec![("name".to_string(), BsonValue::String("Ada".to_string()))];
         let row = doc_to_row(&doc);
         assert_eq!(row[0], None);
+    }
+
+    #[test]
+    fn nested_document_and_array_round_trip_through_decoder() {
+        let doc = bson_build_doc(vec![
+            bson_encode_document("stage", vec![bson_encode_string_typed("fullDocument", "updateLookup"), bson_encode_int32("x", 5)]),
+            bson_encode_array("pipeline", vec![bson_encode_document("0", vec![bson_encode_int32("y", 1)])]),
+        ]);
+        let decoded = bson_decode_doc(&doc).unwrap();
+
+        let BsonValue::Document(stage) = &decoded.iter().find(|(k, _)| k == "stage").unwrap().1 else { panic!("expected document") };
+        assert!(matches!(stage.iter().find(|(k, _)| k == "fullDocument").unwrap().1, BsonValue::String(ref s) if s == "updateLookup"));
+        assert!(matches!(stage.iter().find(|(k, _)| k == "x").unwrap().1, BsonValue::Int32(5)));
+
+        let BsonValue::Array(pipeline) = &decoded.iter().find(|(k, _)| k == "pipeline").unwrap().1 else { panic!("expected array") };
+        assert_eq!(pipeline.len(), 1);
+        let BsonValue::Document(first_stage) = &pipeline[0] else { panic!("expected document") };
+        assert!(matches!(first_stage.iter().find(|(k, _)| k == "y").unwrap().1, BsonValue::Int32(1)));
+    }
+
+    fn ns_doc(db: &str, coll: &str) -> BsonValue {
+        BsonValue::Document(vec![("db".to_string(), BsonValue::String(db.to_string())), ("coll".to_string(), BsonValue::String(coll.to_string()))])
+    }
+
+    fn id_key_doc(id: &str) -> BsonValue {
+        BsonValue::Document(vec![("_id".to_string(), BsonValue::String(id.to_string()))])
+    }
+
+    #[test]
+    fn map_change_event_insert() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![
+            ("operationType".to_string(), BsonValue::String("insert".to_string())),
+            ("ns".to_string(), ns_doc("test", "orders")),
+            ("fullDocument".to_string(), id_key_doc("1")),
+        ];
+        match map_change_event(&doc, &known).unwrap().unwrap() {
+            MappedChange::Event(ChangeEvent::Insert { table, row }) => {
+                assert_eq!(table, "orders");
+                assert_eq!(row[0], Some(b"1".to_vec()));
+            }
+            _ => panic!("expected Insert event"),
+        }
+    }
+
+    #[test]
+    fn map_change_event_update_with_full_document() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![
+            ("operationType".to_string(), BsonValue::String("update".to_string())),
+            ("ns".to_string(), ns_doc("test", "orders")),
+            ("documentKey".to_string(), id_key_doc("1")),
+            ("fullDocument".to_string(), id_key_doc("1")),
+        ];
+        match map_change_event(&doc, &known).unwrap().unwrap() {
+            MappedChange::Event(ChangeEvent::Update { table, key, row }) => {
+                assert_eq!(table, "orders");
+                assert_eq!(key[0], Some(b"1".to_vec()));
+                assert_eq!(row[0], Some(b"1".to_vec()));
+            }
+            _ => panic!("expected Update event"),
+        }
+    }
+
+    #[test]
+    fn map_change_event_update_without_full_document_is_skipped() {
+        // fullDocument absent (e.g. deleted before updateLookup resolved) — a
+        // documented gap, not fabricated from the partial updateDescription diff.
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![
+            ("operationType".to_string(), BsonValue::String("update".to_string())),
+            ("ns".to_string(), ns_doc("test", "orders")),
+            ("documentKey".to_string(), id_key_doc("1")),
+        ];
+        assert!(map_change_event(&doc, &known).unwrap().is_none());
+    }
+
+    #[test]
+    fn map_change_event_delete() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![
+            ("operationType".to_string(), BsonValue::String("delete".to_string())),
+            ("ns".to_string(), ns_doc("test", "orders")),
+            ("documentKey".to_string(), id_key_doc("1")),
+        ];
+        match map_change_event(&doc, &known).unwrap().unwrap() {
+            MappedChange::Event(ChangeEvent::Delete { table, key }) => {
+                assert_eq!(table, "orders");
+                assert_eq!(key[0], Some(b"1".to_vec()));
+            }
+            _ => panic!("expected Delete event"),
+        }
+    }
+
+    #[test]
+    fn map_change_event_invalidate() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![("operationType".to_string(), BsonValue::String("invalidate".to_string()))];
+        assert!(matches!(map_change_event(&doc, &known).unwrap().unwrap(), MappedChange::Invalidate));
+    }
+
+    #[test]
+    fn map_change_event_filters_unknown_collections() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![
+            ("operationType".to_string(), BsonValue::String("insert".to_string())),
+            ("ns".to_string(), ns_doc("test", "other_collection")),
+            ("fullDocument".to_string(), id_key_doc("1")),
+        ];
+        assert!(map_change_event(&doc, &known).unwrap().is_none());
+    }
+
+    #[test]
+    fn map_change_event_drops_ddl_style_operations() {
+        let known: HashSet<&str> = ["orders"].into_iter().collect();
+        let doc = vec![("operationType".to_string(), BsonValue::String("drop".to_string())), ("ns".to_string(), ns_doc("test", "orders"))];
+        assert!(map_change_event(&doc, &known).unwrap().is_none());
+    }
+
+    #[test]
+    fn extract_resume_token_reads_data_field() {
+        let doc = vec![("_id".to_string(), BsonValue::Document(vec![("_data".to_string(), BsonValue::String("82650A...".to_string()))]))];
+        assert_eq!(extract_resume_token(&doc), Some("82650A...".to_string()));
+    }
+
+    #[test]
+    fn extract_resume_token_none_when_missing() {
+        let doc = vec![("operationType".to_string(), BsonValue::String("insert".to_string()))];
+        assert_eq!(extract_resume_token(&doc), None);
     }
 }

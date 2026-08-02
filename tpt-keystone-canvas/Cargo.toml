@@ -36,6 +36,8 @@ features = [
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
     "MouseEvent",
+    "WheelEvent",
+    "Event",
     "Request",
     "RequestInit",
     "RequestMode",

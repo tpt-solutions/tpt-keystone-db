@@ -67,9 +67,11 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
 
 ## Frontend, SDKs, and migration tooling (separate crates/packages)
 
-- **`tpt-keystone-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, reactive
-  primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/`<Canvas.Graph>`/`<Canvas.VectorSearch>`/
-  `<Canvas.Document>`/`<Canvas.AgentMonitor>` components, auto WebSocket sync with Flux).
+- **`tpt-keystone-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, an
+  experimental WebGPU renderer for `<Canvas.TimeSeries>` that feature-detects `navigator.gpu` and falls
+  back to Canvas2D automatically, reactive primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/
+  `<Canvas.Graph>`/`<Canvas.VectorSearch>`/`<Canvas.Document>`/`<Canvas.AgentMonitor>` components, auto
+  WebSocket sync with Flux).
 - **`packages/sdk-web`**, **`packages/sdk-server`**, **`packages/sdk-edge`** — TypeScript SDKs for
   browsers, Node/Deno/Bun, and edge/Workers runtimes, each with a hand-written Postgres-wire or
   HTTP/JSON client (no `pg`/`postgres` deps).
@@ -88,7 +90,12 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
   verified against a live server; MongoDB/Neo4j/MySQL/MSSQL/InfluxDB/Kafka/vector-DB (Pinecone/Weaviate/
   Qdrant)/Elasticsearch/Oracle all now have real protocol-level source connectors, though most (and
   Oracle especially, which reverse-engineers the TTC wire protocol) are unverified against a live server
-  of that kind. See `TODO.md` Phase 15 for the exact per-connector state.
+  of that kind. Since Meridian/Prism/Chronos/Plexus/Canopy are SQL-extension features of Keystone itself
+  rather than separate services, each source's data also lands with the matching engine-native index
+  (spatial for PostGIS, HNSW for the vector DBs, time-bucketed for InfluxDB, graph for Neo4j relationships)
+  instead of sitting as inert relational rows, and Kafka topics get an explicit, partition-matched
+  `CREATE TOPIC` in Flux rather than the default 1-partition auto-topic. See `TODO.md` Phase 15/8 for the
+  exact per-connector state.
 - **`tpt-keystone-operator/`** — a Kubernetes operator (kube-rs) for cluster lifecycle management.
 
 ## Getting started
@@ -161,10 +168,12 @@ See [`TODO.md`](TODO.md) for the full 17-phase plan (plus Phase 18/19 hardening 
 critically, the per-item honesty notes on what's verified vs. stubbed vs. explicitly scope-cut. Known
 open gaps across the whole platform: wire-level auth/TLS is opt-in, not mandatory, and off by default;
 no distributed (multi-node) secondary indexes for any of the six extension engines (all
-local/single-node); no benchmark harness (every throughput/latency figure in the specs is unverified);
-and the SDK-mobile targets are scaffolded but partially unverified — React Native and Flutter are
-test-verified in this repo, Kotlin/Android is unverified (no `gradle`/`kotlinc` here), and Swift/iOS is
-still blocked on platform availability (Harbor's source connectors are no longer stubs — see above).
+local/single-node); a real Criterion benchmark harness exists (`tpt-keystone/benches/keystone_bench.rs`,
+run via `cargo bench`) but only measures Keystone's own engine-only throughput/latency in-process against
+local-fs storage — not real S3/NVMe I/O, and not a head-to-head against another database; and the
+SDK-mobile targets are scaffolded but partially unverified — React Native and Flutter are test-verified
+in this repo, Kotlin/Android is unverified (no `gradle`/`kotlinc` here), and Swift/iOS is still blocked on
+platform availability (Harbor's source connectors are no longer stubs — see above).
 
 ## License
 

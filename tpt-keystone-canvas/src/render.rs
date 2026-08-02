@@ -17,6 +17,22 @@ pub struct Canvas2d {
     pub height: f64,
 }
 
+/// Reads `<canvas id="{element_id}">`'s pixel dimensions (`width`/`height`
+/// DOM attributes) without requesting any rendering context on it. Needed
+/// ahead of the WebGPU-vs-Canvas2D async race (see `lib.rs` module docs):
+/// `Canvas2d::mount`'s `get_context("2d")` call — and equally, WebGPU
+/// negotiation's `get_context("webgpu")` — permanently commits the canvas to
+/// that context type, so anything that needs the size *before* the race
+/// decides a backend (e.g. seeding a component's initial `ViewTransform` or
+/// laying out a graph) has to read it through the plain DOM property instead.
+pub fn canvas_dimensions(element_id: &str) -> Option<(f64, f64)> {
+    let window = web_sys::window()?;
+    let document = window.document()?;
+    let element = document.get_element_by_id(element_id)?;
+    let canvas: HtmlCanvasElement = element.dyn_into().ok()?;
+    Some((canvas.width() as f64, canvas.height() as f64))
+}
+
 impl Canvas2d {
     /// Looks up `<canvas id="{element_id}">` in the document and grabs its
     /// 2D rendering context.

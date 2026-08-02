@@ -9,12 +9,16 @@
 //! - Verification Engine: per-row xxHash3 checksums + row-count diffing
 //!   ([`verify`]).
 //! - Discovery, snapshot, and checksums are real for every named source
-//!   below; only live CDC (`replicate`) is a named, documented scope cut per
-//!   connector — see each `sources::*` module's own doc for its reason (no
-//!   standard change-feed API, or a substantial separate protocol effort).
-//!   **Harbor/PG** additionally has real `pgoutput` logical-replication CDC
-//!   ([`sources::postgres`]), and **Harbor/Stream** (Kafka) gets CDC for
-//!   free since tailing its own log already is one.
+//!   below. Live CDC (`replicate`) is real for **Harbor/PG**/**Harbor/GIS**
+//!   (`pgoutput` logical replication, [`sources::postgres`]), **Harbor/
+//!   Stream** (Kafka gets CDC for free since tailing its own log already is
+//!   one), **Harbor/MSSQL** (polls SQL Server's own CDC tables, requires CDC
+//!   enabled on the source database/tables), and **Harbor/Mongo**
+//!   (`$changeStream`, requires a replica set or sharded cluster). It's a
+//!   named, documented scope cut for MySQL/Oracle (binlog/LogMiner CDC not
+//!   yet written) and for Elasticsearch/Neo4j/InfluxDB/vector sources/ODBC
+//!   (no standard change-feed API to tap at all) — see each `sources::*`
+//!   module's own doc for its specific reason.
 //! - Keystone target connector ([`targets::keystone`]) — the single target
 //!   every source migrates through, since Meridian/Prism/Chronos/Plexus/
 //!   Canopy are SQL-extension features of `tpt-keystone` itself rather than

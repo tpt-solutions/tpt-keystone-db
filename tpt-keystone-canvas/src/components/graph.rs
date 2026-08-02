@@ -3,7 +3,9 @@
 //! client-side; "native traversal controls" from the spec is a documented
 //! scope cut (no interactive path-query UI — Plexus's traversal table
 //! functions are already queryable via plain SQL, which is what `edges_sql`
-//! below runs).
+//! below runs). Phase 10 added a pan/zoom `ViewTransform` (mouse-drag pan
+//! on empty space, wheel zoom, still-supported node dragging) and an opt-in
+//! WebGPU renderer (`webgpu::GpuGraphRenderer`) — see `new`'s doc comment.
 //!
 //! Two separate queries rather than one, since Plexus returns vertices and
 //! edges as distinct row shapes: `nodes_sql` must select an `id` column,
@@ -139,166 +141,325 @@ mod wasm_impl {
 
     use super::{fruchterman_reingold, resolve_edges, translate_match_result};
     use crate::client::{KeystoneClient, QueryResult};
-    use crate::render::Canvas2d;
+    use crate::reactive::Signal;
+    use crate::render::{canvas_dimensions, Canvas2d};
+    use crate::view_transform::{zoom_factor_from_wheel_delta, ViewTransform};
+    use crate::webgpu::GpuGraphRenderer;
 
-#[wasm_bindgen]
-pub struct CanvasGraph {
-    _canvas: Canvas2d,
-    positions: Rc<RefCell<Vec<(f64, f64)>>>,
-    _node_ws: Option<web_sys::WebSocket>,
-    _edge_ws: Option<web_sys::WebSocket>,
-    _effect: Rc<dyn std::any::Any>,
-}
+    /// Fixed on-screen node quad half-width, CSS pixels — matches the
+    /// existing Canvas2D node radius (`canvas.circle(x, y, 8.0, ...)`).
+    const NODE_RADIUS_PX: f64 = 8.0;
+    /// Mousedown-vs-node hit-test radius, CSS pixels (converted to data
+    /// space via `ViewTransform::screen_to_data_distance` before comparing
+    /// against `positions`, which are stored in data space).
+    const NODE_HIT_RADIUS_PX: f64 = 10.0;
 
-#[wasm_bindgen]
-impl CanvasGraph {
-    #[wasm_bindgen(constructor)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        canvas_id: &str,
-        http_base: &str,
-        ws_base: &str,
-        nodes_sql: &str,
-        edges_sql: &str,
-        realtime_topic: &str,
-    ) -> Result<CanvasGraph, JsValue> {
-        let canvas = Canvas2d::mount(canvas_id).map_err(|e| JsValue::from_str(&e))?;
-        let client = Rc::new(KeystoneClient::new(http_base, ws_base));
-        let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
-        let (nodes, node_ws) = client.use_keystone_query(nodes_sql, topic);
-        let (edges, edge_ws) = client.use_keystone_query(edges_sql, topic);
-
-        let positions = Rc::new(RefCell::new(Vec::new()));
-        let redraw_canvas = Canvas2d { ctx: canvas.ctx.clone(), width: canvas.width, height: canvas.height };
-        let redraw_positions = positions.clone();
-        let effect = crate::reactive::create_effect(move || {
-            let node_result = nodes.get();
-            let edge_result = edges.get();
-            draw(&redraw_canvas, &node_result, &edge_result, &redraw_positions);
-        });
-
-        let graph = CanvasGraph { _canvas: canvas, positions, _node_ws: node_ws, _edge_ws: edge_ws, _effect: effect };
-        graph.install_drag_handler(canvas_id)?;
-        Ok(graph)
+    /// Which backend ended up drawing this canvas — decided once,
+    /// asynchronously (see `CanvasGraph::new`'s doc comment).
+    enum Renderer {
+        Canvas2d(Canvas2d),
+        Gpu(GpuGraphRenderer),
     }
 
-    /// Like `new`, but consumes the result of a single GQL `MATCH` query
-    /// (see `gql::execute_match` server-side) which returns either edge
-    /// rows (`from`/`to`, or `from_id`/`to_id`) or a node list (`id`).
-    /// `translate_match_result` reshapes it client-side into the node/edge
-    /// shapes `draw` expects — no server change required. Exposed to JS as
-    /// `CanvasGraph.fromMatch(...)` (wasm-bindgen allows only one
-    /// `#[constructor]`, so this is a static factory rather than a second ctor).
-    #[wasm_bindgen(js_name = "fromMatch")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_from_match(
-        canvas_id: &str,
-        http_base: &str,
-        ws_base: &str,
-        match_sql: &str,
-        realtime_topic: &str,
-    ) -> Result<CanvasGraph, JsValue> {
-        let canvas = Canvas2d::mount(canvas_id).map_err(|e| JsValue::from_str(&e))?;
-        let client = Rc::new(KeystoneClient::new(http_base, ws_base));
-        let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
-        let (data, node_ws) = client.use_keystone_query(match_sql, topic);
-
-        let positions = Rc::new(RefCell::new(Vec::new()));
-        let draw_canvas = Canvas2d { ctx: canvas.ctx.clone(), width: canvas.width, height: canvas.height };
-        let draw_positions = positions.clone();
-        let effect = crate::reactive::create_effect(move || {
-            let result = data.get();
-            let (node_ids, edges) = translate_match_result(&result);
-            let nodes = QueryResult {
-                columns: vec!["id".into()],
-                rows: node_ids.iter().map(|id| vec![Some(id.clone())]).collect(),
-            };
-            let edges = QueryResult {
-                columns: vec!["from".into(), "to".into()],
-                rows: edges
-                    .iter()
-                    .map(|(a, b)| vec![Some(node_ids[*a].clone()), Some(node_ids[*b].clone())])
-                    .collect(),
-            };
-            draw(&draw_canvas, &nodes, &edges, &draw_positions);
-        });
-
-        let graph = CanvasGraph { _canvas: canvas, positions, _node_ws: node_ws, _edge_ws: None, _effect: effect };
-        graph.install_drag_handler(canvas_id)?;
-        Ok(graph)
+    #[wasm_bindgen]
+    pub struct CanvasGraph {
+        positions: Rc<RefCell<Vec<(f64, f64)>>>,
+        view: Rc<RefCell<ViewTransform>>,
+        redraw_trigger: Signal<u32>,
+        _node_ws: Option<web_sys::WebSocket>,
+        _edge_ws: Option<web_sys::WebSocket>,
+        _effect: Rc<dyn std::any::Any>,
     }
 
-    fn install_drag_handler(&self, canvas_id: &str) -> Result<(), JsValue> {
-        let document = web_sys::window().unwrap().document().unwrap();
-        let element = document.get_element_by_id(canvas_id).ok_or("canvas element missing")?;
-        let canvas_el: web_sys::HtmlCanvasElement = element.dyn_into()?;
-        let positions = self.positions.clone();
-        let dragging = Rc::new(RefCell::new(None::<usize>));
+    /// Races `GpuGraphRenderer::try_init` against a Canvas2D fallback
+    /// exactly like `CanvasTimeSeries`/`CanvasMap` — nothing is drawn on
+    /// `canvas_id` until the race resolves. Shared by `new` and
+    /// `new_from_match` since both need identical setup here. Returns the
+    /// (still-empty) renderer slot alongside a fresh `view`/`redraw_trigger`
+    /// and this canvas's pixel dimensions (captured once via
+    /// `canvas_dimensions`, unaffected by which backend wins — see
+    /// `render::canvas_dimensions`'s doc comment for why this can't be read
+    /// off either context type directly).
+    fn init_renderer(canvas_id: &str) -> (Rc<RefCell<Option<Renderer>>>, Rc<RefCell<ViewTransform>>, Signal<u32>, f64, f64) {
+        let (width, height) = canvas_dimensions(canvas_id).unwrap_or((0.0, 0.0));
+        let renderer: Rc<RefCell<Option<Renderer>>> = Rc::new(RefCell::new(None));
+        let redraw_trigger: Signal<u32> = Signal::new(0);
+        let view: Rc<RefCell<ViewTransform>> = Rc::new(RefCell::new(ViewTransform::identity()));
 
-        let down_positions = positions.clone();
-        let down_dragging = dragging.clone();
-        let onmousedown = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
-            let (cx, cy) = (evt.offset_x() as f64, evt.offset_y() as f64);
-            *down_dragging.borrow_mut() = down_positions.borrow().iter().position(|(x, y)| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() < 10.0);
+        let init_renderer = renderer.clone();
+        let init_canvas_id = canvas_id.to_string();
+        let init_redraw_trigger = redraw_trigger.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let chosen = match GpuGraphRenderer::try_init(&init_canvas_id).await {
+                Some(gpu) => Some(Renderer::Gpu(gpu)),
+                // WebGPU wasn't available/negotiation failed *before* any
+                // context was requested on this canvas — `"2d"` is still
+                // free to request.
+                None => Canvas2d::mount(&init_canvas_id).ok().map(Renderer::Canvas2d),
+            };
+            *init_renderer.borrow_mut() = chosen;
+            init_redraw_trigger.update(|n| n + 1);
         });
-        canvas_el.set_onmousedown(Some(onmousedown.as_ref().unchecked_ref()));
-        onmousedown.forget();
 
-        let move_positions = positions.clone();
-        let move_dragging = dragging.clone();
-        let onmousemove = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
-            if let Some(idx) = *move_dragging.borrow() {
-                if let Some(p) = move_positions.borrow_mut().get_mut(idx) {
-                    *p = (evt.offset_x() as f64, evt.offset_y() as f64);
+        (renderer, view, redraw_trigger, width, height)
+    }
+
+    #[wasm_bindgen]
+    impl CanvasGraph {
+        /// Mounts onto `<canvas id="{canvas_id}">`, running `nodes_sql`/
+        /// `edges_sql` once and re-running both on every message from
+        /// `realtime_topic` (pass `""` for no live updates).
+        ///
+        /// Rendering backend: races `GpuGraphRenderer::try_init` against a
+        /// Canvas2D fallback (see `init_renderer`) — node-id text labels
+        /// only ever render on the Canvas2D path (no glyph atlas in the
+        /// WebGPU PoC, see `webgpu::GpuGraphRenderer`'s module docs).
+        #[wasm_bindgen(constructor)]
+        pub fn new(
+            canvas_id: &str,
+            http_base: &str,
+            ws_base: &str,
+            nodes_sql: &str,
+            edges_sql: &str,
+            realtime_topic: &str,
+        ) -> Result<CanvasGraph, JsValue> {
+            let client = Rc::new(KeystoneClient::new(http_base, ws_base));
+            let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
+            let (nodes, node_ws) = client.use_keystone_query(nodes_sql, topic);
+            let (edges, edge_ws) = client.use_keystone_query(edges_sql, topic);
+
+            let (renderer, view, redraw_trigger, width, height) = init_renderer(canvas_id);
+
+            let positions = Rc::new(RefCell::new(Vec::new()));
+            let draw_nodes = nodes.clone();
+            let draw_edges = edges.clone();
+            let draw_positions = positions.clone();
+            let draw_renderer = renderer.clone();
+            let draw_view = view.clone();
+            let draw_redraw_trigger = redraw_trigger.clone();
+            let effect = crate::reactive::create_effect(move || {
+                let node_result = draw_nodes.get();
+                let edge_result = draw_edges.get();
+                let _ = draw_redraw_trigger.get(); // subscribe: re-run once the renderer resolves or the view pans/zooms/drags
+                if let Some(r) = draw_renderer.borrow().as_ref() {
+                    let view_snapshot = *draw_view.borrow();
+                    draw(r, &node_result, &edge_result, &draw_positions, view_snapshot, width, height);
                 }
-            }
-        });
-        canvas_el.set_onmousemove(Some(onmousemove.as_ref().unchecked_ref()));
-        onmousemove.forget();
+            });
 
-        let onmouseup = Closure::<dyn FnMut()>::new(move || {
-            *dragging.borrow_mut() = None;
-        });
-        canvas_el.set_onmouseup(Some(onmouseup.as_ref().unchecked_ref()));
-        onmouseup.forget();
-        Ok(())
-    }
-}
+            let graph = CanvasGraph { positions, view, redraw_trigger, _node_ws: node_ws, _edge_ws: edge_ws, _effect: effect };
+            graph.install_pointer_handlers(canvas_id)?;
+            Ok(graph)
+        }
 
-fn draw(canvas: &Canvas2d, nodes: &QueryResult, edges: &QueryResult, positions_out: &Rc<RefCell<Vec<(f64, f64)>>>) {
-    canvas.clear();
-    let Some(id_idx) = nodes.columns.first().map(|_| 0usize) else { return };
-    let node_ids: Vec<String> = nodes.rows.iter().map(|row| row.get(id_idx).and_then(|c| c.clone()).unwrap_or_default()).collect();
-    if node_ids.is_empty() {
-        return;
-    }
+        /// Like `new`, but consumes the result of a single GQL `MATCH` query
+        /// (see `gql::execute_match` server-side) which returns either edge
+        /// rows (`from`/`to`, or `from_id`/`to_id`) or a node list (`id`).
+        /// `translate_match_result` reshapes it client-side into the node/edge
+        /// shapes `draw` expects — no server change required. Exposed to JS as
+        /// `CanvasGraph.fromMatch(...)` (wasm-bindgen allows only one
+        /// `#[constructor]`, so this is a static factory rather than a second ctor).
+        #[wasm_bindgen(js_name = "fromMatch")]
+        #[allow(clippy::too_many_arguments)]
+        pub fn new_from_match(
+            canvas_id: &str,
+            http_base: &str,
+            ws_base: &str,
+            match_sql: &str,
+            realtime_topic: &str,
+        ) -> Result<CanvasGraph, JsValue> {
+            let client = Rc::new(KeystoneClient::new(http_base, ws_base));
+            let topic = if realtime_topic.is_empty() { None } else { Some(realtime_topic) };
+            let (data, node_ws) = client.use_keystone_query(match_sql, topic);
 
-    let edge_pairs: Vec<(String, String)> = if edges.columns.len() >= 2 {
-        edges
-            .rows
-            .iter()
-            .filter_map(|row| Some((row.first()?.clone()?, row.get(1)?.clone()?)))
-            .collect()
-    } else {
-        vec![]
-    };
-    let resolved_edges = resolve_edges(&node_ids, &edge_pairs);
+            let (renderer, view, redraw_trigger, width, height) = init_renderer(canvas_id);
 
-    let mut positions = positions_out.borrow_mut();
-    if positions.len() != node_ids.len() {
-        *positions = fruchterman_reingold(node_ids.len(), &resolved_edges, canvas.width, canvas.height, 50);
-    }
+            let positions = Rc::new(RefCell::new(Vec::new()));
+            let draw_data = data.clone();
+            let draw_positions = positions.clone();
+            let draw_renderer = renderer.clone();
+            let draw_view = view.clone();
+            let draw_redraw_trigger = redraw_trigger.clone();
+            let effect = crate::reactive::create_effect(move || {
+                let result = draw_data.get();
+                let _ = draw_redraw_trigger.get();
+                let (node_ids, edges) = translate_match_result(&result);
+                let nodes = QueryResult {
+                    columns: vec!["id".into()],
+                    rows: node_ids.iter().map(|id| vec![Some(id.clone())]).collect(),
+                };
+                let edges = QueryResult {
+                    columns: vec!["from".into(), "to".into()],
+                    rows: edges
+                        .iter()
+                        .map(|(a, b)| vec![Some(node_ids[*a].clone()), Some(node_ids[*b].clone())])
+                        .collect(),
+                };
+                if let Some(r) = draw_renderer.borrow().as_ref() {
+                    let view_snapshot = *draw_view.borrow();
+                    draw(r, &nodes, &edges, &draw_positions, view_snapshot, width, height);
+                }
+            });
 
-    for &(a, b) in &resolved_edges {
-        canvas.line(positions[a].0, positions[a].1, positions[b].0, positions[b].1, "#94a3b8", 1.0);
-    }
-    for (i, &(x, y)) in positions.iter().enumerate() {
-        canvas.circle(x, y, 8.0, "#16a34a");
-        if let Some(label) = node_ids.get(i) {
-            canvas.text(x + 10.0, y + 4.0, label, "#111");
+            let graph = CanvasGraph { positions, view, redraw_trigger, _node_ws: node_ws, _edge_ws: None, _effect: effect };
+            graph.install_pointer_handlers(canvas_id)?;
+            Ok(graph)
+        }
+
+        /// Wires wheel-to-zoom and a mousedown/mousemove/mouseup pointer
+        /// state machine: mousedown hit-tests against `positions` (data
+        /// space) via `view.to_data`/`screen_to_data_distance` to decide
+        /// node-drag vs. pan; a node-drag mousemove writes the new node
+        /// position through `view.to_data` (so it lands in the same data
+        /// space `positions` is stored in and `draw`'s `view.to_screen`
+        /// call places it back correctly), while a pan mousemove just
+        /// shifts `view`'s translation by the raw screen-space delta. Both
+        /// cases fire `redraw_trigger` on every move so dragging a node (or
+        /// panning) redraws immediately instead of waiting for an unrelated
+        /// data refetch.
+        fn install_pointer_handlers(&self, canvas_id: &str) -> Result<(), JsValue> {
+            let document = web_sys::window().unwrap().document().unwrap();
+            let element = document.get_element_by_id(canvas_id).ok_or("canvas element missing")?;
+            let canvas_el: web_sys::HtmlCanvasElement = element.dyn_into()?;
+
+            let wheel_view = self.view.clone();
+            let wheel_redraw = self.redraw_trigger.clone();
+            let onwheel = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::WheelEvent| {
+                evt.prevent_default();
+                let factor = zoom_factor_from_wheel_delta(evt.delta_y());
+                let (px, py) = (evt.offset_x() as f64, evt.offset_y() as f64);
+                wheel_view.borrow_mut().zoom(factor, px, py);
+                wheel_redraw.update(|n| n + 1);
+            });
+            canvas_el.set_onwheel(Some(onwheel.as_ref().unchecked_ref()));
+            onwheel.forget();
+
+            // `(last_x, last_y, dragging_node)` screen coords; `dragging_node
+            // = None` means the gesture pans the view instead of moving a
+            // node. `None` overall (not `Some((.., .., None))`) means no
+            // button is currently down.
+            let drag_state: Rc<RefCell<Option<(f64, f64, Option<usize>)>>> = Rc::new(RefCell::new(None));
+
+            let down_positions = self.positions.clone();
+            let down_view = self.view.clone();
+            let down_state = drag_state.clone();
+            let onmousedown = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                let (x, y) = (evt.offset_x() as f64, evt.offset_y() as f64);
+                let view = *down_view.borrow();
+                let (data_x, data_y) = view.to_data(x, y);
+                let threshold = view.screen_to_data_distance(NODE_HIT_RADIUS_PX);
+                let hit = down_positions
+                    .borrow()
+                    .iter()
+                    .position(|(px, py)| ((px - data_x).powi(2) + (py - data_y).powi(2)).sqrt() < threshold);
+                *down_state.borrow_mut() = Some((x, y, hit));
+            });
+            canvas_el.set_onmousedown(Some(onmousedown.as_ref().unchecked_ref()));
+            onmousedown.forget();
+
+            let move_state = drag_state.clone();
+            let move_positions = self.positions.clone();
+            let move_view = self.view.clone();
+            let move_redraw = self.redraw_trigger.clone();
+            let onmousemove = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                let mut state = move_state.borrow_mut();
+                let Some((last_x, last_y, node)) = *state else { return };
+                let (x, y) = (evt.offset_x() as f64, evt.offset_y() as f64);
+                match node {
+                    Some(idx) => {
+                        let (data_x, data_y) = move_view.borrow().to_data(x, y);
+                        if let Some(p) = move_positions.borrow_mut().get_mut(idx) {
+                            *p = (data_x, data_y);
+                        }
+                    }
+                    None => {
+                        move_view.borrow_mut().pan(x - last_x, y - last_y);
+                    }
+                }
+                move_redraw.update(|n| n + 1);
+                *state = Some((x, y, node));
+            });
+            canvas_el.set_onmousemove(Some(onmousemove.as_ref().unchecked_ref()));
+            onmousemove.forget();
+
+            let onmouseup = Closure::<dyn FnMut()>::new(move || {
+                *drag_state.borrow_mut() = None;
+            });
+            canvas_el.set_onmouseup(Some(onmouseup.as_ref().unchecked_ref()));
+            onmouseup.forget();
+            Ok(())
         }
     }
-}
+
+    /// Resolves `nodes`/`edges` into ids + index pairs, lays out `positions`
+    /// (data space, persistent across redraws — only recomputed when the
+    /// node count changes, so an in-progress drag or pan/zoom survives an
+    /// unrelated data refetch) the first time a given node count is seen,
+    /// and draws through `view` for the current backend.
+    fn draw(
+        renderer: &Renderer,
+        nodes: &QueryResult,
+        edges: &QueryResult,
+        positions_out: &Rc<RefCell<Vec<(f64, f64)>>>,
+        view: ViewTransform,
+        width: f64,
+        height: f64,
+    ) {
+        let Some(id_idx) = nodes.columns.first().map(|_| 0usize) else { return };
+        let node_ids: Vec<String> = nodes.rows.iter().map(|row| row.get(id_idx).and_then(|c| c.clone()).unwrap_or_default()).collect();
+        if node_ids.is_empty() {
+            return;
+        }
+
+        let edge_pairs: Vec<(String, String)> = if edges.columns.len() >= 2 {
+            edges
+                .rows
+                .iter()
+                .filter_map(|row| Some((row.first()?.clone()?, row.get(1)?.clone()?)))
+                .collect()
+        } else {
+            vec![]
+        };
+        let resolved_edges = resolve_edges(&node_ids, &edge_pairs);
+
+        let mut positions = positions_out.borrow_mut();
+        if positions.len() != node_ids.len() {
+            *positions = fruchterman_reingold(node_ids.len(), &resolved_edges, width, height, 50);
+        }
+
+        match renderer {
+            Renderer::Canvas2d(canvas) => {
+                canvas.clear();
+                for &(a, b) in &resolved_edges {
+                    let (ax, ay) = view.to_screen(positions[a].0, positions[a].1);
+                    let (bx, by) = view.to_screen(positions[b].0, positions[b].1);
+                    canvas.line(ax, ay, bx, by, "#94a3b8", 1.0);
+                }
+                for (i, &(x, y)) in positions.iter().enumerate() {
+                    let (sx, sy) = view.to_screen(x, y);
+                    canvas.circle(sx, sy, NODE_RADIUS_PX * view.scale, "#16a34a");
+                    if let Some(label) = node_ids.get(i) {
+                        canvas.text(sx + 10.0, sy + 4.0, label, "#111");
+                    }
+                }
+            }
+            // Node-id text has no WebGPU path — see `webgpu::GpuGraphRenderer`'s
+            // module docs.
+            Renderer::Gpu(gpu) => {
+                if width <= 0.0 || height <= 0.0 {
+                    return;
+                }
+                let normalized_nodes: Vec<(f64, f64)> = positions
+                    .iter()
+                    .map(|&(x, y)| {
+                        let (sx, sy) = view.to_screen(x, y);
+                        (sx / width, sy / height)
+                    })
+                    .collect();
+                gpu.draw_normalized(&normalized_nodes, &resolved_edges, NODE_RADIUS_PX * view.scale);
+            }
+        }
+    }
 } // mod wasm_impl
 
 #[cfg(target_arch = "wasm32")]

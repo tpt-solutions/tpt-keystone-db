@@ -10,10 +10,13 @@ row-count diffing.
   `pgoutput` logical-replication CDC, live cutover
 - Discovery, snapshot, and verification checksums for every other named source too — PostGIS, MySQL,
   MSSQL, Oracle, MongoDB, Neo4j, InfluxDB, Kafka, Elasticsearch, Pinecone/Weaviate/Qdrant, and ODBC
-  (Oracle/MySQL/MSSQL/DB2/etc. via the OS driver manager). Live CDC (`replicate`) is a named, documented
-  scope cut per connector — see each `sources::*` module's doc comment for why (no standard change-feed
-  API, or a substantial separate protocol effort) — except Kafka, which gets CDC for free since tailing
-  its own log already is one.
+  (Oracle/MySQL/MSSQL/DB2/etc. via the OS driver manager). Live CDC (`replicate`) is also real for
+  **Harbor/MSSQL** (polls SQL Server's own CDC tables — requires CDC enabled on the source database/
+  tables), **Harbor/Mongo** (`$changeStream` — requires a replica set or sharded cluster), and Kafka
+  (gets CDC for free since tailing its own log already is one). It's a named, documented scope cut for
+  MySQL/Oracle (binlog/LogMiner CDC not yet written) and for Elasticsearch/Neo4j/InfluxDB/vector
+  sources/ODBC (no standard change-feed API to tap at all) — see each `sources::*` module's doc comment
+  for its specific reason.
 - Keystone target connector (speaks the same hand-written Postgres wire protocol v3 as `tpt-keystone`) —
   the single target every source migrates through, since Meridian/Prism/Chronos/Plexus/Canopy are
   SQL-extension features of `tpt-keystone` itself, not separate services
