@@ -8,7 +8,7 @@ repository = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "README.md"
 keywords = ["database", "sql", "postgres", "lsm", "vector-search"]
-categories = ["database", "data-structures"]
+categories = ["database-implementations", "data-structures"]
 rust-version = "1.85"
 
 [lib]

@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "README.md"
-keywords = ["database", "migration", "etl", "postgres", "postgresql"]
-categories = ["database"]
+keywords = ["database", "migration", "etl", "cdc", "postgres"]
+categories = ["database", "command-line-utilities"]
 rust-version = "1.85"
 
 [lib]

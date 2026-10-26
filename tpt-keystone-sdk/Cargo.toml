@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpt-solutions/tpt-keystone-db"
 documentation = "https://github.com/tpt-solutions/tpt-keystone-db#readme"
 readme = "README.md"
-keywords = ["database", "sdk", "postgres", "client", "wasm"]
+keywords = ["database", "sdk", "postgres", "client", "ffi"]
 categories = ["database", "api-bindings"]
 rust-version = "1.85"
 
