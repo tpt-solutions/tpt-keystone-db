@@ -77,10 +77,18 @@ impl GrantObjectRepr {
         }
     }
 
+    pub fn topic(name: &str) -> Self {
+        GrantObjectRepr {
+            kind: "TOPIC",
+            name: name.to_string(),
+        }
+    }
+
     pub fn from_ast(o: &GrantObject) -> Self {
         match o {
             GrantObject::Table(t) => GrantObjectRepr::table(t),
             GrantObject::Database => GrantObjectRepr::database(),
+            GrantObject::Topic(t) => GrantObjectRepr::topic(t),
         }
     }
 
@@ -92,6 +100,7 @@ impl GrantObjectRepr {
     pub fn label(&self) -> String {
         match self.kind {
             "DATABASE" => "DATABASE".to_string(),
+            "TOPIC" => format!("TOPIC {}", self.name),
             _ => format!("TABLE {}", self.name),
         }
     }

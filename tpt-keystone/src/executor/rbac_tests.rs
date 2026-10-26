@@ -187,3 +187,70 @@ fn database_level_create_required_for_ddl() {
     assert!(dev.check(&db, &p("DROP TABLE t")).is_err());
 }
 
+
+#[test]
+fn topic_privileges_are_default_deny_and_granted_per_topic() {
+    let (db, _b, _l) = open_db();
+    let roles = RoleStore::new(db.clone()).unwrap();
+    roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();
+    roles.create_role("bob", false, false, None, &[]).unwrap();
+    let bob = Actor::for_role(&db, "bob").unwrap();
+
+    // No grant yet: a plain role can't read or write any topic.
+    assert!(bob.check_topic(&db, PrivilegeRepr::Select, "orders").is_err());
+    assert!(bob.check_topic(&db, PrivilegeRepr::Insert, "orders").is_err());
+
+    PrivilegeStore::new(db.clone())
+        .unwrap()
+        .grant("bob", PrivilegeRepr::Select, &GrantObjectRepr::topic("orders"))
+        .unwrap();
+
+    // The grant covers SELECT on that topic only.
+    assert!(bob.check_topic(&db, PrivilegeRepr::Select, "orders").is_ok());
+    assert!(bob.check_topic(&db, PrivilegeRepr::Insert, "orders").is_err());
+    assert!(bob.check_topic(&db, PrivilegeRepr::Select, "payments").is_err());
+
+    // Superusers and the zero-config actor bypass the check.
+    let admin = Actor::for_role(&db, "admin").unwrap();
+    assert!(admin.check_topic(&db, PrivilegeRepr::Insert, "payments").is_ok());
+    assert!(Actor::unrestricted()
+        .check_topic(&db, PrivilegeRepr::Insert, "payments")
+        .is_ok());
+}
+
+#[test]
+fn grant_on_topic_parses_into_a_topic_object() {
+    let stmt = parse("GRANT SELECT ON TOPIC orders TO bob").unwrap();
+    match stmt {
+        Stmt::Grant(g) => assert!(matches!(
+            g.object,
+            crate::sql::ast::GrantObject::Topic(ref t) if t == "orders"
+        )),
+        other => panic!("expected Grant, got {other:?}"),
+    }
+}
+
+#[test]
+fn flux_table_functions_need_select_on_their_topic_or_table() {
+    let (db, _b, _l) = open_db();
+    let roles = RoleStore::new(db.clone()).unwrap();
+    roles.create_role("admin", true, true, Some("pw"), &[]).unwrap();
+    roles.create_role("bob", false, false, None, &[]).unwrap();
+    let bob = Actor::for_role(&db, "bob").unwrap();
+    let windowed = p("SELECT * FROM flux_window_tumbling('orders', 1000)");
+    assert!(bob.check(&db, &windowed).is_err());
+
+    PrivilegeStore::new(db.clone())
+        .unwrap()
+        .grant("bob", PrivilegeRepr::Select, &GrantObjectRepr::topic("orders"))
+        .unwrap();
+    assert!(bob.check(&db, &windowed).is_ok());
+    // The grant is for `orders` only.
+    assert!(bob
+        .check(&db, &p("SELECT * FROM flux_window_tumbling('payments', 1000)"))
+        .is_err());
+    // A non-literal topic can't be checked, so it is refused for a non-superuser.
+    assert!(bob
+        .check(&db, &p("SELECT * FROM flux_window_tumbling(t, 1000)"))
+        .is_err());
+}

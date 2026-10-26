@@ -59,8 +59,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tracing::debug;
 
+use crate::executor::rbac::Actor;
 use crate::storage::database::Database;
 use crate::wire::bridge_auth::authenticate_basic;
+use crate::wire::privileges::PrivilegeRepr;
 use crate::wire::roles::RoleStore;
 
 // HTTP/2 flow-control default initial window size (RFC 7540 §6.9.2) and our
@@ -75,6 +77,7 @@ const GRPC_INTERNAL: u8 = 13;
 /// gRPC `UNAUTHENTICATED` — sent when `_tpt_roles` is non-empty and the
 /// request's `authorization` metadata header is missing/invalid.
 const GRPC_UNAUTHENTICATED: u8 = 16;
+const GRPC_PERMISSION_DENIED: u8 = 7;
 
 /// Drive one client TCP connection from the h2c preface through the request
 /// loop until it closes or errors. `roles`/```guard`` enable optional Basic
@@ -413,13 +416,16 @@ impl<W: AsyncWrite + Unpin> Conn<W> {
             // Authenticate via the shared bridge helper. Zero-config
             // (`_tpt_roles` empty) skips this; otherwise a valid
             // `Authorization: Basic` metadata header is required.
-            if let Err(e) = authenticate_basic(&self.roles, &self.db, authorization.as_deref()) {
-                self.send_error(frame.stream_id, GRPC_UNAUTHENTICATED, &format!("unauthorized: {e}"))
-                    .await?;
-                self.streams.remove(&frame.stream_id);
-                return Ok(());
-            }
-            let dispatch = dispatch(&path, &body, &self.db);
+            let actor = match authenticate_basic(&self.roles, &self.db, authorization.as_deref()) {
+                Ok(actor) => actor,
+                Err(e) => {
+                    self.send_error(frame.stream_id, GRPC_UNAUTHENTICATED, &format!("unauthorized: {e}"))
+                        .await?;
+                    self.streams.remove(&frame.stream_id);
+                    return Ok(());
+                }
+            };
+            let dispatch = dispatch(&path, &body, &self.db, &actor);
             drop(st);
             match dispatch {
                 DispatchResult::Unary(resp_headers, msg, trailers) => {
@@ -598,13 +604,18 @@ enum DispatchResult {
     Error(u8, String),
 }
 
-fn dispatch(path: &str, body: &[u8], db: &Database) -> DispatchResult {
+/// Routes one unary or streaming gRPC call. Each topic-scoped method checks
+/// the caller's privilege on the topic it names, before doing any work.
+fn dispatch(path: &str, body: &[u8], db: &Arc<Database>, actor: &Actor) -> DispatchResult {
     match path {
         "/flux.Flux/Publish" => {
             let req = match proto::PublishRequest::decode(&body_for(body)) {
                 Ok(r) => r,
                 Err(e) => return DispatchResult::Error(GRPC_INTERNAL, e.to_string()),
             };
+            if let Err(e) = actor.check_topic(db, PrivilegeRepr::Insert, &req.topic) {
+                return DispatchResult::Error(GRPC_PERMISSION_DENIED, e.to_string());
+            }
             match db.flux_publish(
                 &req.topic,
                 req.has_partition.then_some(req.partition),
@@ -627,6 +638,9 @@ fn dispatch(path: &str, body: &[u8], db: &Database) -> DispatchResult {
                 Ok(r) => r,
                 Err(e) => return DispatchResult::Error(GRPC_INTERNAL, e.to_string()),
             };
+            if let Err(e) = actor.check_topic(db, PrivilegeRepr::Select, &req.topic) {
+                return DispatchResult::Error(GRPC_PERMISSION_DENIED, e.to_string());
+            }
             match db.flux_poll(&req.topic, req.partition, &req.group, req.max as usize) {
                 Ok(records) => {
                     let recs: Vec<proto::Record> = records
@@ -653,6 +667,9 @@ fn dispatch(path: &str, body: &[u8], db: &Database) -> DispatchResult {
             if req.topic.is_empty() {
                 return DispatchResult::Error(GRPC_INTERNAL, "subscribe topic must not be empty".into());
             }
+            if let Err(e) = actor.check_topic(db, PrivilegeRepr::Select, &req.topic) {
+                return DispatchResult::Error(GRPC_PERMISSION_DENIED, e.to_string());
+            }
             DispatchResult::Subscribe(req.topic)
         }
         "/flux.Flux/CreateTopic" => {
@@ -662,6 +679,9 @@ fn dispatch(path: &str, body: &[u8], db: &Database) -> DispatchResult {
             };
             if req.name.is_empty() {
                 return DispatchResult::Error(GRPC_INTERNAL, "topic name must not be empty".into());
+            }
+            if let Err(e) = actor.check_topic(db, PrivilegeRepr::Create, &req.name) {
+                return DispatchResult::Error(GRPC_PERMISSION_DENIED, e.to_string());
             }
             // Idempotent: create only if it doesn't already exist.
             if db.flux_num_partitions(&req.name).is_none() {

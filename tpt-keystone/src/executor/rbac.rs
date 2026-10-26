@@ -90,6 +90,21 @@ impl Actor {
 
     /// Authorize `stmt` for this actor. Returns `InsufficientPrivilege`
     /// (SQLSTATE 42501 at the wire layer) on denial.
+    /// Checks `privilege` on the Flux topic `topic`. The Flux bridges use
+    /// this, since they run no SQL and so never reach [`Actor::check`]. Zero-
+    /// config and superuser actors pass, the same as for tables.
+    pub fn check_topic(
+        &self,
+        db: &Arc<Database>,
+        privilege: PrivilegeRepr,
+        topic: &str,
+    ) -> std::result::Result<(), InsufficientPrivilege> {
+        if self.unrestricted || self.superuser {
+            return Ok(());
+        }
+        self.require(db, privilege, &GrantObjectRepr::topic(topic))
+    }
+
     pub fn check(
         &self,
         db: &Arc<Database>,
@@ -129,11 +144,28 @@ impl Actor {
             | Stmt::Analyze(_) => self.require(db, PrivilegeRepr::Create, &GrantObjectRepr::database()),
 
             // DDL that drops objects needs DROP on the database.
-            Stmt::DropTable(_) => self.require(db, PrivilegeRepr::Drop, &GrantObjectRepr::database()),
+            Stmt::DropTable(_) | Stmt::DropIndex(_) => {
+                self.require(db, PrivilegeRepr::Drop, &GrantObjectRepr::database())
+            }
 
             Stmt::Select(s) => {
                 for table in select_tables(s) {
                     self.require(db, PrivilegeRepr::Select, &GrantObjectRepr::table(&table))?;
+                }
+                // `flux_*` table functions read a topic (window functions) or a
+                // table (`flux_time_travel`), so they need the same check.
+                for flux in flux_refs(s) {
+                    let object = match flux {
+                        FluxRef::Topic(topic) => GrantObjectRepr::topic(&topic),
+                        FluxRef::Table(table) => GrantObjectRepr::table(&table),
+                        FluxRef::Unknown => {
+                            return Err(InsufficientPrivilege(
+                                "permission denied: a flux function needs a literal topic or table name"
+                                    .to_string(),
+                            ))
+                        }
+                    };
+                    self.require(db, PrivilegeRepr::Select, &object)?;
                 }
                 Ok(())
             }
@@ -226,6 +258,48 @@ fn collect_from(twj: &TableWithJoins, out: &mut Vec<String>) {
     push_ref(&twj.primary, out);
     for j in &twj.joins {
         push_ref(&j.table, out);
+    }
+}
+
+/// A `flux_*` table function in a SELECT and what it reads.
+enum FluxRef {
+    Topic(String),
+    Table(String),
+    /// The first argument is not a string literal, so the object can't be named.
+    Unknown,
+}
+
+/// Every `flux_*` table function call in `s`, including in joins, unions and CTEs.
+fn flux_refs(s: &crate::sql::ast::SelectStmt) -> Vec<FluxRef> {
+    let mut out = Vec::new();
+    collect_flux(s, &mut out);
+    out
+}
+
+fn collect_flux(s: &crate::sql::ast::SelectStmt, out: &mut Vec<FluxRef>) {
+    use crate::sql::ast::{Expr, Literal};
+    if let Some(from) = &s.from {
+        for r in std::iter::once(&from.primary).chain(from.joins.iter().map(|j| &j.table)) {
+            let Some(args) = &r.func_args else { continue };
+            if !r.name.to_ascii_lowercase().starts_with("flux_") {
+                continue;
+            }
+            let arg = match args.first() {
+                Some(Expr::Literal(Literal::Text(name))) => Some(name.clone()),
+                _ => None,
+            };
+            out.push(match (r.name.to_ascii_lowercase().as_str(), arg) {
+                ("flux_time_travel", Some(table)) => FluxRef::Table(table),
+                (_, Some(topic)) => FluxRef::Topic(topic),
+                (_, None) => FluxRef::Unknown,
+            });
+        }
+    }
+    if let Some((_, rhs)) = &s.union {
+        collect_flux(rhs, out);
+    }
+    for cte in &s.ctes {
+        collect_flux(&cte.subquery, out);
     }
 }
 

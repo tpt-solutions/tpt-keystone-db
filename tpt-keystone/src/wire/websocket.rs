@@ -37,6 +37,7 @@ use tracing::debug;
 
 use crate::storage::database::Database;
 use crate::wire::bridge_auth::authenticate_basic;
+use crate::wire::privileges::PrivilegeRepr;
 use crate::wire::roles::RoleStore;
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -65,12 +66,16 @@ async fn run(mut stream: TcpStream, db: Arc<Database>, roles: Arc<RoleStore>) ->
     let (key, authorization) = read_handshake(&mut stream).await?;
 
     // Authenticate at Upgrade time. Zero-config (`_tpt_roles` empty) skips
-    // this; otherwise a valid `Authorization: Basic` is required.
-    if let Err(e) = authenticate_basic(&roles, &db, authorization.as_deref()) {
-        let body = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nWWW-Authenticate: Basic\r\nConnection: close\r\n\r\n");
-        let _ = stream.write_all(body.as_bytes()).await;
-        anyhow::bail!("{e}");
-    }
+    // this; otherwise a valid `Authorization: Basic` is required. The
+    // resulting actor is checked against each topic before subscribing.
+    let actor = match authenticate_basic(&roles, &db, authorization.as_deref()) {
+        Ok(actor) => actor,
+        Err(e) => {
+            let body = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nWWW-Authenticate: Basic\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(body.as_bytes()).await;
+            anyhow::bail!("{e}");
+        }
+    };
 
     let accept = accept_key(&key);
     let response = format!(
@@ -88,6 +93,13 @@ async fn run(mut stream: TcpStream, db: Arc<Database>, roles: Arc<RoleStore>) ->
                     Some(Frame::Text(text)) => {
                         if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) {
                             if let Some(topic) = msg.get("subscribe").and_then(|v| v.as_str()) {
+                                // Refuse the subscription and close, rather
+                                // than streaming records the role may not read.
+                                if let Err(e) = actor.check_topic(&db, PrivilegeRepr::Select, topic) {
+                                    let body = serde_json::json!({ "error": e.to_string() });
+                                    write_text_frame(&mut stream, &body.to_string()).await?;
+                                    return Ok(());
+                                }
                                 subscribed_topic = Some(topic.to_string());
                             }
                         }
