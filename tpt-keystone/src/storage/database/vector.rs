@@ -194,18 +194,28 @@ impl Database {
     ) -> Option<Vec<(KeyValue, f32)>> {
         const IVFPQ_PREFERRED_ROW_COUNT: usize = 100_000;
 
-        let hits = {
+        // The CPU indexes rank by squared L2 internally. Report the true L2
+        // distance so `distance` agrees with `l2_distance()` and the GPU
+        // path. Ranking is unchanged, since sqrt is monotonic.
+        let (hits, is_l2) = {
             let vec_map = self.vector_indexes.lock().unwrap();
             let hnsw_idx = vec_map.get(table).and_then(|m| m.get(column));
             let ivf_map = self.ivf_pq_indexes.lock().unwrap();
             let ivf_idx = ivf_map.get(table).and_then(|m| m.get(column));
 
             match (hnsw_idx, ivf_idx) {
-                (Some(_hnsw), Some(ivf)) if ivf.len() >= IVFPQ_PREFERRED_ROW_COUNT => {
-                    ivf.query_knn(query, k, ef_search)
-                }
-                (Some(hnsw), _) => hnsw.query_knn(query, k, ef_search),
-                (None, Some(ivf)) => ivf.query_knn(query, k, ef_search),
+                (Some(_hnsw), Some(ivf)) if ivf.len() >= IVFPQ_PREFERRED_ROW_COUNT => (
+                    ivf.query_knn(query, k, ef_search),
+                    ivf.metric() == Metric::L2,
+                ),
+                (Some(hnsw), _) => (
+                    hnsw.query_knn(query, k, ef_search),
+                    hnsw.metric() == Metric::L2,
+                ),
+                (None, Some(ivf)) => (
+                    ivf.query_knn(query, k, ef_search),
+                    ivf.metric() == Metric::L2,
+                ),
                 // No HNSW/IVF-PQ index: fall back to a GPU brute-force batch
                 // k-NN when an adapter is available (fails safe to `None`, the
                 // historical "no vector index" contract, when it isn't).
@@ -215,6 +225,7 @@ impl Database {
         Some(
             hits.into_iter()
                 .filter_map(|(k, dist)| {
+                    let dist = if is_l2 { dist.sqrt() } else { dist };
                     self.read(table, &k)
                         .ok()
                         .flatten()

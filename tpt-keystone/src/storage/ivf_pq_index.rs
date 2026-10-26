@@ -8,9 +8,11 @@
 //! `Database::create_ivfpq_index`'s "you always have existing rows to train
 //! from") rather than an HNSW-style `open-or-create`. A reopen (`open`)
 //! replays the on-disk log of raw `(row_key, vector)` records (same format
-//! as `VectorIndex`'s log — raw floats, not PQ codes, on disk) through the
-//! *already-trained* model read back from the file header: training happens
-//! once, at index creation, not on every reopen. The real memory saving is
+//! as `VectorIndex`'s log — raw floats, not PQ codes, on disk). The header
+//! stores only the index parameters, not the trained model. On every reopen
+//! the model is retrained from the logged vectors, with the same
+//! deterministic k-means, so the reopen cost grows with the row count. See
+//! `docs/formats/ivf_pq_index.md`. The real memory saving is
 //! in the in-memory `IvfPqIndex` (codes, not floats) — the on-disk log
 //! staying uncompressed is the same "raw log replayed into a compact
 //! in-memory structure" precedent every other local index in this codebase
