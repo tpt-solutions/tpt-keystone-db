@@ -167,7 +167,14 @@ impl ObjectStore for LocalFsObjectStore {
             rand::random::<u64>()
         );
         let tmp_path = path.with_file_name(tmp_name);
-        fs::write(&tmp_path, data)
+        // Flush the data to disk before the rename makes it visible under its real name.
+        // Without this, a power cut can leave the renamed object empty or partly written.
+        let write_tmp = || -> std::io::Result<()> {
+            let mut file = fs::File::create(&tmp_path)?;
+            std::io::Write::write_all(&mut file, data)?;
+            file.sync_all()
+        };
+        write_tmp()
             .with_context(|| format!("writing temp object for {key} at {}", tmp_path.display()))?;
         fs::rename(&tmp_path, &path).with_context(|| {
             format!(
@@ -176,6 +183,15 @@ impl ObjectStore for LocalFsObjectStore {
                 path.display()
             )
         })?;
+        // Make the rename itself durable. Unix lets us fsync the directory. Windows does
+        // not expose a directory fsync through std, so this step is skipped there, and
+        // rename durability on NTFS is not verified.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)
+                .and_then(|dir| dir.sync_all())
+                .with_context(|| format!("syncing directory for object {key}"))?;
+        }
         Ok(ObjectMeta {
             etag: sha256_hex(data),
             size: data.len() as u64,
