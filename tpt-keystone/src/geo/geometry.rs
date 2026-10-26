@@ -295,6 +295,94 @@ pub fn haversine_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     EARTH_RADIUS_M * c
 }
 
+/// Minimum distance in metres between two geometries.
+///
+/// For two points this is the haversine distance, as before. Otherwise it is
+/// the smallest distance between any vertex of one geometry and any segment
+/// of the other, or 0 when one geometry's vertex lies inside a polygon of the
+/// other. Segments are straight lines in lon/lat space, and each candidate
+/// pair is measured with haversine. For short distances that is accurate. For
+/// very long segments it is an approximation, and it is documented as such.
+pub fn min_distance_m(a: &Geometry, b: &Geometry) -> f64 {
+    if let (Geometry::Point(p), Geometry::Point(q)) = (a, b) {
+        return haversine_distance_m(p.x, p.y, q.x, q.y);
+    }
+    if contains_any_vertex(a, b) || contains_any_vertex(b, a) {
+        return 0.0;
+    }
+    let mut best = f64::INFINITY;
+    for va in vertices(a) {
+        for (sa, sb) in segments(b) {
+            best = best.min(point_segment_distance_m(va, sa, sb));
+        }
+    }
+    for vb in vertices(b) {
+        for (sa, sb) in segments(a) {
+            best = best.min(point_segment_distance_m(vb, sa, sb));
+        }
+    }
+    if best.is_finite() {
+        best
+    } else {
+        // Degenerate input with no segments: fall back to the vertices.
+        let mut fallback = f64::INFINITY;
+        for va in vertices(a) {
+            for vb in vertices(b) {
+                fallback = fallback.min(haversine_distance_m(va.x, va.y, vb.x, vb.y));
+            }
+        }
+        fallback
+    }
+}
+
+/// Every coordinate of `g`, in order.
+fn vertices(g: &Geometry) -> Vec<Coord> {
+    match g {
+        Geometry::Point(c) => vec![*c],
+        Geometry::LineString(cs) => cs.clone(),
+        Geometry::Polygon(rings) => rings.iter().flatten().copied().collect(),
+    }
+}
+
+/// Every line segment of `g`. A point has none.
+fn segments(g: &Geometry) -> Vec<(Coord, Coord)> {
+    let ring_segments = |cs: &[Coord]| -> Vec<(Coord, Coord)> {
+        cs.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    match g {
+        Geometry::Point(_) => Vec::new(),
+        Geometry::LineString(cs) => ring_segments(cs),
+        Geometry::Polygon(rings) => rings.iter().flat_map(|r| ring_segments(r)).collect(),
+    }
+}
+
+/// True when some vertex of `inner` lies inside a polygon in `outer`.
+fn contains_any_vertex(outer: &Geometry, inner: &Geometry) -> bool {
+    let Geometry::Polygon(rings) = outer else {
+        return false;
+    };
+    let Some(exterior) = rings.first() else {
+        return false;
+    };
+    vertices(inner)
+        .iter()
+        .any(|c| point_in_polygon(c.x, c.y, exterior))
+}
+
+/// Distance in metres from `p` to the segment `a`-`b`. The closest point is
+/// found in lon/lat space, then measured with haversine.
+fn point_segment_distance_m(p: Coord, a: Coord, b: Coord) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 {
+        0.0
+    } else {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (qx, qy) = (a.x + t * dx, a.y + t * dy);
+    haversine_distance_m(p.x, p.y, qx, qy)
+}
+
 /// Planar (flat-plane, Pythagorean) distance — used when coordinates aren't
 /// geographic lon/lat (e.g. a local XY game-world coordinate system).
 pub fn planar_distance(x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {

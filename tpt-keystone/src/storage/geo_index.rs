@@ -126,34 +126,97 @@ impl GeoIndex {
         radius_m: f64,
         time_range: Option<(i64, i64)>,
     ) -> Vec<Vec<u8>> {
+        let matches = |e: &GeoEntry| {
+            let dist = crate::geo::geometry::haversine_distance_m(
+                center_lon, center_lat, e.lon, e.lat,
+            );
+            if dist > radius_m {
+                return false;
+            }
+            match time_range {
+                Some((t0, t1)) => matches!(e.time, Some(t) if t >= t0 && t <= t1),
+                None => true,
+            }
+        };
+
+        // The 3x3 neighbourhood only covers points within about one cell of
+        // the centre. Cells also narrow away from the equator, so even that
+        // is only a bound near the nominal width. Use it only for radii well
+        // inside one cell. Anything larger scans every cell, which is slower
+        // but returns every point within the radius.
+        if radius_m > s2::approx_cell_width_m(self.level) * NEIGHBORHOOD_RADIUS_FRACTION {
+            return self
+                .cells
+                .values()
+                .flatten()
+                .filter(|e| matches(e))
+                .map(|e| e.row_key.clone())
+                .collect();
+        }
+
         let mut out = Vec::new();
         for cell in s2::neighborhood(center_lon, center_lat, self.level) {
             let Some(entries) = self.cells.get(&cell) else {
                 continue;
             };
-            for e in entries {
-                let dist = crate::geo::geometry::haversine_distance_m(
-                    center_lon, center_lat, e.lon, e.lat,
-                );
-                if dist > radius_m {
-                    continue;
-                }
-                if let Some((t0, t1)) = time_range {
-                    match e.time {
-                        Some(t) if t >= t0 && t <= t1 => {}
-                        _ => continue,
-                    }
-                }
-                out.push(e.row_key.clone());
-            }
+            out.extend(entries.iter().filter(|e| matches(e)).map(|e| e.row_key.clone()));
         }
         out
     }
 }
 
+/// Largest radius, as a fraction of the nominal cell width, that the 3x3
+/// neighbourhood fast path in [`GeoIndex::query_radius`] will answer. Above
+/// this, the query scans every cell.
+const NEIGHBORHOOD_RADIUS_FRACTION: f64 = 0.25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: an indexed radius query must return exactly what a brute
+    /// force scan returns, for radii far larger than one cell, at several
+    /// latitudes. Before the fix, the 3x3 neighbourhood alone dropped points
+    /// beyond roughly one cell from the centre.
+    #[test]
+    fn query_radius_matches_brute_force_for_large_radii() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.geo");
+        let level = s2::level_for_radius(1000.0);
+        let mut idx = GeoIndex::open(&path, level).unwrap();
+
+        // A grid of points around the Pacific rim, spanning a few degrees
+        // of latitude and longitude on either side of each centre.
+        let mut points = Vec::new();
+        for i in 0..40 {
+            for j in 0..40 {
+                let lon = 150.0 + i as f64 * 0.75;
+                let lat = -45.0 + j as f64 * 0.75;
+                let key = format!("p{i}_{j}").into_bytes();
+                idx.insert(&key, lon, lat, None).unwrap();
+                points.push((key, lon, lat));
+            }
+        }
+
+        for &(clon, clat) in &[(174.76, -36.85), (151.21, -33.87), (150.0, 60.0)] {
+            for &radius in &[500.0, 5_000.0, 50_000.0, 500_000.0, 3_000_000.0] {
+                let mut expected: Vec<Vec<u8>> = points
+                    .iter()
+                    .filter(|(_, lon, lat)| {
+                        crate::geo::geometry::haversine_distance_m(clon, clat, *lon, *lat) <= radius
+                    })
+                    .map(|(k, _, _)| k.clone())
+                    .collect();
+                let mut got = idx.query_radius(clon, clat, radius, None);
+                expected.sort();
+                got.sort();
+                assert_eq!(
+                    got, expected,
+                    "radius {radius} m around ({clon}, {clat}) disagrees with brute force"
+                );
+            }
+        }
+    }
 
     #[test]
     fn insert_and_query_radius() {
