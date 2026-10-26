@@ -235,16 +235,30 @@ impl TimeIndex {
             },
         });
         bucket.rollup.add(entry.value);
-        match &mut bucket.state {
-            BucketState::Open { entries } => entries.push(entry),
-            // A row landed in an already-sealed/downsampled bucket (can
-            // happen with out-of-order inserts): re-open it so it isn't lost.
-            BucketState::Sealed(_) | BucketState::Downsampled => {
-                bucket.state = BucketState::Open {
-                    entries: vec![entry],
-                };
+        // A row can land in a bucket that has already sealed (out-of-order
+        // inserts). Re-open it with the rows it already holds, plus this one.
+        // Before, a sealed bucket was replaced by just the new row, which
+        // dropped every earlier row in that bucket. A downsampled bucket has
+        // no raw rows left to keep, so it reopens with only the new row. Its
+        // rollup still covers the older data.
+        let state = std::mem::replace(&mut bucket.state, BucketState::Downsampled);
+        bucket.state = match state {
+            BucketState::Open { mut entries } => {
+                entries.push(entry);
+                BucketState::Open { entries }
             }
-        }
+            BucketState::Sealed(series) => {
+                let mut entries: Vec<TsEntry> = Self::decompress(&series)
+                    .into_iter()
+                    .map(|(ts, value, row_key)| TsEntry { row_key, ts, value })
+                    .collect();
+                entries.push(entry);
+                BucketState::Open { entries }
+            }
+            BucketState::Downsampled => BucketState::Open {
+                entries: vec![entry],
+            },
+        };
         self.seal_non_newest_buckets();
         if apply_retention {
             self.apply_retention();
@@ -431,6 +445,24 @@ mod tests {
     }
 
     #[test]
+    /// Regression: rows arriving out of timestamp order, after their bucket had
+    /// already sealed, must all survive. Before the fix, the bucket was replaced
+    /// by only the newest row, so earlier rows in it vanished from range queries.
+    #[test]
+    fn out_of_order_insert_into_sealed_bucket_keeps_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.ts");
+        let mut idx = TimeIndex::open(&path, policy(3_600_000, None), "value").unwrap();
+        // The far-future row arrives first, so bucket 0 seals before the rows in it.
+        idx.insert(b"far", 9_000_000, 3.0).unwrap();
+        idx.insert(b"early", 1_000, 1.0).unwrap();
+        idx.insert(b"later", 1_500, 2.0).unwrap();
+
+        let mut hits = idx.query_range(0, 2_000);
+        hits.sort();
+        assert_eq!(hits, vec![b"early".to_vec(), b"later".to_vec()]);
+    }
+
     fn sealed_bucket_compression_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("idx.ts");
