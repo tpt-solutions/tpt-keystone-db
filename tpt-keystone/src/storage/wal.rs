@@ -150,6 +150,16 @@ impl Wal {
         let mut max_seq = 0u64;
 
         'batches: while pos < buf.len() {
+            // A log that doesn't start with a batch marker was written by the
+            // pre-batch record format (or isn't a WAL at all). Replaying it
+            // as empty would drop its writes silently, so refuse to start.
+            if pos == 0 && buf[0] != BATCH_MARKER {
+                anyhow::bail!(
+                    "WAL {} does not start with a batch marker; it was likely written by an \
+                     older build. Drain it with that build (flush, then truncate) before upgrading",
+                    self.path.display()
+                );
+            }
             if pos + 1 + 8 + 4 > buf.len() || buf[pos] != BATCH_MARKER {
                 // Either trailing garbage from a torn write to the batch
                 // header itself, or (if not at the very start) unrecognized
@@ -277,6 +287,41 @@ mod tests {
 
     fn open_wal(dir: &Path) -> Wal {
         Wal::open(dir).unwrap()
+    }
+
+    /// Regression: a log in the pre-batch record format (starts with a `u64`
+    /// seq, not the `0xFF` marker) must fail loudly, not replay as empty.
+    #[test]
+    fn replay_rejects_a_log_written_in_the_pre_batch_format() {
+        let dir = tempfile::tempdir().unwrap();
+        // seq = 1 as big-endian u64, then the rest of an old record.
+        let mut old = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        old.extend_from_slice(&[0, 0, 0, 1, b't', 0, 0, 0, 1, b'k', 0, 0, 0, 1, b'v', 0]);
+        std::fs::write(dir.path().join("wal.log"), &old).unwrap();
+
+        let wal = open_wal(dir.path());
+        let err = wal.replay(|_| panic!("no record should be applied")).unwrap_err();
+        assert!(err.to_string().contains("batch marker"), "unexpected error: {err}");
+    }
+
+    /// A torn tail (a crash mid-write) is still tolerated: the complete batch
+    /// before it replays, and the torn one is dropped.
+    #[test]
+    fn replay_still_tolerates_a_torn_trailing_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_wal(dir.path());
+        wal.append_batch(1, &[("t".into(), b"k1".to_vec(), b"v1".to_vec(), 0)])
+            .unwrap();
+        // Append only the marker and part of a header, as a crash would.
+        let path = dir.path().join("wal.log");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&[BATCH_MARKER, 0, 0]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let wal = open_wal(dir.path());
+        let mut replayed = Vec::new();
+        wal.replay(|r| replayed.push(r.key)).unwrap();
+        assert_eq!(replayed, vec![b"k1".to_vec()]);
     }
 
     #[test]

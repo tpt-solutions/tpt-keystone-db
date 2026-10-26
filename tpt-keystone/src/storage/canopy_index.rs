@@ -155,6 +155,10 @@ pub fn collect_json_strings(v: &Value, out: &mut String) {
 /// occurs in that row's indexed text). Replaces the old presence-only
 /// `Vec<Vec<u8>>` bucket so real BM25 scoring (which needs `f(t,D)`, not
 /// just "does D contain t") has something to score against.
+/// Written at the start of every FTS index file. A file without it is from an older
+/// build and is rejected on open.
+const FTS_FORMAT_MAGIC: &[u8; 8] = b"TPTFTS02";
+
 #[derive(Serialize, Deserialize, Default)]
 struct FtsIndexData {
     postings: HashMap<String, HashMap<Vec<u8>, u32>>,
@@ -193,7 +197,13 @@ impl FtsIndex {
     pub fn open(file_path: &Path) -> Result<Self> {
         if file_path.exists() {
             let bytes = std::fs::read(file_path)?;
-            let data: FtsIndexData = bincode::deserialize(&bytes)?;
+            let Some(body) = bytes.strip_prefix(FTS_FORMAT_MAGIC) else {
+                anyhow::bail!(
+                    "FTS index {} is not in the current format. It was likely written by an                      older build. Drop the index and recreate it",
+                    file_path.display()
+                );
+            };
+            let data: FtsIndexData = bincode::deserialize(body)?;
             Ok(Self {
                 file_path: file_path.to_path_buf(),
                 data,
@@ -298,7 +308,8 @@ impl FtsIndex {
     }
 
     fn save(&self) -> Result<()> {
-        let bytes = bincode::serialize(&self.data)?;
+        let mut bytes = FTS_FORMAT_MAGIC.to_vec();
+        bytes.extend(bincode::serialize(&self.data)?);
         std::fs::write(&self.file_path, bytes)?;
         Ok(())
     }
@@ -363,5 +374,16 @@ mod tests {
         for word in ["Hello", "fox", "dog"] {
             assert!(out.contains(word));
         }
+    }
+
+    /// Regression: an FTS file from a build without the format prefix must be rejected
+    /// on open, not deserialized into the wrong shape.
+    #[test]
+    fn fts_open_rejects_a_file_without_the_format_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docs_body.fts");
+        std::fs::write(&path, b"not a current fts index").unwrap();
+        let err = FtsIndex::open(&path).err().expect("an unprefixed file must not open");
+        assert!(err.to_string().contains("current format"), "{err}");
     }
 }

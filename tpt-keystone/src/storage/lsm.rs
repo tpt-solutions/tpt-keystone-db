@@ -1080,6 +1080,9 @@ mod tests {
     /// promptly instead of queuing up behind the upload.
     #[test]
     fn finish_flush_does_not_block_a_concurrent_read() {
+        // These tests rely on the default compaction threshold. Hold the env lock so
+        // a concurrent test that overrides it can't change what they observe.
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
         let inner: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
@@ -1129,6 +1132,9 @@ mod tests {
     /// concurrent read either.
     #[test]
     fn finish_compact_does_not_block_a_concurrent_read() {
+        // These tests rely on the default compaction threshold. Hold the env lock so
+        // a concurrent test that overrides it can't change what they observe.
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
         let inner: Arc<dyn ObjectStore> = Arc::new(LocalFsObjectStore::open(bucket.path()).unwrap());
@@ -1340,6 +1346,9 @@ mod tests {
     /// checks it stayed low throughout, not just once at the end.
     #[test]
     fn concurrent_scans_never_observe_a_torn_batch_or_stall_behind_the_writer() {
+        // These tests rely on the default compaction threshold. Hold the env lock so
+        // a concurrent test that overrides it can't change what they observe.
+        let _env_guard = COMPACTION_THRESHOLD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let bucket = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
         let (engine, _store) = open_engine(bucket.path(), local.path());

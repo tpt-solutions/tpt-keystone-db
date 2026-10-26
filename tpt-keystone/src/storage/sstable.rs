@@ -4,6 +4,15 @@ use anyhow::{bail, Result};
 use bloomfilter::Bloom;
 use std::sync::Arc;
 
+/// Length of the fixed footer: data offset, index offset, bloom offset, and
+/// the format marker, each a `u64`.
+const FOOTER_LEN: usize = 32;
+
+/// Written as the last 8 bytes of every SSTable. An SSTable from a build
+/// without this marker has a 24-byte footer and is rejected on decode, rather
+/// than misparsed.
+const SSTABLE_FORMAT_MAGIC: [u8; 8] = *b"TPTSST02";
+
 /// A Sorted String Table (SSTable) — an immutable data blob, addressed by an
 /// object-store key, with a bloom filter for fast negative lookups and an
 /// index for binary search. Because SSTables are flush-sized (a few MB at
@@ -68,7 +77,7 @@ fn read_value_at(buf: &[u8], entry: &IndexEntry) -> Result<Vec<u8>> {
 
 impl SSTable {
     /// Serialize sorted entries into the SSTable binary format:
-    /// `data section | index section | bloom section | 24-byte footer`.
+    /// `data section | index section | bloom section | 32-byte footer`.
     /// `entries` must already be in `InternalKey` order (user key ascending,
     /// then seq descending within a key) — callers hand this off straight
     /// from a `BTreeMap<InternalKey, _>` traversal, so that's automatic.
@@ -136,6 +145,7 @@ impl SSTable {
         buf.extend_from_slice(&0u64.to_be_bytes()); // data_offset (always 0)
         buf.extend_from_slice(&index_offset.to_be_bytes());
         buf.extend_from_slice(&bloom_offset.to_be_bytes());
+        buf.extend_from_slice(&SSTABLE_FORMAT_MAGIC); // format marker, last
 
         buf
     }
@@ -143,10 +153,12 @@ impl SSTable {
     /// Parse a decoded blob (as produced by `build_bytes`) into an `SSTable`.
     fn decode(key: String, id: u64, data: Arc<Vec<u8>>) -> Result<Self> {
         let buf = data.as_slice();
-        if buf.len() < 24 {
-            bail!("sstable blob too small to contain a footer");
+        if buf.len() < FOOTER_LEN || buf[buf.len() - 8..] != SSTABLE_FORMAT_MAGIC {
+            bail!(
+                "sstable {key} is not in the current format (missing format marker). It was                  likely written by an older build, and must be rebuilt or migrated"
+            );
         }
-        let footer_start = buf.len() - 24;
+        let footer_start = buf.len() - FOOTER_LEN;
         let index_offset = read_u64(buf, footer_start + 8)? as usize;
         let bloom_offset = read_u64(buf, footer_start + 16)? as usize;
 
@@ -411,5 +423,19 @@ mod tests {
         ];
         let sst = SSTable::create_in_store(&store, "sst/1", 1, &entries).unwrap();
         assert_eq!(sst.max_seq(), 12);
+    }
+
+    /// Regression: an SSTable from a build without the format marker has a 24-byte
+    /// footer. It must be rejected, not misparsed.
+    #[test]
+    fn decode_rejects_a_blob_without_the_format_marker() {
+        let entries = vec![(ik(b"a", 1, PUT_TAG), b"1".to_vec())];
+        let mut bytes = SSTable::build_bytes(&entries);
+        let len = bytes.len();
+        bytes[len - 8..].copy_from_slice(&[0u8; 8]);
+        let err = SSTable::decode("sst/old".into(), 1, Arc::new(bytes))
+            .err()
+            .expect("an unmarked blob must not decode");
+        assert!(err.to_string().contains("format marker"), "{err}");
     }
 }
