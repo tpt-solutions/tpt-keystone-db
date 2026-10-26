@@ -12,6 +12,14 @@ This is a separate crate/binary/container image from `tpt-keystone` itself
 its own `Cargo.toml` and is not part of a Cargo workspace with
 `tpt-keystone`, so building/testing one never requires touching the other.
 
+## Requirements
+
+- Rust **1.85** or newer, to build the operator
+- A Kubernetes cluster, with permission to install a CRD and to create the RBAC in `deploy/rbac.yaml`
+- A container registry you can push to, for the `tpt-keystone` and operator images
+- An object store for the cluster to use: an S3 bucket with credentials or pod identity, or a
+  `ReadWriteMany` claim for the local emulation (see [Storage backends](#storage-backends))
+
 ## What it manages, per `KeystoneCluster`
 
 | Resource | Purpose |
@@ -137,3 +145,33 @@ YAML (see the comment on `serde_yaml_no_dep` in `main.rs` for why) —
   `backend: S3` with no `bucket`) are only caught at reconcile time
   (`StorageSpec::validate`, surfaced as `status.phase: Invalid` with a
   message), not rejected at `kubectl apply` time.
+
+## Testing
+
+```bash
+cd tpt-keystone-operator
+cargo test
+cargo run -- --print-crd     # check the CRD still generates
+```
+
+The unit tests cover the resource builders in `resources.rs`, the autoscaling logic in `autoscale.rs`,
+and the CRD types in `types.rs`.
+Reconciliation against a live cluster is not covered by automated tests in this repository. Test it
+against a disposable cluster before relying on it.
+
+## Changelog
+
+Release notes are in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Contributing
+
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT))
+
+at your option. Copyright 2026 TPT Solutions.

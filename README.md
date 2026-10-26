@@ -32,8 +32,10 @@ extended query protocol (per-column, opt-in via `result_formats`; text remains t
 connection admission limiter + statement cache, `pg_dump`-plain-compatible DDL (sequences, SERIAL,
 UNIQUE/FOREIGN KEY), a Kubernetes operator, Prometheus metrics, and OpenTelemetry tracing, plus opt-in
 wire-level SCRAM-SHA-256 auth and TLS (Phase 18 — no-op until `_tpt_roles` is populated or
-`TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set, so the zero-config quickstart below is unchanged). See
-`TODO.md` Phase 4/12/18 for exact scope cuts (no `ALTER TABLE ADD/DROP COLUMN`, etc.).
+`TPT_TLS_CERT_PATH`/`TPT_TLS_KEY_PATH` are set, so the zero-config quickstart below is unchanged). The
+HTTP, WebSocket, gRPC, and MCP bridges share the same role store: HTTP/WebSocket/gRPC accept Basic auth,
+MCP keeps its `X-TPT-Token` gate, and per-listener connection caps (`TPT_*_MAX_CONNECTIONS`) apply to
+each. See `TODO.md` Phase 4/12/18 for exact scope cuts (no `ALTER TABLE ADD/DROP COLUMN`, etc.).
 
 ## The other six engines (SQL extensions over Keystone, same binary)
 
@@ -68,10 +70,12 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
 ## Frontend, SDKs, and migration tooling (separate crates/packages)
 
 - **`tpt-keystone-canvas/`** — a Rust→WASM data-aware frontend framework (Canvas2D rendering, an
-  experimental WebGPU renderer for `<Canvas.TimeSeries>` that feature-detects `navigator.gpu` and falls
-  back to Canvas2D automatically, reactive primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/
-  `<Canvas.Graph>`/`<Canvas.VectorSearch>`/`<Canvas.Document>`/`<Canvas.AgentMonitor>` components, auto
-  WebSocket sync with Flux).
+  experimental WebGPU renderer for `<Canvas.TimeSeries>`, `<Canvas.Map>` (point markers), and
+  `<Canvas.Graph>` (edges and nodes) that feature-detects `navigator.gpu` and falls back to Canvas2D
+  automatically; heatmap and cluster rendering on the map stay Canvas2D-only. Also includes pan/zoom on
+  the map and graph, reactive primitives, `<Canvas.Map>`/`<Canvas.TimeSeries>`/`<Canvas.Graph>`/
+  `<Canvas.VectorSearch>`/`<Canvas.Document>`/`<Canvas.AgentMonitor>` components, and auto WebSocket
+  sync with Flux).
 - **`packages/sdk-web`**, **`packages/sdk-server`**, **`packages/sdk-edge`** — TypeScript SDKs for
   browsers, Node/Deno/Bun, and edge/Workers runtimes, each with a hand-written Postgres-wire or
   HTTP/JSON client (no `pg`/`postgres` deps).
@@ -88,7 +92,8 @@ action tracing, session replay, hash-chained audit log, provenance tracking) —
 - **`tpt-keystone-harbor/`** — a universal migration platform (discover → validate → snapshot → replicate →
   verify → cutover) targeting Keystone. PostgreSQL and PostGIS sources are fully implemented and
   verified against a live server; MongoDB/Neo4j/MySQL/MSSQL/InfluxDB/Kafka/vector-DB (Pinecone/Weaviate/
-  Qdrant)/Elasticsearch/Oracle all now have real protocol-level source connectors, though most (and
+  Qdrant)/Elasticsearch/Oracle all now have real protocol-level source connectors (MongoDB and MSSQL also
+  support live CDC), though most (and
   Oracle especially, which reverse-engineers the TTC wire protocol) are unverified against a live server
   of that kind. Since Meridian/Prism/Chronos/Plexus/Canopy are SQL-extension features of Keystone itself
   rather than separate services, each source's data also lands with the matching engine-native index
@@ -122,10 +127,13 @@ sizing, lease TTL, etc.) — see `tpt-keystone/src/storage/config.rs` for the fu
 
 ## Quickstart with Docker Compose
 
-A one-command local deployment is provided at the repo root (`docker-compose.yml`),
-which builds `tpt-keystone` via its `Dockerfile` and exposes every listener:
+A local deployment is provided at the repo root (`docker-compose.yml`), which builds `tpt-keystone` via
+its `Dockerfile` and exposes every listener. The compose file is secure by default: it refuses to start
+until you set a bootstrap user and password. Copy `.env.example` to `.env`, fill in
+`TPT_AUTH_BOOTSTRAP_USER` and `TPT_AUTH_BOOTSTRAP_PASSWORD`, then run:
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 
@@ -157,7 +165,11 @@ This starts a single-node writer and maps the following host ports:
 - `tpt_sdk/` (Flutter), `tpt-sdk-android/` (Kotlin) — mobile SDKs
 - `docs/formats/` — versioned, language-independent on-disk format specs (SSTable, WAL, manifest/lease,
   and each engine's index format) for reimplementing a reader outside this codebase
+- `docs/` — architecture notes, the SQL reference, SDK guide, concurrency and MVCC audits, the Phase 12
+  security audit, tutorials, and the `docs/formats/` specs
 - `TODO.md` — the authoritative, phase-by-phase build roadmap and status for the whole platform
+- `Makefile`, `install.sh`/`install.ps1` — wrappers around the per-crate build/test commands and an installer
+- `CONTRIBUTING.md`, `CHANGELOG.md` — contribution guidelines and release history
 - `PHASE2_PLAN.md` — detailed implementation notes for Keystone's SQL engine phase
 - `1keystonespec.txt` … `10harbourspec.txt` — the original per-engine design specs
 - `CLAUDE.md` — architecture notes and build/test commands for AI-assisted development in this repo
@@ -166,7 +178,9 @@ This starts a single-node writer and maps the following host ports:
 
 See [`TODO.md`](TODO.md) for the full 17-phase plan (plus Phase 18/19 hardening follow-ups) and,
 critically, the per-item honesty notes on what's verified vs. stubbed vs. explicitly scope-cut. Known
-open gaps across the whole platform: wire-level auth/TLS is opt-in, not mandatory, and off by default;
+open gaps across the whole platform: wire-level auth/TLS is opt-in, not mandatory, and off by default
+(the Docker Compose file is the exception and requires credentials); the Flux WebSocket and gRPC bridges
+check authentication but not per-topic authorization, since there is no topic-level privilege model yet;
 no distributed (multi-node) secondary indexes for any of the six extension engines (all
 local/single-node); a real Criterion benchmark harness exists (`tpt-keystone/benches/keystone_bench.rs`,
 run via `cargo bench`) but only measures Keystone's own engine-only throughput/latency in-process against
