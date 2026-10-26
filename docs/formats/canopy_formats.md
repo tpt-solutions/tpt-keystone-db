@@ -82,7 +82,8 @@ not diff or hash these files expecting stability.
 
 ```rust
 struct FtsIndexData {
-    postings: HashMap<String, Vec<Vec<u8>>>,   // lowercase token -> matching row keys
+    postings: HashMap<String, HashMap<Vec<u8>, u32>>, // lowercase token -> (row key -> term frequency f(t,D))
+    doc_lengths: HashMap<Vec<u8>, u32>,               // row key -> total token count |D|
 }
 ```
 
@@ -90,8 +91,21 @@ Tokens come from `tokenize()`: split on any non-alphanumeric character,
 drop empty runs, lowercase each remaining run — no stemming, no stop-word
 list, and both indexing and query-time tokenization go through this same
 function so a token always means the same thing on both sides. `insert`
-appends `row_key` to every token's bucket found in the given text (JSON
-documents are expected to be pre-flattened via `collect_json_strings`,
-which space-joins every string leaf in document order, before tokenizing).
-`search_and` intersects the postings buckets for every query token
-(AND-only semantics; no ranking, no OR).
+first removes any previous entry for `row_key`, then counts each token's
+occurrences in the given text. Each token's bucket maps the row key to that
+count, and `doc_lengths` records the row's total token count. JSON documents
+are expected to be pre-flattened via `collect_json_strings`, which
+space-joins every string leaf in document order, before tokenizing.
+
+Two query paths read this structure:
+
+- `search_and` intersects the postings for every query token (boolean AND,
+  unranked). It is what `json_text_search` uses.
+- `search_bm25` ranks with Okapi BM25 using `f(t,D)` from `postings` and
+  `|D|`/`avgdl` from `doc_lengths`. Its constants are fixed at the textbook
+  defaults `k1 = 1.2` and `b = 0.75`, not configurable. It is what
+  `hybrid_search` uses for the text side.
+
+Reimplementers should note that the older presence-only shape
+(`Vec<Vec<u8>>` buckets, AND-only) is gone. A file written by it will not
+deserialize into this struct.

@@ -34,6 +34,11 @@ SELECT label, distance FROM vector_search('docs', 'embedding', '[1.0,0.0,0.0]', 
 Nearest-first by L2 distance: `a`, then `b`, then whichever of `c`/`d` is
 closer to the query point (both are far, in the opposite octant).
 
+The `distance` column is the **squared** L2 distance, which is what the index
+ranks by. Here `c` is `6` and `d` is `5.42`. `l2_distance()` returns the square
+root of each, so `√6 ≈ 2.45` and `√5.42 ≈ 2.33`. The ordering is the same, but
+don't mix the two numbers.
+
 ## BM25 full-text search alone
 
 There's no SQL surface for ranked-only BM25 yet (`json_text_search` stays

@@ -44,7 +44,8 @@ zigzag_decode(v: u64) -> i64 = (v >> 1) ^ -(v & 1)
 
 Used by: the shared manifest (`manifest.rs`), the write lease
 (`lease.rs`), the local secondary-index record logs (`geo_index.rs`,
-`ts_index.rs`, `graph_index.rs`, `canopy_index.rs`).
+`ts_index.rs`, `graph_index.rs`, `vector_index.rs`, `ivf_pq_index.rs`), and the
+whole-file index blobs (`canopy_index.rs`).
 
 These structures are serialized with the Rust [`bincode`](https://docs.rs/bincode/1)
 crate, major version 1, using `bincode::serialize`/`deserialize` with the
@@ -72,10 +73,11 @@ from this directory documents the exact Rust struct shape it corresponds to.
 
 ## Append-only record log convention
 
-Used by: `geo_index.rs`, `ts_index.rs`, `graph_index.rs` (local, per-node
-secondary indexes — deliberately **not** replicated through the shared
-object store; each node rebuilds them from the table's own data if the file
-is missing).
+Used by: `geo_index.rs`, `ts_index.rs`, `graph_index.rs`, `vector_index.rs`,
+and `ivf_pq_index.rs` (local, per-node secondary indexes — deliberately **not**
+replicated through the shared object store; each node rebuilds them from its
+own file on open, and from the table's data if the file is missing, where the
+index type supports that).
 
 All three files share one on-disk shape:
 

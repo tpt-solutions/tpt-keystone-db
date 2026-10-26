@@ -16,9 +16,9 @@ with:
 psql -h localhost -p 5432 -f docs/tutorials/cookbook.sql
 ```
 
-> No data is persisted between runs in the script as written — re-run it any
-> number of times. `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
-> keep it idempotent.
+> Run it once against a fresh node. The tables and indexes it creates persist,
+> and `CREATE INDEX IF NOT EXISTS` and `DROP INDEX` are not supported. A second
+> run fails at `CREATE TOPIC events`, because the topic already exists.
 
 ## What each block demonstrates
 
@@ -51,7 +51,7 @@ ORDER BY v.distance;
 Edges are just rows; the `USING GRAPH` index is what makes traversal cheap:
 
 ```sql
-SELECT b FROM MATCH (a)-[:oceania]->(b) ON ownership(from_id) WHERE a = 'Auckland' RETURN b;
+MATCH (a)-[:oceania]->(b) ON ownership(from_id) WHERE a = 'Auckland' RETURN b;
 ```
 
 ### Streaming is automatic (Flux)

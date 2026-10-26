@@ -7,6 +7,36 @@ pre-implementation audit called for by `TODO.md` Phase 1 Stage 2. No storage
 code was changed while writing it — Stage 1 (read-committed, single-version LSM
 + `TxnHandle` staging buffer) remains the active path.
 
+## Status update (2026-10-26)
+
+**This document is historical.** It is the pre-implementation audit for TODO
+Phase 1 Stage 2. The recommended work it describes has since landed (Stage 2+3,
+in `TODO.md`). The sections below describe the code as it was before that
+work, and are kept as the record of the reasoning.
+
+What changed, as checked against the source:
+
+- **Durable multi-version storage.** Each MemTable and SSTable entry is keyed
+  by `InternalKey` (user key, commit `seq`, `tag`). See
+  `storage/internal_key.rs`, `storage/lsm.rs`, and `storage/sstable.rs`. The
+  WAL is batch-framed by commit `seq`. See [`formats/wal.md`](formats/wal.md)
+  and [`formats/sstable.md`](formats/sstable.md).
+- **Snapshot isolation.** `TxnHandle` (`storage/database/txn.rs`) captures
+  `snapshot_seq` at `BEGIN`. It registers that snapshot with the LSM watermark
+  (`register_snapshot`/`release_snapshot`), and releases it on `Drop`.
+  Reads go through `read_at`/`scan_at`. Covered by
+  `executor/transaction_tests.rs`.
+- **Compaction GC.** `compact_all` keeps every version newer than the oldest
+  open snapshot, plus one floor version below it.
+- **Retired pieces.** `storage/tx.rs` (`TransactionManager`) is deleted.
+  `storage/mvcc.rs` holds only `new_tx_id()`. The `MvccStore` version-chain map
+  described below no longer exists.
+
+The "Reusability verdict" table and the "Risks" list below predate this work,
+so their status is out of date. Where they say snapshot isolation is "not
+achievable" or that `TransactionManager` is "dead weight", that is no longer
+true.
+
 ## Current state (Stage 1)
 
 - `storage/database/txn.rs` — `TxnHandle` holds a `BTreeMap` staging buffer of

@@ -1,12 +1,34 @@
 # Phase 12 Security Audit — Wire Auth, WASM Sandbox, S3 Credentials
 
-Date: 2026-07-07. Scope: a focused, code-level review (not a penetration
-test) of the three areas named by the Phase 12 checklist item "Security
-audit (wire protocol auth, WASM sandbox, S3 credential handling)":
-`src/wire/session.rs`/`codec.rs`/`messages.rs`, `src/executor/udf.rs`, and
-`src/storage/objectstore.rs`/`config.rs`.
+Date: 2026-07-07 (original review). Last status check: 2026-10-26. Scope: a
+focused, code-level review (not a penetration test) of the three areas named
+by the Phase 12 checklist item "Security audit (wire protocol auth, WASM
+sandbox, S3 credential handling)": `src/wire/session.rs`/`codec.rs`/
+`messages.rs`, `src/executor/udf.rs`, and `src/storage/objectstore.rs`/
+`config.rs`.
 
-## Summary
+## Status update (2026-10-26)
+
+The sections below are the original findings, kept as written. Line numbers
+are as of 2026-07-07 and have moved. Several findings have since been fixed.
+The table below is the current status and takes precedence where it differs
+from the body.
+
+| Original finding | Current status |
+|---|---|
+| No wire-protocol authentication (§1, High) | **Fixed.** SCRAM-SHA-256 in `wire/session.rs`. Active once `_tpt_roles` is non-empty. The zero-config default (no roles) still accepts any connection, by design. |
+| TLS declined on `SSLRequest` (§1, Informational) | **Fixed, opt-in.** `wire/tls.rs` answers `S` when both `TPT_TLS_CERT_PATH` and `TPT_TLS_KEY_PATH` are set. Otherwise it still answers `N`. |
+| Startup parameters inert (§1, Low) | **Partly changed.** `user` is now read for the SCRAM lookup. The other parameters were not re-checked. |
+| Startup message length / repeated-pair size (§1) | Not re-checked in this pass. |
+| UDF module size unbounded at compile time (§2, Medium) | **Fixed.** `UdfConfig::max_module_bytes`, default 4 MiB, overridable with `TPT_UDF_MAX_MODULE_BYTES`. |
+| Explicit `wasmtime::Config` allow-list (§2, Medium) | **Still open.** `executor/udf.rs` still sets only `consume_fuel(true)`. |
+| Fresh `Engine`/`Module` per call (§2, Low) | Not re-checked in this pass. |
+| Wasmtime trap behaviour on the deployment OS (§2, Informational) | **Still open.** Needs a Linux run. |
+| Non-Postgres listeners unauthenticated (§4) | **Fixed.** HTTP, WebSocket, gRPC (Basic auth) and MCP (token gate plus RBAC `Actor`) share `wire/bridge_auth.rs`. Connection caps added. See `TODO.md` Phase 3. |
+| Per-topic authorization on Flux (§4, Low) | **Still open.** Any authenticated caller can publish to or subscribe to any topic. |
+| S3 credentials, conditional PUT, error handling (§3) | Unchanged as far as this pass checked. |
+
+## Summary (as of 2026-07-07)
 
 The wire-auth gap (no password/SCRAM check, no TLS) is the single most
 severe finding and is the headline Phase 12 item — every other finding here

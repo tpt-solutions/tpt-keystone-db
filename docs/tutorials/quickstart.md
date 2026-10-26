@@ -5,22 +5,28 @@
 ```sh
 cd tpt-keystone
 cargo build
-cargo run   # starts a single-node writer on 0.0.0.0:5432, local-fs storage under tpt-data/
+cargo run   # starts a single-node writer on 0.0.0.0:55432, local-fs storage under tpt-data/
 ```
 
-No config is required for a single-node dev instance — `cargo run` defaults
-to `local` storage backend, writer role, and `tpt-data/` for both the local
-disk state and the emulated shared object store.
+No config is required for a single-node dev instance. `cargo run` defaults
+to the `local` storage backend, the writer role, and `tpt-data/` for both the
+local disk state and the emulated shared object store.
 
 ## Connect
 
 ```sh
-psql -h localhost -p 5432
+psql -h localhost -p 55432
 ```
 
-There's no auth — the startup handshake auto-approves any connection (see
-`docs/security_audit_phase12.md` for why this matters before deploying
-anywhere reachable).
+The engine's default port is `55432`. To listen on the standard `5432`, set
+`TPT_PG_ADDR=0.0.0.0:5432` before `cargo run`. `docker compose up` does this
+for you.
+
+Authentication is opt-in. While the `_tpt_roles` table is empty (the default),
+any connection is accepted with no password. Once a role exists, logins require
+SCRAM-SHA-256. Read the status table in
+[`docs/security_audit_phase12.md`](../security_audit_phase12.md) before
+deploying anywhere reachable.
 
 ## Your first table and query
 
@@ -68,12 +74,27 @@ tpt query "SELECT 1"
 
 # Python
 pip install -e sdk-python
-python -c "import asyncio; from tpt_sdk import connect; \
-  asyncio.run(connect('postgresql://localhost:5432').query('SELECT 1'))"
-
-# Node / TypeScript
-node -e "require('./packages/sdk-server').KeystoneClient" # see packages/sdk-server/README
 ```
+
+```python
+import asyncio
+from tpt_sdk import KeystoneClient
+
+async def main():
+    client = await KeystoneClient(host="localhost", port=55432).connect()
+    result = await client.query("SELECT 1 AS one")
+    print(result.rows)
+
+asyncio.run(main())
+```
+
+```ts
+// Node / TypeScript: @tpt/sdk-server is an ESM package. Build it first
+// (`npm run build` in packages/sdk-server), then import it.
+import { KeystoneClient } from "@tpt/sdk-server";
+```
+
+See `packages/sdk-server/README` for connection options.
 
 See `docs/sdks.md` for the full list of client libraries and what each one
 gives you.

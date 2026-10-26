@@ -43,6 +43,19 @@ a Zanzibar-style ReBAC model, once access control is built).
   `tpt-keystone-canvas` and every browser-facing SDK package.
 - `websocket.rs` (Phase 11) is a third entry point: a hand-rolled RFC 6455
   server that pushes Flux topic records to subscribed clients in real time.
+- `grpc/` is a fourth: the Flux gRPC endpoint, over a hand-rolled HTTP/2 (h2c)
+  transport with HPACK and protobuf. No `tonic`/`h2`/`prost`. The contract is
+  in [`formats/flux_grpc.proto`](formats/flux_grpc.proto).
+- `scram.rs`, `roles.rs`, `role_members.rs`, `privileges.rs` implement
+  SCRAM-SHA-256 login and the role catalog, driven by the `_tpt_roles` table.
+  While `_tpt_roles` is empty, every connection is accepted with no login. That
+  is the zero-config default.
+- `tls.rs` is optional TLS. The server answers an `SSLRequest` with `S` only
+  when both `TPT_TLS_CERT_PATH` and `TPT_TLS_KEY_PATH` are set. Otherwise it
+  answers `N` and stays plaintext.
+- `bridge_auth.rs` is the one auth helper shared by the HTTP, WebSocket and gRPC
+  listeners (`Authorization: Basic`) and by the MCP server (token gate, plus
+  an RBAC actor). See [`security_audit_phase12.md`](security_audit_phase12.md).
 
 ## `sql/` — lexer, parser, AST
 
@@ -56,12 +69,21 @@ parses into `ast.rs`'s `Stmt` node types (`Select`, `Insert`, `CreateTable`,
 - `mod.rs` — `execute_query(sql, db)` is the entry point; dispatches DDL/DML
   directly and drives `execute_select_with_cte` for `SELECT`: materialize
   CTEs → resolve FROM/JOINs → apply WHERE → aggregate (if GROUP BY/aggregate
-  present) → window functions → ORDER BY → LIMIT/OFFSET → project. Also
-  where every engine-specific **table-valued function** lives —
+  present) → window functions → ORDER BY → LIMIT/OFFSET → project.
+- `graph_fn.rs` — every engine-specific **table-valued function**:
   `vector_search`, `hybrid_search`, `graph_bfs`, `json_text_search`,
   `flux_window_tumbling`, `synapse_recall_semantic`, `mirror_session_events`,
-  etc. — since a "return ranked/traversed/windowed rows" shape doesn't fit
-  the planner's WHERE-clause pushdown pattern the way an index rewrite does.
+  and the rest. They are dispatched from the FROM clause, not from `mod.rs`,
+  because a "return ranked/traversed/windowed rows" shape doesn't fit the
+  planner's WHERE-clause pushdown pattern the way an index rewrite does.
+- `gql.rs` — the GQL-subset `MATCH` statement, which chains graph-index
+  lookups hop by hop.
+- `ddl.rs` / `dml.rs` / `select.rs` / `join.rs` / `copy.rs` — DDL, DML, the
+  SELECT pipeline, joins, and `COPY ... FROM STDIN`/`TO STDOUT`.
+- `udf.rs` — sandboxed WASM UDFs (`CREATE FUNCTION ... LANGUAGE wasm`). These
+  sit behind the `wasm-udf` Cargo feature.
+- `rbac.rs` — per-table privilege checks. The wire, HTTP and MCP entry points
+  pass an `Actor` into them.
 - `eval.rs` — expression/aggregate evaluation; the `Value` enum and
   `RowContext` (the scope an expression evaluates against: a row, the
   outer-query scope for correlated subqueries, bound parameters).
@@ -86,21 +108,37 @@ The largest module, and the one every other engine's "secondary index" is
 layered on top of.
 
 **Core LSM:**
-- `wal.rs` — write-ahead log with fsync.
-- `lsm.rs` — MemTable (`BTreeMap`) + SSTable-based engine with levelled
-  compaction.
-- `sstable.rs` — SSTable format + bloom filters.
-- `mvcc.rs` / `tx.rs` — multi-version concurrency control and the
-  transaction manager (`BEGIN`/`COMMIT`/`ROLLBACK`).
+- `wal.rs` — batch-framed write-ahead log, one fsync per commit. See
+  [`formats/wal.md`](formats/wal.md). `io_backend.rs` supplies the append
+  backend: portable `std::fs` by default, or io_uring on Linux with
+  `TPT_IO_URING=1`.
+- `lsm.rs` — MemTable (lock-free `SkipMap`) + SSTable-based engine with
+  levelled compaction. Writers take one `write` mutex. Readers take a brief
+  `view` lock to clone an `Arc`, and never block on I/O. See
+  [`concurrency_model_audit.md`](concurrency_model_audit.md).
+- `sstable.rs` — SSTable format + bloom filters. Every version is kept, keyed
+  by `InternalKey`. See [`formats/sstable.md`](formats/sstable.md).
+- `internal_key.rs` — `InternalKey`: user key, commit `seq`, and a put/delete
+  `tag`. Its ordering is user key ascending, then `seq` descending.
+- `mvcc.rs` — now only `new_tx_id()`. The earlier `MvccStore` and
+  `TransactionManager` were removed. See
+  [`mvcc_snapshot_audit.md`](mvcc_snapshot_audit.md) for how snapshot
+  isolation got here.
+- `database/txn.rs` — per-connection `TxnHandle`. It holds the staging buffer
+  of uncommitted writes and the `snapshot_seq` taken at `BEGIN`, which gives
+  snapshot isolation. The snapshot is released on drop, so an abandoned
+  transaction can't pin compaction forever.
 - `btree.rs` — local B-Tree secondary indexes. Deliberately **local-only**,
   not replicated through the object store (a Phase 3 scope cut) — rebuilt
   per-node from local disk on open, same as every other secondary index
   below.
 
-**`database.rs`** ties all of the above together: `Database` implements the
-`StorageEngine` trait the executor calls against, owns the schema catalog
-(stored in the shared object store under `schemas/` so every node sees the
-same tables), and owns every per-engine secondary index (below).
+**`database/`** ties all of the above together. `database/mod.rs` defines
+`Database`, which implements the `StorageEngine` trait the executor calls
+against. It owns the schema catalog (stored in the shared object store under
+`schemas/` so every node sees the same tables) and every per-engine secondary
+index (below). The submodules are split by concern: `catalog`, `storage_engine`,
+`txn`, `json`, `spatial`, `time`, `graph`, `vector`, and `flux`.
 
 **Cloud-native layer (Phase 3) — compute/storage disaggregation:**
 - `objectstore.rs` — the `ObjectStore` trait, plus `S3ObjectStore` (real
@@ -114,12 +152,16 @@ same tables), and owns every per-engine secondary index (below).
 - `lease.rs` — CAS-based write lease with a monotonic fencing token, so a
   superseded writer's manifest CAS is rejected even if it never noticed its
   own lease expired.
+- `guard.rs` — a circuit breaker and an in-flight concurrency bound wrapping
+  any `ObjectStore`, so a slow or unreachable object store fails fast instead
+  of stalling queries.
 - `config.rs` — reads all of the above from `TPT_*` env vars (see
   [`CLAUDE.md`](../CLAUDE.md) for the full list).
 
-**Per-engine secondary indexes** (each: local-only, rebuilt from an
-append-only on-disk log on open, and each a genuinely separate concern from
-the base row-oriented storage above):
+**Per-engine secondary indexes** (each: local-only, rebuilt from its own
+on-disk file on open. Most are append-only record logs. Canopy's are
+whole-file blobs, and DiskANN is a fixed-record flat file. Each is a genuinely
+separate concern from the base row-oriented storage above):
 - `geo_index.rs` (Meridian, Phase 6) — S2-inspired cell → row-key buckets.
 - `ts_index.rs` (Chronos, Phase 8) — time-bucketed pages with Gorilla /
   delta-of-delta compression (`compress.rs`).
@@ -131,6 +173,16 @@ the base row-oriented storage above):
 - `flux.rs` (Flux, Phase 11) — append-only partitioned log + consumer-group
   offsets; also the transport CDC events and `synapse`/`mirror`'s
   Flux-backed logs ride on.
+- `ivf_pq_index.rs` (Prism) — IVF-PQ index, `USING IVFPQ`. It keeps a raw
+  vector log, and retrains the model from that log on every open. See
+  [`formats/ivf_pq_index.md`](formats/ivf_pq_index.md).
+- `sharded_vector_index.rs` (Prism) — an HNSW index split across N shard files
+  by consistent hash. Each shard is a standalone `VectorIndex`.
+- `diskann_index.rs` (Prism) — a disk-resident Vamana graph in one flat file.
+  It has a Rust API only and is not reachable from SQL. See
+  [`formats/diskann_index.md`](formats/diskann_index.md).
+- `json_schema.rs` / `jsonb.rs` (Canopy) — JSON Schema validation for
+  `json_schema_col`, and the internal binary JSON encoding used for index keys.
 
 ## Why one binary, not seven engines/crates
 

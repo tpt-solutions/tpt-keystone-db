@@ -11,10 +11,15 @@ for full detail; this is an index of what exists and where.
 | `tpt-keystone-sdk` | `tpt-keystone-sdk/` | Rust | `keystone`/`canvas`/`ffi` feature flags; sync + async clients; C ABI for FFI |
 | `@tpt/sdk-web` | `packages/sdk-web/` | Browser (TS) | HTTP/JSON bridge + Flux WebSocket; React hooks; Canvas plugin API |
 | `@tpt/sdk-server` | `packages/sdk-server/` | Node/Deno/Bun (TS) | Full Postgres wire client incl. streaming queries; Flux broadcast server |
-| `@tpt/sdk-edge` | `packages/sdk-edge/` | Cloudflare/Fastly/Vercel/Lambda@Edge (TS) | Zero-dependency, ~4.6KB; same HTTP/JSON bridge as sdk-web |
+| `@tpt/sdk-edge` | `packages/sdk-edge/` | Cloudflare/Fastly/Vercel/Lambda@Edge (TS) | No runtime dependencies; same HTTP/JSON bridge as sdk-web |
+| `@tpt/sdk-react-native` | `packages/sdk-react-native/` | React Native (TS) | Offline-first HTTP/JSON client + Flux WebSocket subscriber, not a native wire bridge. Test-verified in this repo |
+| `tpt_sdk` (Dart/Flutter) | `tpt_sdk/` | Dart / Flutter | Same design as the React Native SDK. Test-verified in this repo |
+| `tpt-sdk-android` | `tpt-sdk-android/` | Kotlin / Android | Same design as the React Native SDK. **Not built or tested in this repo** (no Gradle or `kotlinc` available here) |
 | `tpt-sdk` (Python) | `sdk-python/` | Python 3 | `asyncio`; `to_pandas()`; Jupyter `_repr_html_` |
 | `sdk-go` | `sdk-go/` | Go | `context.Context` cancellation; connection pooling |
-| `tpt` CLI | `tpt-keystone-cli/` | — | REPL, `query`/`export`/`import`/`migrate`/`stream`/`schema` subcommands |
+| `tpt` CLI | `tpt-keystone-cli/` | — | REPL (the default), `query`, `stream`, `export`, `import`, `schema`, and `migrate up` / `migrate status` |
+
+There is no Swift/iOS SDK build in this repo yet (no Xcode available).
 
 ## Common shape across every SDK
 
@@ -60,14 +65,14 @@ library), and Python:
   `tpt-keystone-sdk/src/bin/typegen.rs` (`cargo run --bin tpt-keystone-sdk-typegen -- host:port`)
 - TypeScript: `packages/sdk-web/src/query-builder.ts` (`TableDef<Row>` +
   `TypedQueryBuilder<Row>`, `.fetch()` over the HTTP bridge), with
-  `bin/typegen.ts` extended to also emit a `TableDef` const per generated
+  `src/bin/typegen.ts` extended to also emit a `TableDef` const per generated
   interface. `packages/sdk-server/src/query-builder.ts` is the same design
   against the Postgres-wire client instead (`.fetch()` calls
   `KeystoneClient.queryParams` and decodes via `Row.toObject()`). Not yet
   ported to `@tpt/sdk-edge` (same HTTP bridge as sdk-web, so it would be a
   near-identical copy — left as a follow-up).
-- Python: `sdk-python/tpt_sdk/query_builder.py` (`TableDef` + `QueryBuilder`)
-  + `sdk-python/tpt_sdk/typegen.py` (`python -m tpt_sdk.typegen host:port`)
+- Python: `sdk-python/src/tpt_sdk/query_builder.py` (`TableDef` + `QueryBuilder`)
+  + `sdk-python/src/tpt_sdk/typegen.py` (`python -m tpt_sdk.typegen host:port`)
 
 Batch operations, streaming results, and a built-in connection pool already
 exist per-SDK from Phase 14 (`streamQuery`/`Pool`/`blocking::Client` etc.)

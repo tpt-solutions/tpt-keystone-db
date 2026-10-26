@@ -1,5 +1,9 @@
 # Prism (Phase 7) Vector Index Format
 
+This document covers the HNSW index (`USING VECTOR`). The IVF-PQ index has its
+own format in [`ivf_pq_index.md`](ivf_pq_index.md), and DiskANN is in
+[`diskann_index.md`](diskann_index.md).
+
 Source: `tpt-keystone/src/storage/vector_index.rs`. Local per-node only, same
 scope cut as the B-Tree/Meridian/Chronos/Plexus/Canopy indexes — not
 replicated through the shared object store; a node rebuilds it from the

@@ -19,14 +19,22 @@ struct Manifest {
     sstable_ids: Vec<u64>,        // IDs of all live SSTables, oldest first
     wal_segment_seq: u64,         // highest sealed+shipped WAL segment ID
     writer_fencing_token: u64,    // fencing token of the writer that wrote this revision
+    max_commit_seq: u64,          // highest MVCC commit_seq reflected by the listed SSTables
 }
 ```
 
 Per the [bincode-v1 conventions](primitives.md#bincode-v1-blobs): `Vec<u64>`
 is a little-endian `u64` length prefix followed by that many little-endian
-`u64` elements; the two trailing `u64` fields are plain little-endian
+`u64` elements; the three trailing `u64` fields are plain little-endian
 8-byte integers. Total size for a manifest with `n` sstable IDs is
-`8 + 8*n + 8 + 8` bytes.
+`8 + 8*n + 8 + 8 + 8` bytes.
+
+`max_commit_seq` was added in the MVCC work (TODO Phase 1 Stage 2+3). It is
+`#[serde(default)]` in Rust, but bincode does not honour that default for a
+missing trailing field. Readers therefore try this layout first and fall back
+to the pre-`max_commit_seq` shape (`sstable_ids`, `wal_segment_seq`,
+`writer_fencing_token`, with no trailing field). A decoder that wants to read
+old manifests needs the same two-step decode.
 
 Writes always go through `put_if_match` (see `objectstore.rs`) with the
 caller's last-known ETag as the expected value (`None` only for the very

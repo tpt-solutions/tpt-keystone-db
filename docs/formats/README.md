@@ -4,12 +4,12 @@ Phase 12 checklist item: "publish versioned, language-independent on-disk
 format specifications ... so readers can be reimplemented independently of
 the original Rust codebase."
 
-These documents describe every persistent binary layout Keystone produces,
-as of **format version 1** (the only version that has ever existed — none of
-these layouts carry an explicit version byte yet; see the "Versioning" note
-in each doc). They're derived directly from the current serialization code,
-not from design intent — if a doc and the code in `tpt-keystone/src/storage/`
-disagree, the code is authoritative and the doc has drifted.
+These documents describe every persistent binary layout Keystone produces, as
+of the current code on `master` (last checked against the source in the
+docs-refresh pass; see the Versioning section below for what changed and
+when). They're derived directly from the current serialization code, not from
+design intent. If a doc and the code in `tpt-keystone/src/storage/` disagree,
+the code is authoritative and the doc has drifted.
 
 All multi-byte integers are **big-endian** unless a document says otherwise.
 "Varint" always means the LEB128-style variable-length encoding described in
@@ -31,14 +31,34 @@ All multi-byte integers are **big-endian** unless a document says otherwise.
 | [`plexus_graph_index.md`](plexus_graph_index.md) | Plexus (Phase 9) adjacency index |
 | [`canopy_formats.md`](canopy_formats.md) | Canopy (Phase 10): native JSONB binary encoding, JSON path index, full-text index |
 | [`prism_vector_index.md`](prism_vector_index.md) | Prism (Phase 7) HNSW vector secondary index |
+| [`ivf_pq_index.md`](ivf_pq_index.md) | Prism IVF-PQ vector secondary index (`USING IVFPQ`) |
+| [`diskann_index.md`](diskann_index.md) | Prism DiskANN flat-file graph index (library-only; not reachable from SQL) |
 
 ## Versioning
 
-None of these formats currently embeds a format-version number anywhere in
-its header/footer. That's a known gap, not a design choice: a future
-breaking change to any layout here needs to either (a) add an explicit
-version field before making the change, or (b) bump a documented "format
-version N" convention across all of these docs simultaneously. Until then,
-"the current format" and "format version 1" are the same thing, and any
-externally-written reader/writer should assume it always is talking to
-exactly the layout documented here.
+None of these formats embeds a format-version number anywhere in its
+header/footer. That is a known gap, not a design choice. A breaking change to
+a layout must either (a) add an explicit version field before making the
+change, or (b) bump a documented "format version N" convention across all of
+these docs at once.
+
+**Breaking changes made without a version bump.** Two layouts changed during
+the MVCC work (TODO Phase 1 Stage 2+3). Data written by a build before that
+change is not readable by the current one:
+
+- **WAL** (`wal.md`): records are now grouped into batches with a `0xFF` batch
+  marker. A pre-change `wal.log` is not parsed. `replay` stops at the first
+  byte that is not `0xFF`, so the old log is silently ignored, not rejected.
+  Flush or drain a node's WAL on the old build before upgrading.
+- **SSTable** (`sstable.md`): index entries now carry `seq` and `tag`. An
+  SSTable written by the old build will be misparsed, not rejected.
+- **Canopy FTS index** (`canopy_formats.md`): postings went from presence-only
+  buckets to term frequencies, and `doc_lengths` was added for BM25. A file
+  written by the old build fails to deserialize. How a node handles that file
+  at startup has not been checked.
+
+The manifest handles its own change, with a fallback decode for the pre-change
+shape (`manifest_and_lease.md`).
+
+Any externally-written reader or writer must target the current layouts
+documented here. Pre-change data needs a migration, which does not exist yet.

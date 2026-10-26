@@ -36,7 +36,7 @@ Encoded per the [bincode-v1 conventions](primitives.md#bincode-v1-blobs).
 ## In-memory reconstruction
 
 On open, every `EdgeRecord` is replayed via
-`AdjacencyGraph::add_edge(from, to, rel_type)` (`src/graph.rs`), which builds
+`AdjacencyGraph::add_edge(from, to, rel_type)` (`src/graph/mod.rs`), which builds
 a dense in-memory adjacency-list structure keyed by vertex row key. There is
 no on-disk representation of the adjacency structure itself — reading the
 file always means replaying every edge record from the beginning; there is
