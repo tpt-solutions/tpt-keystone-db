@@ -493,65 +493,87 @@ node-id/cluster-count text in the GPU path (no glyph atlas), per-instance/data-d
 hardcoded color per pipeline, no uniforms/bind groups), and `GpuVertexStepMode` instancing
 (CPU-expanded quads instead).
 
-## Phase 11 — Docs-refresh findings (2026-10-26): open engine bugs and doc gaps
+## Phase 11 — Docs-refresh findings (2026-10-26, progress through 2026-10-27)
 
-Found while checking `docs/` against the source and a live node. The docs now describe current
-behaviour; the items below are the code and docs that still need work. Bugs are listed first.
+Found while checking `docs/` against the source and a live node. Each fix has a regression test. The full
+`cargo test --lib` suite passes (589/589 on an idle machine). `[x]` = done, `[~]` = partly done, `[ ]` = open.
 
-### Bugs (wrong results or silent failures)
+### Bugs (wrong results, data loss, or silent failures)
 
-- [ ] **Indexed `ST_DWithin` drops rows for radii larger than one grid cell.** With a `SPATIAL` index
-      on `loc`, `ST_DWithin(loc, ST_MakePoint(174.76, -36.85), 3000000)` returns only Auckland. The
-      same query with no index returns Auckland, Wellington and Sydney, which matches
-      `ST_Distance(...) <= 3000000`. The likely cause is the planner's `extract_spatial_predicate`
-      path using only the immediate cell neighbourhood (`s2::neighborhood`) and ignoring the radius.
-      Fix the index path, add a regression test in `geo_tests.rs` that compares indexed and unindexed
-      results across radii, and remove the known-issue note in `docs/sql-reference.md`.
-- [ ] **Unknown column in a table-valued function returns NULL instead of an error.**
-      `SELECT nosuchcol FROM json_path_lookup(...)` returns blank rows. Column resolution against the
-      function's output schema (`executor/graph_fn.rs`) should raise `column "x" does not exist`.
-- [ ] **Pre-MVCC on-disk data is silently unreadable.** The WAL batch-format change (`wal.rs`) makes
-      `replay` stop at the first byte that is not `0xFF`, so an old `wal.log` is ignored without an
-      error. Old SSTables (`sstable.rs` index gained `seq`/`tag`) and old Canopy FTS files
-      (`canopy_index.rs`) fail to decode. Add a format version byte to WAL, SSTable and FTS files.
-      Make `replay` error on an unrecognised first byte rather than returning an empty log. Decide on a
-      migration path for existing `tpt-data/` directories. Until then, `docs/formats/README.md` says
-      nodes must drain their WAL before upgrading.
-- [ ] **Vector distance is squared L2 in `vector_search`/`hybrid_search` but true L2 in
-      `l2_distance()`.** Make them agree. Either return the square root from the index path, or
-      document the squared value as the index's ranking score and rename the column. Update
-      `docs/sql-reference.md` and `docs/tutorials/hybrid-search.md` once decided.
-- [ ] **`IvfPqStorageIndex` retrains on every open**, which contradicts its module doc ("training
-      happens once, at index creation"). Either store the trained model in the `.ivfpq` header, or fix
-      the doc comment and document the reopen cost. `docs/formats/ivf_pq_index.md` already describes the
-      current behaviour.
-- [ ] **`CREATE INDEX IF NOT EXISTS` and `DROP INDEX` are not supported.** `parse_create_index` reads
-      `IF` as the index name. `DROP INDEX` returns "not yet supported". Add both, plus `IF NOT EXISTS` for
-      `CREATE TOPIC`. Then remove the scope-cut notes in `docs/sql-reference.md` and
-      `docs/tutorials/cookbook.md`, and restore idempotence in `docs/tutorials/cookbook.sql`.
-- [ ] **`psql \d <table>` fails** with `unexpected token: Default` on the query psql sends. `\dt` works.
-      Add the missing parser support, then update `docs/sql-reference.md`'s `pg_catalog` section.
+- [x] **Indexed `ST_DWithin` dropped rows for radii larger than one grid cell.** `storage/geo_index.rs`
+      scans every cell for radii above a quarter of the nominal cell width. The regression test fails
+      without the fix (checked) and passes with it.
+- [x] **Unknown column in a table-valued function returned NULL instead of an error.** Projection, WHERE,
+      ORDER BY, and UPDATE/DELETE predicates all swallowed evaluation errors. They now propagate them.
+      Limit: a table function that returns zero rows never evaluates its projection, so an unknown column
+      there is not reported.
+- [x] **ORDER BY on an output alias was silently ignored.** `ORDER BY cnt` now sorts by the aliased
+      expression. Test: `order_by_output_alias_sorts_by_the_aliased_expression`.
+- [x] **Old on-disk formats were silently unreadable.** A WAL that doesn't start with a batch marker is
+      rejected (`replay_rejects_a_log_written_in_the_pre_batch_format`). SSTables now carry a 32-byte footer
+      with the marker `TPTSST02`, and an older blob is rejected (`decode_rejects_a_blob_without_the_format_marker`).
+      FTS files carry the prefix `TPTFTS02`, and an older file is rejected on open
+      (`fts_open_rejects_a_file_without_the_format_prefix`). Node startup skips an index that fails to open, so
+      an old FTS index is dropped silently rather than failing startup. Drop and recreate it.
+      Still missing: a migration path that reads old data.
+- [x] **Vector distance mismatch.** L2 indexes report true L2 in `vector_knn_query`. Live check: 2.449 for
+      `[1,0,0]` vs `[-1,-1,-1]`, matching `l2_distance()`. Ranking is unchanged.
+- [x] **`IvfPqStorageIndex` doc comment was wrong.** The code retrains on every open. The comment and
+      `docs/formats/ivf_pq_index.md` now say so. Storing the trained model in the header was not done.
+- [x] **`CREATE INDEX IF NOT EXISTS`, `DROP INDEX`, and custom index names now work.** `DROP INDEX` accepts the
+      default name `<table>_<column>_idx` or the name given in `CREATE INDEX`. A custom name is stored in
+      `<table>_<column>.name`, beside the index files, so it is node-local. Test:
+      `index_with_custom_name_can_be_dropped_by_that_name`. Correction: `CREATE TOPIC ... IF NOT EXISTS`
+      already worked.
+- [~] **`psql \d <table>` fails.** Fixed so far: `COLLATE pg_catalog.default`, schema-qualified cast types,
+      `oid = '<n>'` coercion, comma-separated FROM lists (`FROM a, b LEFT JOIN c ...`), the `pg_class` and
+      `pg_attribute` columns psql reads, `pg_attrdef`, `pg_collation`, and `pg_get_expr`. The first three
+      psql lookups now run. The fourth, the index and constraint listing, still fails. It needs `pg_index`
+      columns such as `indisprimary` and `indisvalid`, `pg_constraint.conindid`, and `pg_get_indexdef` and
+      `pg_get_constraintdef`. Later queries may need more.
+- [x] **P0 data loss: a table with no PRIMARY KEY overwrote rows that shared their first column.** Row keys
+      are built by `executor/dml.rs::row_key_for`. A table with no PK gets a random 16-byte key. A composite
+      PK gets length-prefixed components. A single PK keeps its raw bytes. Tests:
+      `no_pk_rows_with_equal_first_column_are_all_kept`, `composite_primary_key_distinct_tuples_do_not_collide`.
+- [x] **A duplicate PRIMARY KEY silently overwrote the existing row.** INSERT and COPY now reject it with
+      `duplicate key value violates unique constraint "<table>_pkey"`. Test:
+      `duplicate_primary_key_insert_is_rejected_and_keeps_the_original`.
+- [x] **Quoted literals didn't coerce to numbers.** `WHERE id = '1'` now matches `id = 1`. Non-numeric text is an
+      error. Comparison operators propagate those errors. Test: `quoted_literal_compares_with_an_integer_column`.
+- [x] **Out-of-order time-index inserts dropped rows.** An insert into an already-sealed bucket replaced the
+      bucket with the new row alone. The bucket is now reopened with its existing rows. Test:
+      `out_of_order_insert_into_sealed_bucket_keeps_every_row`.
+- [x] **`ST_Distance` and `ST_DWithin` measured representative points for shapes.** They now use the minimum
+      distance. Test: `st_distance_to_a_line_and_into_a_polygon_is_the_minimum_distance`.
+- [x] **Missing numeric functions.** `round` (with an optional decimal-places argument), `floor`, `ceil`,
+      `ceiling`, `trunc`, `sign`, `sqrt`, `power`/`pow`, and `mod`. Test: `basic_numeric_functions_round_floor_ceil_sqrt_power_mod`.
+- [x] **`FROM a, b` (comma-separated FROM lists) was not supported.** Now an implicit CROSS JOIN, and it can
+      be mixed with explicit joins. Test: `comma_separated_from_list_is_a_cross_join`.
 
 ### Doc and config gaps
 
-- [ ] **Index and topic option values must be quoted.** `WITH (m = 16)` and `CREATE TOPIC ... WITH
-      (partitions = 3)` fail with "expected a string literal". Decide whether to accept bare numbers
-      (friendlier, and what `docs/` originally showed) or keep the rule and keep the quoted examples
-      in the docs.
-- [ ] **DiskANN has no SQL path.** `storage/diskann_index.rs` is reachable only through the Rust API.
-      Either add `USING DISKANN` to `executor/ddl.rs`, or leave it library-only. `docs/formats/diskann_index.md`
-      already says it is library-only, so update it too if the decision changes.
-- [ ] **`ST_Distance` units for non-POINT geometries.** Only `POINT` was checked (metres, haversine).
-      Confirm the units for `LINESTRING`/`POLYGON`, document them in `docs/sql-reference.md`, and add a
-      unit test.
-- [ ] **Re-measure `@tpt/sdk-edge`'s bundle size** and document the figure. The old "~4.6KB" claim
-      was removed because the current build was not checked.
-- [ ] **Verify on Linux:** io_uring WAL backend (`TPT_IO_URING=1`), and wasmtime trap behaviour under
-      fuel/memory exhaustion (`docs/security_audit_phase12.md`, WASM §2). Both are still open.
-- [ ] **Flux per-topic authorization.** Any authenticated caller can publish to or subscribe to any
-      topic (`docs/security_audit_phase12.md`, §4). Add a topic-level privilege model in `rbac.rs`.
-- [ ] **Explicit `wasmtime::Config` allow-list** in `executor/udf.rs` (currently only `consume_fuel`).
-      Also consider caching the `Engine`/`Module` per function instead of recompiling on every call.
+- [x] **Index and topic option values must be quoted.** Bare integers are accepted now. Docs updated.
+- [x] **DiskANN has no SQL path.** Decision: DiskANN stays library-only until a caller needs SQL access.
+- [x] **`ST_Distance` units for non-POINT geometries.** Distances are minimum distances in metres. Segments are
+      straight lines in lon/lat space, so very long segments are approximate. The docs say so.
+- [x] **`@tpt/sdk-edge` bundle size.** Measured 2026-10-27: 8,580 bytes of unminified `tsc` output, about 3.9 KB
+      gzipped per module summed. Docs updated.
+- [ ] **Verify on Linux:** io_uring WAL backend (`TPT_IO_URING=1`), and wasmtime trap behaviour under fuel and
+      memory exhaustion (`docs/security_audit_phase12.md`, WASM §2). Needs a Linux host.
+- [x] **Flux per-topic authorization.** `GRANT`/`REVOKE ... ON TOPIC` work. The WebSocket, the gRPC methods, and the
+      SQL `flux_*` table functions all check the grant. A non-literal topic argument is refused for non-superusers.
+- [~] **wasmtime allow-list and caching.** Done: the explicit allow-list, one shared `Engine`, and a compiled-module
+      cache keyed by SHA-256 (256 entries). Open: the cache is cleared when full, not evicted LRU.
+- [~] **Flaky LSM timing tests.** Root cause: the compaction threshold env var is process-global, and two timing
+      tests didn't hold `COMPACTION_THRESHOLD_ENV_LOCK`. All three now hold it. They still use wall-clock
+      thresholds, so a heavily loaded machine could still trip them.
+
+### Still open
+
+- [ ] **`psql \d <table>` fourth query** (index and constraint listing). See the `\d` item above.
+- [ ] **Migration of old on-disk data.** Old SSTables, WAL, and FTS files are now rejected or refused with a clear
+      error, but nothing converts them. Write a migration tool, or document a drain-and-rebuild procedure.
+- [ ] **`ST_Distance` over long lon/lat segments** is approximate. Densify long segments, or measure along great circles.
 
 ## Done outside this list (`cfdafce`)
 

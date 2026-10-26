@@ -85,21 +85,24 @@ Bloom filter set/check using `num_hash_functions` derived hash values per
 element) — this section is not self-describing beyond the raw bitmap and its
 parameters.
 
-### Footer (fixed 24 bytes, last 24 bytes of the blob)
+### Footer (fixed 32 bytes, last 32 bytes of the blob)
 
 ```
 u64 data_offset    (always 0 — the data section always starts at byte 0)
 u64 index_offset
 u64 bloom_offset
+u64 format_marker  (the bytes "TPTSST02"; a blob without it is rejected)
 ```
 
 ## Reading
 
-1. Read the last 24 bytes as the footer; get `index_offset`, `bloom_offset`.
+1. Check that the last 8 bytes are `TPTSST02`. If not, the blob is from an older
+   build and must not be read. Then read the 32-byte footer and get
+   `index_offset` and `bloom_offset` from it.
 2. Parse the index section starting at `index_offset` (runs until
    `bloom_offset`).
 3. Parse the bloom section starting at `bloom_offset` (runs until
-   `blob_len - 24`).
+   `blob_len - 32`).
 4. Snapshot point lookup (`read_at(key, snapshot_seq)`): check the bloom filter
    first (fast negative; the bloom is keyed on the user key only). On a
    possible hit, binary-search the index for the first entry whose user key
@@ -115,8 +118,8 @@ u64 bloom_offset
 
 ## Versioning
 
-No version byte. The index entry gained `seq` and `tag` during the MVCC work
-(TODO Phase 1 Stage 2+3). An SSTable written before that change is **not**
-readable by this layout. The old index had no `seq`/`tag` fields, so every
-index entry would be misparsed. See the Versioning section of
+The format marker in the footer (added 2026-10-27) lets a reader reject an older
+SSTable with a clear error. Before the marker, an SSTable written by a build
+without `seq`/`tag` in its index was misparsed silently. Such a blob has no
+marker, so it is now rejected. See the Versioning section of
 [`README.md`](README.md#versioning).

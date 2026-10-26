@@ -16,9 +16,9 @@ with:
 psql -h localhost -p 5432 -f docs/tutorials/cookbook.sql
 ```
 
-> Run it once against a fresh node. The tables and indexes it creates persist,
-> and `CREATE INDEX IF NOT EXISTS` and `DROP INDEX` are not supported. A second
-> run fails at `CREATE TOPIC events`, because the topic already exists.
+> The script can be re-run on the same node. Its `CREATE ... IF NOT EXISTS`
+> statements are no-ops on the second run, and it deletes the sample rows before
+> inserting them again.
 
 ## What each block demonstrates
 

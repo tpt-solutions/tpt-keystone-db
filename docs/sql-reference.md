@@ -56,25 +56,34 @@ CREATE TOPIC t WITH (partitions = '3', retention = '1 hour', retention_bytes = '
 CREATE FUNCTION name(args) RETURNS type LANGUAGE wasm AS '<base64>';  -- WASM UDF (int8, float8, bool, float8[], bytea)
 ```
 
-Index and topic option values must be single-quoted string literals.
-`WITH (m = 16)` fails with `expected a string literal for index option value`.
+Index and topic option values are a quoted string or a bare integer, so
+`WITH (m = 16)` and `WITH (m = '16')` are equivalent. Other bare words are not
+accepted.
 Metric values are `'l2'` or `'cosine'`. HNSW (`USING VECTOR`) and IVF-PQ
 (`USING IVFPQ`) are the two vector index kinds. `IVFPQ` options are `lists`
 (coarse-quantizer list count), `pq_m` (PQ sub-quantizers) and `n_probe` (lists
 probed per query). On `TIME`, `value` names the numeric column; without it, the
 first numeric column is used.
 
-Not supported: `CREATE INDEX IF NOT EXISTS` and `DROP INDEX`. Both fail with a
-parse or "not yet supported" error. Index creation in a script therefore can't
-be made idempotent.
+`CREATE INDEX IF NOT EXISTS ...` is a no-op when an index already exists on the
+same table and column. `DROP INDEX [IF EXISTS] name` drops every index on that
+column, in memory and on disk. Indexes are identified by the PostgreSQL default
+name `<table>_<column>_idx`, or by the name given in `CREATE INDEX`. A custom name
+is stored in `<table>_<column>.name`, beside the index's own files. Like the
+indexes, the name is local to the node, not shared through the object store.
 
 `ALTER TABLE ADD/DROP COLUMN` backfill every existing row (non-crash-atomic
 pass held under the global LSM lock); `DROP COLUMN` is rejected on
 PK/UNIQUE/FOREIGN KEY/indexed columns. `DROP TABLE` purges rows and all
 per-table secondary indexes; a reader node may still serve a dropped table
 until it refreshes its catalog (a known convergence gap tracked in
-`TODO.md`). Composite primary keys only use the first column as the physical
-row key (a pre-existing engine limitation).
+`TODO.md`). A composite primary key's columns are all part of the row key, so
+distinct key tuples never collide.
+
+**Fixed 2026-10-27:** a table with no `PRIMARY KEY` gets a random hidden row key,
+so every `INSERT` adds a row. A duplicate `PRIMARY KEY` is rejected with
+`duplicate key value violates unique constraint "<table>_pkey"`. A composite
+primary key's columns are combined, so distinct tuples can't collide.
 
 ## DML
 
@@ -95,7 +104,7 @@ check (no index acceleration).
 
 ```sql
 SELECT [DISTINCT] expr [AS alias], ...
-FROM t [alias] [JOIN t2 ON ...] [, ...]
+FROM t [alias] [JOIN t2 ON ...] [, t3 ...]   -- a comma is an implicit CROSS JOIN
 [WHERE ...]
 [GROUP BY ...] [HAVING ...]
 [ORDER BY ... [ASC|DESC]]
@@ -119,9 +128,25 @@ Subqueries: scalar, correlated, `EXISTS`, `IN`, derived tables (`FROM
 including schema-qualified names (`pg_catalog.pg_tables`,
 `public.my_table`). `format_type(oid, typmod)` and `pg_table_is_visible(oid)`
 are implemented, so direct `SELECT`s that use them work. `psql`'s `\dt` works.
-`\d <table>` still fails with a parse error (`unexpected token: Default`) on
-the query psql sends, so use plain `SELECT`s against the catalog tables to
-describe a table.
+`\d <table>` does not work yet. psql's first three lookups now parse and run.
+These are the table lookup, the column lookup (with `pg_attrdef`,
+`pg_collation`, `pg_get_expr`, and the `pg_attribute` extras), and the
+relation-properties lookup. The fourth, the index and constraint listing, needs
+`pg_index` columns such as `indisprimary` and `indisvalid`, `pg_constraint.conindid`,
+and `pg_get_indexdef` / `pg_get_constraintdef`. Use plain `SELECT`s against the
+catalog tables to describe a table.
+
+### Core scalar functions
+
+`abs(x)`, `round(x[, n])` (half away from zero), `floor(x)`, `ceil(x)` /
+`ceiling(x)`, `trunc(x)`, `sign(x)`, `sqrt(x)`, `power(x, y)` / `pow(x, y)`,
+`mod(x, y)` (integer modulus raises an error for a zero divisor). Integer input
+keeps an integer result where that is exact. `coalesce`, `nullif`, `greatest`,
+and `least` are also available.
+
+A quoted number compared with a number is coerced to that number, as in
+PostgreSQL: `WHERE id = '1'` matches `id = 1`. A quoted value that isn't a
+number is an error, not a silent mismatch.
 
 ## Functions by engine
 
@@ -140,14 +165,12 @@ Distances are in metres for `POINT` geometries (great-circle, haversine).
 For example, `ST_Distance(ST_MakePoint(0,0), ST_MakePoint(1,0))` is about
 111195. `ST_DWithin`'s radius uses the same unit.
 
-**Known issue (found 2026-10-26):** the index-rewritten path can return
-incomplete results for radii larger than one grid cell. On a six-row sample,
-`ST_DWithin(loc, ST_MakePoint(174.76, -36.85), 3000000)` with a `SPATIAL`
-index on `loc` returned only Auckland. The same query with no index returned
-Auckland, Wellington and Sydney, which matches a plain
-`ST_Distance(...) <= 3000000` filter. Until this is fixed, don't rely on the
-indexed path for large radii. Compare against an explicit `ST_Distance`
-predicate instead.
+For `LINESTRING` and `POLYGON`, `ST_Distance` and `ST_DWithin` give the
+minimum distance between the shapes, or 0 when one lies inside a polygon of
+the other. Segments are straight lines in lon/lat space, so very long
+segments are approximate.
+
+**Fixed 2026-10-27:** the indexed path used to drop rows for radii larger than one grid cell. Radii above a quarter of the nominal cell width now scan every cell, so the results match a plain `ST_Distance(...) <= r` predicate.
 
 ### Chronos (time-series)
 `time_bucket(interval, ts)`, `moving_average(value, window_size)` (window
@@ -187,11 +210,10 @@ against a `JSONPATH` index), `json_text_search(table, column, query)`
 `dot_product(a, b)` — scalar functions over `VECTOR` text literals.
 `vector_search(table, vec_column, '[..]', k[, ef_search])` — HNSW k-NN,
 returns the full matched row plus a `distance` column; composes with
-ordinary `JOIN`/`WHERE`. For `metric = 'l2'`, that `distance` is the
-**squared** L2 distance. For `[1,0,0]` against `[-1,-1,-1]` it shows `6`, where
-`l2_distance()` returns √6 ≈ `2.449`. The ordering is the same, but the two
-numbers are not interchangeable. `hybrid_search`'s `vec_distance` is the same
-squared value.
+ordinary `JOIN`/`WHERE`. For `metric = 'l2'`, that `distance` is the true
+L2 distance, the same value `l2_distance()` returns. `hybrid_search`'s
+`vec_distance` matches it. Before 2026-10-27, the CPU index paths reported the
+squared distance, so the two disagreed. The ranking order was never affected.
 `hybrid_search(table, vec_column, '[..]', fts_column, 'query text', k)` —
 fuses a vector k-NN ranking and a Canopy BM25 ranking via Reciprocal Rank
 Fusion; returns the matched row plus `vec_distance`, `bm25_score`
@@ -203,7 +225,9 @@ Requires both a `VECTOR` index on `vec_column` and a `GIN`/`FTS` index on
 ### Flux (event streaming)
 `flux_time_travel(table, timestamp_ms)`, `flux_window_tumbling(topic,
 window_ms)`, `flux_window_session(topic, gap_ms)`,
-`flux_window_sliding(topic, window_size_ms, slide_ms)`. Publish/poll/commit
+`flux_window_sliding(topic, window_size_ms, slide_ms)`. A role needs `SELECT` on the topic named in the first argument. `flux_time_travel`
+takes a table instead, so it needs `SELECT` on that table. For a non-superuser,
+the first argument must be a string literal. Publish/poll/commit
 are `Database` methods (Rust API + the WebSocket bridge), not SQL
 statements — every `INSERT`/`UPDATE`/`DELETE` also auto-publishes a CDC
 event to an implicit `__cdc_<table>` topic.

@@ -1,9 +1,8 @@
 -- TPT Keystone — "seven engines, one binary" cookbook
 -- ---------------------------------------------------------------------------
--- Run this against a fresh node (e.g. `docker compose up --build`, then
--- `psql -h localhost -p 5432 -f docs/tutorials/cookbook.sql`). A second run on
--- the same node fails at `CREATE TOPIC events`, because CREATE INDEX IF NOT
--- EXISTS is not supported and there's no DROP INDEX or IF NOT EXISTS for topics.
+-- Run this against a node (e.g. `docker compose up --build`, then
+-- `psql -h localhost -p 5432 -f docs/tutorials/cookbook.sql`). It can be re-run:
+-- the sample rows are deleted and inserted again.
 -- Every engine is just SQL extensions layered onto the same row store, so they
 -- compose in a single query plan.
 --
@@ -30,6 +29,8 @@ CREATE TABLE IF NOT EXISTS places (
     value   FLOAT8              -- Chronos metric
 );
 
+-- Re-running resets the sample rows. The primary keys would otherwise reject them.
+DELETE FROM places;
 INSERT INTO places (id, name, region, loc, embedding, profile, ts, value) VALUES
   (1, 'Auckland',   'oceania',  ST_MakePoint(174.76, -36.85),  '[1.0, 0.0, 0.0]', '{"tier":"alpha","owner":"ada"}',   1000, 10.0),
   (2, 'Wellington', 'oceania',  ST_MakePoint(174.78, -41.29),  '[0.9, 0.1, 0.0]',  '{"tier":"beta","owner":"ada"}',   2000, 12.0),
@@ -41,7 +42,7 @@ INSERT INTO places (id, name, region, loc, embedding, profile, ts, value) VALUES
 -- 2. MERIDIAN — geospatial
 -- ===========================================================================
 -- Accelerate spatial predicates with a SPATIAL index.
-CREATE INDEX ON places USING SPATIAL (loc);
+CREATE INDEX IF NOT EXISTS ON places USING SPATIAL (loc);
 
 -- Great-circle distance between two lon/lat points, in metres.
 SELECT name, ST_Distance(loc, ST_MakePoint(174.76, -36.85)) AS metres_from_auckland
@@ -49,8 +50,7 @@ FROM places
 ORDER BY metres_from_auckland;
 
 -- Radius search: everything within 10 km of Auckland (radius in metres).
--- This uses the SPATIAL index. Known issue: the indexed path can drop rows
--- for radii larger than one grid cell. See docs/sql-reference.md.
+-- This uses the SPATIAL index.
 SELECT name FROM places
 WHERE ST_DWithin(loc, ST_MakePoint(174.76, -36.85), 10000);
 
@@ -62,7 +62,7 @@ FROM places;
 -- 3. PRISM — vector / AI
 -- ===========================================================================
 -- Build an HNSW (or brute-force fallback) index over the embedding column.
-CREATE INDEX ON places USING VECTOR (embedding) WITH (metric = 'l2');
+CREATE INDEX IF NOT EXISTS ON places USING VECTOR (embedding) WITH (metric = 'l2');
 
 -- k-NN search returns the full matched row plus an appended `distance`.
 SELECT name, distance
@@ -80,7 +80,7 @@ ORDER BY v.distance;
 -- 4. CHRONOS — time-series
 -- ===========================================================================
 -- Time-bucketed index drives fast time-range scans and rollups.
-CREATE INDEX ON places USING TIME (ts) WITH (interval = '1 hour', value = 'value');
+CREATE INDEX IF NOT EXISTS ON places USING TIME (ts) WITH (interval = '1 hour', value = 'value');
 
 -- Bucket a timestamp down to its interval boundary.
 SELECT name, time_bucket('1 hour', ts) AS bucket FROM places ORDER BY name;
@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS ownership (
     to_id   TEXT,
     rel     TEXT
 );
+DELETE FROM ownership;
 INSERT INTO ownership (id, from_id, to_id, rel) VALUES
   (1, 'Auckland',   'ada',  'oceania'),
   (2, 'Wellington', 'ada',  'oceania'),
@@ -106,7 +107,7 @@ INSERT INTO ownership (id, from_id, to_id, rel) VALUES
   (4, 'Tokyo',      'bob',  'asia'),
   (5, 'Singapore',  'cleo', 'asia');
 
-CREATE INDEX ON ownership USING GRAPH (from_id) WITH (to = 'to_id', type = 'rel');
+CREATE INDEX IF NOT EXISTS ON ownership USING GRAPH (from_id) WITH (to = 'to_id', type = 'rel');
 
 -- Traverse one hop from a start vertex.
 SELECT neighbor, rel_type FROM graph_neighbors('ownership', 'from_id', 'Auckland', 'out');
@@ -126,7 +127,7 @@ MATCH (a)-[:oceania]->(b) ON ownership(from_id) WHERE a = 'Auckland' RETURN b;
 -- 6. CANOPY — document / JSON
 -- ===========================================================================
 -- Path index for deep JSON lookups, plus full-text over the JSON body.
-CREATE INDEX ON places USING JSONPATH (profile) WITH (path = 'owner');
+CREATE INDEX IF NOT EXISTS ON places USING JSONPATH (profile) WITH (path = 'owner');
 
 -- JSON operators: -> (extract), ->> (extract as text), @> (contains).
 SELECT name, profile->>'tier' AS tier, profile->'owner' AS owner_obj
@@ -142,7 +143,7 @@ SELECT row_key FROM json_path_lookup('places', 'profile', 'ada');
 -- ===========================================================================
 -- Declare a stream topic. Normal table writes also produce CDC events on
 -- `__cdc_<table>` automatically.
-CREATE TOPIC events WITH (partitions = '3');
+CREATE TOPIC IF NOT EXISTS events WITH (partitions = '3');
 
 -- Any INSERT/UPDATE/DELETE on a table flows through Flux CDC; windowing
 -- functions let you aggregate the live stream. Here we window the CDC stream

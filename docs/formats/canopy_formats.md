@@ -106,6 +106,9 @@ Two query paths read this structure:
   defaults `k1 = 1.2` and `b = 0.75`, not configurable. It is what
   `hybrid_search` uses for the text side.
 
+The file starts with the 8-byte prefix `TPTFTS02`, followed by the bincode
+blob. A file without the prefix is from an older build and is rejected on open.
+
 Reimplementers should note that the older presence-only shape
 (`Vec<Vec<u8>>` buckets, AND-only) is gone. A file written by it will not
 deserialize into this struct.

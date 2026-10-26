@@ -47,15 +47,18 @@ the MVCC work (TODO Phase 1 Stage 2+3). Data written by a build before that
 change is not readable by the current one:
 
 - **WAL** (`wal.md`): records are now grouped into batches with a `0xFF` batch
-  marker. A pre-change `wal.log` is not parsed. `replay` stops at the first
-  byte that is not `0xFF`, so the old log is silently ignored, not rejected.
-  Flush or drain a node's WAL on the old build before upgrading.
+  marker. A pre-change `wal.log` is not parsed. `replay` returns an error when
+  the log doesn't start with `0xFF`, so the node refuses to start, rather than
+  silently dropping the log. Flush or drain a node's WAL on the old build before
+  upgrading.
 - **SSTable** (`sstable.md`): index entries now carry `seq` and `tag`. An
-  SSTable written by the old build will be misparsed, not rejected.
+  SSTable from an older build has no format marker in its footer, so it is
+  rejected with an error. It is not misparsed. Such data must be rebuilt or
+  migrated.
 - **Canopy FTS index** (`canopy_formats.md`): postings went from presence-only
-  buckets to term frequencies, and `doc_lengths` was added for BM25. A file
-  written by the old build fails to deserialize. How a node handles that file
-  at startup has not been checked.
+  buckets to term frequencies, and `doc_lengths` was added for BM25. A file from
+  the old build has no format prefix, so it is rejected on open. Node startup
+  skips an index that fails to open, so drop and recreate it.
 
 The manifest handles its own change, with a fallback decode for the pre-change
 shape (`manifest_and_lease.md`).

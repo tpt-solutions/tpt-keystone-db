@@ -59,9 +59,13 @@ identical either way.
 
 `Wal::replay` reads the whole file and walks it batch by batch:
 
-1. If fewer than 13 bytes remain, or the byte at the cursor is not `0xFF`, replay
-   **stops**. Everything after that point is ignored. The format has no
-   resynchronisation marker, so a non-`0xFF` byte cannot be skipped past.
+1. If the log's *first* byte is not `0xFF`, replay **fails with an error**. That
+   is the signature of a log written in the pre-batch format, and replaying it as
+   empty would drop its writes silently. Later in the file, if fewer than 13 bytes
+   remain, or the byte at the cursor is not `0xFF`, replay **stops**. That is the
+   torn tail a crash leaves behind. Everything after that point is ignored. The
+   format has no resynchronisation marker, so a non-`0xFF` byte cannot be skipped
+   past.
 2. Read `commit_seq` and `count`. The returned high-water mark is raised to
    `commit_seq` *before* the records are checked. A torn batch therefore still
    counts, so its `commit_seq` is never reissued.
@@ -87,6 +91,7 @@ recovery.
 No version byte. This layout replaced an earlier per-record layout (one
 record per append, no batch marker) during the MVCC work in TODO Phase 1
 Stage 2+3. A `wal.log` written by the earlier layout is **not readable** by
-this one. `replay` sees a first byte that is not `0xFF` and silently stops. Any
+this one. `replay` sees a first byte that is not `0xFF` and returns an error, so
+the node refuses to start rather than dropping data. Any
 node upgraded with a non-empty, un-flushed WAL must flush or drain it on the
 old build before upgrading. See the Versioning section of [`README.md`](README.md#versioning).

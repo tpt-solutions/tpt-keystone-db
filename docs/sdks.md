@@ -11,7 +11,7 @@ for full detail; this is an index of what exists and where.
 | `tpt-keystone-sdk` | `tpt-keystone-sdk/` | Rust | `keystone`/`canvas`/`ffi` feature flags; sync + async clients; C ABI for FFI |
 | `@tpt/sdk-web` | `packages/sdk-web/` | Browser (TS) | HTTP/JSON bridge + Flux WebSocket; React hooks; Canvas plugin API |
 | `@tpt/sdk-server` | `packages/sdk-server/` | Node/Deno/Bun (TS) | Full Postgres wire client incl. streaming queries; Flux broadcast server |
-| `@tpt/sdk-edge` | `packages/sdk-edge/` | Cloudflare/Fastly/Vercel/Lambda@Edge (TS) | No runtime dependencies; same HTTP/JSON bridge as sdk-web |
+| `@tpt/sdk-edge` | `packages/sdk-edge/` | Cloudflare/Fastly/Vercel/Lambda@Edge (TS) | No runtime dependencies. Built `tsc` output is about 8.6 KB unminified, or about 4 KB gzipped (measured 2026-10-27, four modules, tests excluded). Same HTTP/JSON bridge as sdk-web |
 | `@tpt/sdk-react-native` | `packages/sdk-react-native/` | React Native (TS) | Offline-first HTTP/JSON client + Flux WebSocket subscriber, not a native wire bridge. Test-verified in this repo |
 | `tpt_sdk` (Dart/Flutter) | `tpt_sdk/` | Dart / Flutter | Same design as the React Native SDK. Test-verified in this repo |
 | `tpt-sdk-android` | `tpt-sdk-android/` | Kotlin / Android | Same design as the React Native SDK. **Not built or tested in this repo** (no Gradle or `kotlinc` available here) |

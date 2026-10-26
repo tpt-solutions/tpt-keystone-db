@@ -21,11 +21,11 @@ from the body.
 | Startup parameters inert (§1, Low) | **Partly changed.** `user` is now read for the SCRAM lookup. The other parameters were not re-checked. |
 | Startup message length / repeated-pair size (§1) | Not re-checked in this pass. |
 | UDF module size unbounded at compile time (§2, Medium) | **Fixed.** `UdfConfig::max_module_bytes`, default 4 MiB, overridable with `TPT_UDF_MAX_MODULE_BYTES`. |
-| Explicit `wasmtime::Config` allow-list (§2, Medium) | **Still open.** `executor/udf.rs` still sets only `consume_fuel(true)`. |
+| Explicit `wasmtime::Config` allow-list (§2, Medium) | **Fixed (2026-10-27).** `executor/udf.rs` `udf_engine_config()` sets every proposal explicitly. SIMD, reference types, multi-memory, threads, memory64, relaxed SIMD and tail calls are off. Bulk memory and multi-value stay on. |
 | Fresh `Engine`/`Module` per call (§2, Low) | Not re-checked in this pass. |
 | Wasmtime trap behaviour on the deployment OS (§2, Informational) | **Still open.** Needs a Linux run. |
 | Non-Postgres listeners unauthenticated (§4) | **Fixed.** HTTP, WebSocket, gRPC (Basic auth) and MCP (token gate plus RBAC `Actor`) share `wire/bridge_auth.rs`. Connection caps added. See `TODO.md` Phase 3. |
-| Per-topic authorization on Flux (§4, Low) | **Still open.** Any authenticated caller can publish to or subscribe to any topic. |
+| Per-topic authorization on Flux (§4, Low) | **Partly fixed (2026-10-27).** `GRANT ... ON TOPIC` exists. The WebSocket subscribe and the gRPC Publish, Subscribe, Poll and CreateTopic methods check it. Zero-config and superuser actors pass. The SQL `flux_*` table functions are checked too. A non-literal topic argument is refused for non-superusers. |
 | S3 credentials, conditional PUT, error handling (§3) | Unchanged as far as this pass checked. |
 
 ## Summary (as of 2026-07-07)
@@ -108,7 +108,7 @@ Connection-level rate limiting was also added across all four bridges
 | Severity | Finding |
 |---|---|
 | **Fixed** | The four non-Postgres listeners now require authentication once roles are configured (zero-config preserved). See `wire/bridge_auth.rs` and `src/wire/grpc/mod.rs:416`. |
-| Low — **still open** | The HTTP/WebSocket/gRPC bridges enforce *authentication* (who you are) but not *per-topic authorization* — there is no topic-level privilege model in `rbac.rs`, so any authenticated caller can publish/subscribe/poll any Flux topic. Documented as a known architectural ceiling, not fixed here. MCP tool handlers do enforce per-table RBAC. |
+| Low — **partly fixed** | The WebSocket and gRPC bridges now check per-topic privileges (`Actor::check_topic`, the `TOPIC` grant object). The SQL `flux_*` table functions are still unchecked. MCP tool handlers enforce per-table RBAC. |
 | Informational | The authenticated `Actor` is `unrestricted()` under the zero-config path; this is intended (same as the Postgres listener) and only changes once `_tpt_roles` is populated. |
 
 The Phase 12 "still open" top finding — wire-protocol authentication — is now
