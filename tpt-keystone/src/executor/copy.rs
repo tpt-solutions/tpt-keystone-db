@@ -54,12 +54,14 @@ pub fn insert_copy_line(
         cells[col_idx] = cell;
     }
 
-    let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
-    let pk_bytes = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
+    let key = super::dml::row_key_for(schema, &cells);
+    if !schema.pk_columns.is_empty() && db.read(table, &key)?.is_some() {
+        anyhow::bail!("duplicate key value violates unique constraint \"{table}_pkey\"");
+    }
 
     let value_buf = super::dml::build_row_value(schema, &cells, db);
 
-    db.write(table, &pk_bytes, &value_buf)?;
+    db.write(table, &key, &value_buf)?;
     Ok(())
 }
 

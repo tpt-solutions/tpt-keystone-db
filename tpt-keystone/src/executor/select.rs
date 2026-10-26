@@ -124,8 +124,17 @@ pub(super) fn execute_select_with_cte(
         })
         .collect();
 
+    // Evaluation errors (an unknown column, a bad function argument) are
+    // returned to the caller. They are not treated as "no match" or NULL, so
+    // a typo in a predicate cannot silently drop rows.
     if let Some(ref where_expr) = select.where_ {
-        rows.retain(|ctx| ctx.eval(where_expr).map(|v| v.is_truthy()).unwrap_or(false));
+        let mut kept = Vec::with_capacity(rows.len());
+        for ctx in rows {
+            if ctx.eval(where_expr)?.is_truthy() {
+                kept.push(ctx);
+            }
+        }
+        rows = kept;
     }
 
     // GROUP BY / aggregates: collapse `rows` into one representative
@@ -137,10 +146,20 @@ pub(super) fn execute_select_with_cte(
     apply_window_functions(&select, &mut rows)?;
 
     if !select.order_by.is_empty() {
+        let order_exprs: Vec<Expr> = select
+            .order_by
+            .iter()
+            .map(|o| resolve_order_alias(&o.expr, &select.projections))
+            .collect();
+        for ctx in &rows {
+            for expr in &order_exprs {
+                ctx.eval(expr)?;
+            }
+        }
         rows.sort_by(|a, b| {
-            for order in &select.order_by {
-                let va = a.eval(&order.expr).unwrap_or(Value::Null);
-                let vb = b.eval(&order.expr).unwrap_or(Value::Null);
+            for (order, expr) in select.order_by.iter().zip(order_exprs.iter()) {
+                let va = a.eval(expr).unwrap_or(Value::Null);
+                let vb = b.eval(expr).unwrap_or(Value::Null);
                 let cmp = value_compare(&va, &vb).unwrap_or(0);
                 if cmp != 0 {
                     return if order.asc == (cmp < 0) {
@@ -184,7 +203,7 @@ pub(super) fn execute_select_with_cte(
                 Projection::Wildcard => cells.extend(ctx.values.iter().cloned()),
                 Projection::WildcardTable(_) => unreachable!("rejected in build_fields"),
                 Projection::Expr { expr, .. } => {
-                    cells.push(ctx.eval(expr).ok().and_then(|v| v.to_wire_bytes()))
+                    cells.push(ctx.eval(expr)?.to_wire_bytes())
                 }
             }
         }
@@ -197,6 +216,26 @@ pub(super) fn execute_select_with_cte(
         rows: projected_rows,
         tag: format!("SELECT {row_count}"),
     })
+}
+
+/// An ORDER BY name that matches an output alias sorts by that output's
+/// expression (`SELECT COUNT(*) AS cnt ... ORDER BY cnt`). Any other
+/// expression is returned unchanged.
+fn resolve_order_alias(expr: &Expr, projections: &[Projection]) -> Expr {
+    if let Expr::Ident(name) = expr {
+        for proj in projections {
+            if let Projection::Expr {
+                expr: target,
+                alias: Some(alias),
+            } = proj
+            {
+                if alias == name {
+                    return target.clone();
+                }
+            }
+        }
+    }
+    expr.clone()
 }
 
 /// A no-FROM SELECT: evaluate projections once against an empty row context.

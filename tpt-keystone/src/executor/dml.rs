@@ -253,6 +253,37 @@ fn check_json_schemas(schema: &TableSchema, cells: &[Option<Vec<u8>>]) -> anyhow
     Ok(())
 }
 
+/// The physical row key for a new row. This is the key used for storage,
+/// CDC, and every secondary index.
+///
+/// - One PRIMARY KEY column: its raw cell bytes. This matches the layout of
+///   every existing single-key table.
+/// - Composite PRIMARY KEY: each key column as a `u32` big-endian length
+///   prefix plus its bytes, with `u32::MAX` for NULL. Two different key tuples
+///   can therefore never produce the same key.
+/// - No PRIMARY KEY: 16 random bytes. Every row gets its own key, so an
+///   insert never overwrites another row. (Before this, the first column's
+///   value was used, so repeated values silently replaced earlier rows.)
+pub(crate) fn row_key_for(schema: &TableSchema, cells: &[Option<Vec<u8>>]) -> Vec<u8> {
+    match schema.pk_columns.as_slice() {
+        [] => rand::random::<[u8; 16]>().to_vec(),
+        [single] => cells.get(*single).cloned().flatten().unwrap_or_default(),
+        many => {
+            let mut key = Vec::new();
+            for &idx in many {
+                match cells.get(idx).cloned().flatten() {
+                    Some(bytes) => {
+                        key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                        key.extend_from_slice(&bytes);
+                    }
+                    None => key.extend_from_slice(&u32::MAX.to_be_bytes()),
+                }
+            }
+            key
+        }
+    }
+}
+
 pub(super) fn execute_insert(
     insert: crate::sql::ast::InsertStmt,
     db: Arc<Database>,
@@ -270,8 +301,15 @@ pub(super) fn execute_insert(
         check_foreign_keys(&schema, &db, txn, &cells)?;
         check_json_schemas(&schema, &cells)?;
 
-        let pk_idx = schema.pk_columns.first().copied().unwrap_or(0);
-        let pk_value = cells.get(pk_idx).cloned().flatten().unwrap_or_default();
+        let pk_value = row_key_for(&schema, &cells);
+        if !schema.pk_columns.is_empty()
+            && db.txn_read(txn, &insert.table, &pk_value)?.is_some()
+        {
+            anyhow::bail!(
+                "duplicate key value violates unique constraint \"{}_pkey\"",
+                insert.table
+            );
+        }
 
         let value_buf = build_row_value(&schema, &cells, &db);
 
@@ -355,7 +393,7 @@ pub(super) fn execute_delete(
             Some(expr) => {
                 let ctx = RowContext::with_db(row.clone(), schema_arc.clone(), db.clone())
                     .with_params(params.to_vec());
-                ctx.eval(expr).map(|v| v.is_truthy()).unwrap_or(false)
+                ctx.eval(expr)?.is_truthy()
             }
             None => true,
         };
@@ -401,7 +439,7 @@ pub(super) fn execute_update(
         let ctx = RowContext::with_db(row.clone(), Some(schema_arc.clone()), db.clone())
             .with_params(params.to_vec());
         let matches = match &update.where_ {
-            Some(expr) => ctx.eval(expr).map(|v| v.is_truthy()).unwrap_or(false),
+            Some(expr) => ctx.eval(expr)?.is_truthy(),
             None => true,
         };
         if !matches {

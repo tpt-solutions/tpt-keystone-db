@@ -43,7 +43,7 @@ fn cell_text(cell: &Option<Vec<u8>>) -> String {
 }
 
 fn make_docs_table(db: &Arc<Database>) {
-    execute_query("CREATE TABLE docs (id INT4, body JSON)", db.clone()).unwrap();
+    execute_query("CREATE TABLE docs (id INT4 PRIMARY KEY, body JSON)", db.clone()).unwrap();
     let rows = [
         (
             1,
@@ -174,7 +174,7 @@ fn fts_index_created_and_searched() {
 #[test]
 fn fts_bm25_ranks_by_relevance() {
     let (db, _b, _l) = test_db();
-    execute_query("CREATE TABLE articles (id INT4, body TEXT)", db.clone()).unwrap();
+    execute_query("CREATE TABLE articles (id INT4 PRIMARY KEY, body TEXT)", db.clone()).unwrap();
     let rows = [
         (1, "rust rust rust systems programming"),
         (2, "rust is a systems programming language"),
@@ -205,7 +205,7 @@ fn fts_bm25_ranks_by_relevance() {
 fn json_schema_strict_mode_rejects_invalid_insert() {
     let (db, _b, _l) = test_db();
     execute_query(
-        r#"CREATE TABLE people (id INT4, profile JSON) WITH (
+        r#"CREATE TABLE people (id INT4 PRIMARY KEY, profile JSON) WITH (
             json_schema_col = 'profile',
             json_schema = '{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}',
             json_schema_mode = 'strict'
@@ -234,7 +234,7 @@ fn json_schema_strict_mode_rejects_invalid_insert() {
 fn json_schema_off_mode_never_rejects() {
     let (db, _b, _l) = test_db();
     execute_query(
-        r#"CREATE TABLE loose (id INT4, profile JSON) WITH (
+        r#"CREATE TABLE loose (id INT4 PRIMARY KEY, profile JSON) WITH (
             json_schema_col = 'profile',
             json_schema = '{"type":"object","required":["name"]}',
             json_schema_mode = 'off'
@@ -317,7 +317,7 @@ fn jsonb_binary_storage_is_transparent_to_queries() {
 fn jsonb_binary_rows_readable_after_disabling() {
     let (db, _b, _l) = test_db();
     db.set_jsonb_binary_storage(true);
-    execute_query("CREATE TABLE d (id INT4, body JSON)", db.clone()).unwrap();
+    execute_query("CREATE TABLE d (id INT4 PRIMARY KEY, body JSON)", db.clone()).unwrap();
     execute_query(r#"INSERT INTO d VALUES (1, '{"k":"v"}')"#, db.clone()).unwrap();
 
     db.set_jsonb_binary_storage(false);

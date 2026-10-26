@@ -544,12 +544,12 @@ impl RowContext {
                     val_to_text(&r)
                 ))),
             },
-            BinOp::Eq => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c == 0))),
-            BinOp::NotEq => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c != 0))),
-            BinOp::Lt => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c < 0))),
-            BinOp::Lte => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c <= 0))),
-            BinOp::Gt => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c > 0))),
-            BinOp::Gte => Ok(Value::Bool(value_compare(&l, &r).is_ok_and(|c| c >= 0))),
+            BinOp::Eq => compare_op(&l, &r, |c| c == 0),
+            BinOp::NotEq => compare_op(&l, &r, |c| c != 0),
+            BinOp::Lt => compare_op(&l, &r, |c| c < 0),
+            BinOp::Lte => compare_op(&l, &r, |c| c <= 0),
+            BinOp::Gt => compare_op(&l, &r, |c| c > 0),
+            BinOp::Gte => compare_op(&l, &r, |c| c >= 0),
             BinOp::Arrow => json_arrow(&l, &r, false),
             BinOp::LongArrow => json_arrow(&l, &r, true),
             BinOp::HashArrow => json_path_arrow(&l, &r, false),
@@ -675,6 +675,15 @@ impl RowContext {
             // owners, so every relation is owned by the bootstrap role — `tpt`
             // (consistent with `pg_tables.tableowner`).
             "pg_get_userbyid" => Ok(Value::Text("tpt".into())),
+            // `pg_get_expr(expr_text, relid[, pretty])`. Expressions are stored
+            // as their text, so the text is returned unchanged.
+            "pg_get_expr" => {
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("pg_get_expr() requires 2 arguments"))?,
+                )?;
+                Ok(v)
+            }
             // `pg_table_is_visible(oid)` — true if the relation is in a schema
             // on the search path. Our search path is just `public`, so resolve
             // the OID back to a known public relation (table or index).
@@ -758,6 +767,83 @@ impl RowContext {
                     None => true,
                 };
                 Ok(Value::Int(db.setval(&name, value, is_called)?))
+            }
+            // Basic numeric functions. Integer input keeps an integer result
+            // where that is exact, as PostgreSQL does. Float input gives a float.
+            "round" | "floor" | "ceil" | "ceiling" | "trunc" | "sign" => {
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("{norm}() requires an argument"))?,
+                )?;
+                match v {
+                    Value::Null => Ok(Value::Null),
+                    Value::Int(n) => Ok(Value::Int(match norm {
+                        "sign" => n.signum(),
+                        _ => n,
+                    })),
+                    Value::Float(f) => {
+                        let r = match norm {
+                            "floor" => f.floor(),
+                            "ceil" | "ceiling" => f.ceil(),
+                            "trunc" => f.trunc(),
+                            "sign" => {
+                                if f > 0.0 {
+                                    1.0
+                                } else if f < 0.0 {
+                                    -1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                            _ => {
+                                // round(x, n) keeps n decimal places. Half away from zero.
+                                let places = match args.get(1) {
+                                    Some(e) => self.eval(e)?.as_f64()? as i32,
+                                    None => 0,
+                                };
+                                let factor = 10f64.powi(places);
+                                (f * factor).round() / factor
+                            }
+                        };
+                        Ok(Value::Float(r))
+                    }
+                    other => anyhow::bail!("{norm}() requires a numeric argument, got {}", other.type_name()),
+                }
+            }
+            "sqrt" => {
+                let v = self.eval(
+                    args.first()
+                        .ok_or_else(|| anyhow::anyhow!("sqrt() requires 1 argument"))?,
+                )?;
+                let f = v.as_f64()?;
+                if f < 0.0 {
+                    anyhow::bail!("cannot take square root of a negative number");
+                }
+                Ok(Value::Float(f.sqrt()))
+            }
+            "power" | "pow" => {
+                if args.len() != 2 {
+                    anyhow::bail!("power() requires 2 arguments");
+                }
+                let base = self.eval(&args[0])?.as_f64()?;
+                let exp = self.eval(&args[1])?.as_f64()?;
+                Ok(Value::Float(base.powf(exp)))
+            }
+            "mod" => {
+                if args.len() != 2 {
+                    anyhow::bail!("mod() requires 2 arguments");
+                }
+                match (self.eval(&args[0])?, self.eval(&args[1])?) {
+                    (Value::Int(_), Value::Int(0)) => anyhow::bail!("division by zero"),
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+                    (a, b) => {
+                        let (a, b) = (a.as_f64()?, b.as_f64()?);
+                        if b == 0.0 {
+                            anyhow::bail!("division by zero");
+                        }
+                        Ok(Value::Float(a % b))
+                    }
+                }
             }
             "abs" => {
                 let v = self.eval(
@@ -986,20 +1072,18 @@ impl RowContext {
                 if args.len() != 2 {
                     anyhow::bail!("st_distance() requires 2 arguments");
                 }
-                let a = self.eval_geom(&args[0])?.representative_point();
-                let b = self.eval_geom(&args[1])?.representative_point();
-                Ok(Value::Float(crate::geo::geometry::haversine_distance_m(
-                    a.x, a.y, b.x, b.y,
-                )))
+                let a = self.eval_geom(&args[0])?;
+                let b = self.eval_geom(&args[1])?;
+                Ok(Value::Float(crate::geo::geometry::min_distance_m(&a, &b)))
             }
             "st_dwithin" => {
                 if args.len() != 3 {
                     anyhow::bail!("st_dwithin() requires 3 arguments (geom, geom, radius_meters)");
                 }
-                let a = self.eval_geom(&args[0])?.representative_point();
-                let b = self.eval_geom(&args[1])?.representative_point();
+                let a = self.eval_geom(&args[0])?;
+                let b = self.eval_geom(&args[1])?;
                 let radius = self.eval(&args[2])?.as_f64()?;
-                let dist = crate::geo::geometry::haversine_distance_m(a.x, a.y, b.x, b.y);
+                let dist = crate::geo::geometry::min_distance_m(&a, &b);
                 Ok(Value::Bool(dist <= radius))
             }
             "st_within" | "st_contains" => {
@@ -1719,6 +1803,28 @@ fn coerce_float(v: &Value) -> anyhow::Result<f64> {
     }
 }
 
+/// Applies a comparison operator. A NULL operand gives `false`, as before.
+/// Any other comparison error, such as a non-numeric literal against a
+/// number, is returned to the caller instead of being read as "no match".
+fn compare_op(l: &Value, r: &Value, pred: impl Fn(i32) -> bool) -> anyhow::Result<Value> {
+    if matches!(l, Value::Null) || matches!(r, Value::Null) {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(pred(value_compare(l, r)?)))
+}
+
+fn parse_literal_int(text: &str) -> anyhow::Result<i64> {
+    text.trim()
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("invalid input syntax for type integer: \"{text}\""))
+}
+
+fn parse_literal_float(text: &str) -> anyhow::Result<f64> {
+    text.trim()
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("invalid input syntax for type double precision: \"{text}\""))
+}
+
 pub fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
     match (a, b) {
         (Value::Null, Value::Null) => Ok(0),
@@ -1730,6 +1836,17 @@ pub fn value_compare(a: &Value, b: &Value) -> anyhow::Result<i32> {
         }
         (Value::Float(x), Value::Int(y)) => {
             Ok(x.partial_cmp(&(*y as f64)).map(|o| o as i32).unwrap_or(0))
+        }
+        // A quoted literal compared with a number is coerced to that number,
+        // as PostgreSQL does for an untyped literal: `id = '1'` matches `1`.
+        // Text that isn't a number is an error, not a silent mismatch.
+        (Value::Int(x), Value::Text(y)) => Ok(x.cmp(&parse_literal_int(y)?) as i32),
+        (Value::Text(x), Value::Int(y)) => Ok(parse_literal_int(x)?.cmp(y) as i32),
+        (Value::Float(x), Value::Text(y)) => {
+            Ok(x.partial_cmp(&parse_literal_float(y)?).map(|o| o as i32).unwrap_or(0))
+        }
+        (Value::Text(x), Value::Float(y)) => {
+            Ok(parse_literal_float(x)?.partial_cmp(y).map(|o| o as i32).unwrap_or(0))
         }
         (Value::Text(x), Value::Text(y)) => Ok(x.cmp(y) as i32),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y) as i32),

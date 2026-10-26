@@ -58,6 +58,64 @@ fn is_memory_type(ty: &ColumnType) -> bool {
     matches!(ty, ColumnType::Float8Array | ColumnType::Bytea)
 }
 
+/// The one shared engine for every UDF call. Its configuration is fixed, so
+/// it is built once rather than per call.
+fn udf_engine() -> &'static Engine {
+    static ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    ENGINE.get_or_init(|| {
+        Engine::new(&udf_engine_config()).expect("the fixed UDF engine configuration is valid")
+    })
+}
+
+/// Upper bound on cached compiled modules. Past it, the cache is cleared
+/// rather than growing without limit.
+const UDF_MODULE_CACHE_CAPACITY: usize = 256;
+
+/// Compiles `wasm` once, then reuses the result for every later call with
+/// the same bytes. Before, each call recompiled the module, which was the
+/// dominant cost of a UDF call. The key is the module's SHA-256, so two
+/// functions with identical bytes share one compiled module.
+fn compiled_udf_module(engine: &Engine, wasm: &[u8]) -> anyhow::Result<Module> {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<[u8; 32], Module>>> = OnceLock::new();
+    let digest: [u8; 32] = Sha256::digest(wasm).into();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(module) = cache.lock().unwrap().get(&digest) {
+        return Ok(module.clone());
+    }
+    let module = Module::new(engine, wasm)?;
+    let mut guard = cache.lock().unwrap();
+    if guard.len() >= UDF_MODULE_CACHE_CAPACITY {
+        guard.clear();
+    }
+    guard.insert(digest, module.clone());
+    Ok(module)
+}
+
+/// Explicit allow-list of WebAssembly proposals for UDF modules. Wasmtime's
+/// defaults change between releases, so every proposal is set here rather
+/// than inherited. The UDF ABI needs only core MVP plus memory and fuel.
+/// Bulk-memory and multi-value stay on because compiler output relies on
+/// them. SIMD, reference types, multi-memory, threads, memory64, relaxed
+/// SIMD and tail calls are off, so a module can't reach any of them.
+fn udf_engine_config() -> Config {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    config.wasm_simd(false);
+    config.wasm_relaxed_simd(false);
+    config.wasm_reference_types(false);
+    config.wasm_multi_memory(false);
+    config.wasm_threads(false);
+    config.wasm_memory64(false);
+    config.wasm_tail_call(false);
+    config.wasm_bulk_memory(true);
+    config.wasm_multi_value(true);
+    config
+}
+
 /// The Wasm *value types* a (possibly array) `ColumnType` appears as in a
 /// function signature: one value for scalars, a `(i32, i32)` pair for
 /// `float8[]`/`bytea`.
@@ -171,10 +229,8 @@ pub fn call(cfg: UdfConfig, uf: &UserFunction, args: &[Value]) -> anyhow::Result
         );
     }
 
-    let mut config = Config::new();
-    config.consume_fuel(true);
-    let engine = Engine::new(&config)?;
-    let module = Module::new(&engine, &uf.wasm_bytes)?;
+    let engine = udf_engine();
+    let module = compiled_udf_module(engine, &uf.wasm_bytes)?;
 
     let limits = StoreLimitsBuilder::new()
         .memory_size(cfg.memory_limit_bytes)
