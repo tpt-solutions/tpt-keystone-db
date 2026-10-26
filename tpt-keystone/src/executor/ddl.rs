@@ -187,10 +187,47 @@ pub(super) fn execute_drop_table(
     })
 }
 
+/// `DROP INDEX [IF EXISTS] name`. Indexes are identified by the PostgreSQL
+/// default name `<table>_<column>_idx`, since user-supplied index names are
+/// not stored.
+pub(super) fn execute_drop_index(
+    di: crate::sql::ast::DropIndexStmt,
+    db: Arc<Database>,
+) -> anyhow::Result<QueryResult> {
+    let target = db.all_index_pairs().into_iter().find(|(table, column)| {
+        format!("{table}_{column}_idx") == di.name
+            || db.index_name_of(table, column).as_deref() == Some(di.name.as_str())
+    });
+    match target {
+        Some((table, column)) => {
+            db.drop_index(&table, &column)?;
+        }
+        None if di.if_exists => {}
+        None => anyhow::bail!("index \"{}\" does not exist", di.name),
+    }
+    Ok(QueryResult {
+        fields: vec![],
+        rows: vec![],
+        tag: "DROP INDEX".into(),
+    })
+}
+
 pub(super) fn execute_create_index(
     ci: crate::sql::ast::CreateIndexStmt,
     db: Arc<Database>,
 ) -> anyhow::Result<QueryResult> {
+    if ci.if_not_exists && db.index_exists(&ci.table, &ci.column) {
+        return Ok(QueryResult {
+            fields: vec![],
+            rows: vec![],
+            tag: "CREATE INDEX".into(),
+        });
+    }
+    if let Some(name) = &ci.name {
+        if db.index_name_taken(name) {
+            anyhow::bail!("relation \"{name}\" already exists");
+        }
+    }
     match ci.using.as_deref() {
         None => db.create_index(&ci.table, &ci.column)?,
         Some(m) if m.eq_ignore_ascii_case("spatial") || m.eq_ignore_ascii_case("gist") => {
@@ -290,6 +327,9 @@ pub(super) fn execute_create_index(
             db.create_ivfpq_index(&ci.table, &ci.column, metric, n_lists, pq_m, n_probe)?
         }
         Some(other) => anyhow::bail!("unsupported index method \"{other}\" (supported: default B-Tree, SPATIAL/GIST, TIME/CHRONOS, GRAPH/PLEXUS, JSONPATH, GIN/FTS, VECTOR/HNSW, IVFPQ)"),
+    }
+    if let Some(name) = &ci.name {
+        db.name_index(&ci.table, &ci.column, name)?;
     }
     Ok(QueryResult {
         fields: vec![],

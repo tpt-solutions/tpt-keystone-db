@@ -103,6 +103,8 @@ pub fn resolve_virtual_table(
         "pg_index" => Some(pg_index(db)),
         "pg_constraint" => Some(pg_constraint(db)),
         "pg_am" => Some(Ok(pg_am())),
+        "pg_attrdef" => Some(pg_attrdef(db)),
+        "pg_collation" => Some(Ok(pg_collation())),
         "pg_sequence" => Some(Ok(pg_sequence(db))),
         "pg_roles" => Some(pg_roles(db)),
         "pg_auth_members" => Some(pg_auth_members(db)),
@@ -182,33 +184,93 @@ fn pg_class(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
             col("relkind", ColumnType::Text),
             col("relowner", ColumnType::Int4),
             col("relam", ColumnType::Int4),
+            // The remaining columns `psql \d` selects. Keystone has no
+            // triggers, rules, row security, partitions, tablespaces, typed
+            // tables, or TOAST, so these report the defaults.
+            col("relchecks", ColumnType::Int4),
+            col("relhasindex", ColumnType::Bool),
+            col("relhasrules", ColumnType::Bool),
+            col("relhastriggers", ColumnType::Bool),
+            col("relrowsecurity", ColumnType::Bool),
+            col("relforcerowsecurity", ColumnType::Bool),
+            col("relispartition", ColumnType::Bool),
+            col("reltablespace", ColumnType::Int4),
+            col("reloftype", ColumnType::Int4),
+            col("relpersistence", ColumnType::Text),
+            col("relreplident", ColumnType::Text),
+            col("reltoastrelid", ColumnType::Int4),
         ],
     );
     let public_ns = synthetic_oid("public");
+    // Tables that have at least one secondary index of any kind.
+    let mut indexed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for list in [
+        db.list_indexes(),
+        db.list_spatial_indexes(),
+        db.list_time_indexes(),
+        db.list_graph_indexes(),
+        db.list_json_indexes(),
+        db.list_fts_indexes(),
+        db.list_vector_indexes(),
+        db.list_ivfpq_indexes(),
+    ] {
+        indexed.extend(list.into_iter().map(|(table, _)| table));
+    }
     let mut rows: Vec<Row> = db
         .list_user_tables()?
         .into_iter()
         .map(|t| {
-            vec![
+            let has_index = indexed.contains(&t);
+            let mut row = vec![
                 int(synthetic_oid(&t)),
-                text(t),
+                text(t.clone()),
                 int(public_ns),
                 text("r"),
                 int(OWNER_OID),
                 int(HEAP_AM_OID),
-            ]
+            ];
+            row.extend([
+                int(0),
+                boolean(has_index),
+                boolean(false),
+                boolean(false),
+                boolean(false),
+                boolean(false),
+                boolean(false),
+                int(0),
+                int(0),
+                text("p"),
+                text("d"),
+                int(0),
+            ]);
+            row
         })
         .collect();
     for (table, column) in db.list_indexes() {
         let idx_name = format!("{table}_{column}_idx");
-        rows.push(vec![
+        let mut row = vec![
             int(synthetic_oid(&idx_name)),
             text(idx_name),
             int(public_ns),
             text("i"),
             int(OWNER_OID),
             int(BTREE_AM_OID),
+        ];
+        row.extend([
+            int(0),
+            boolean(false),
+            boolean(false),
+            boolean(false),
+            boolean(false),
+            boolean(false),
+            boolean(false),
+            int(0),
+            int(0),
+            text("p"),
+            text("d"),
+            int(0),
         ]);
+        rows.push(row);
     }
     Ok((s, rows))
 }
@@ -244,6 +306,11 @@ fn pg_attribute(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
             col("atttypid", ColumnType::Int4),
             col("attnum", ColumnType::Int4),
             col("attnotnull", ColumnType::Bool),
+            col("atthasdef", ColumnType::Bool),
+            col("attisdropped", ColumnType::Bool),
+            col("attidentity", ColumnType::Text),
+            col("attgenerated", ColumnType::Text),
+            col("attcollation", ColumnType::Int4),
         ],
     );
     let mut rows = Vec::new();
@@ -257,11 +324,55 @@ fn pg_attribute(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
                     int(c.col_type.oid()),
                     int((i + 1) as i32),
                     boolean(!c.nullable),
+                    boolean(c.default.is_some()),
+                    boolean(false),
+                    // Keystone has no identity or generated columns.
+                    text(""),
+                    text(""),
+                    int(0),
                 ]);
             }
         }
     }
     Ok((s, rows))
+}
+
+/// `pg_attrdef` — one row per column that has a DEFAULT. `adbin` holds the
+/// default expression's text, which `pg_get_expr` returns unchanged.
+fn pg_attrdef(db: &Arc<Database>) -> anyhow::Result<VirtualTable> {
+    let s = schema(
+        "pg_attrdef",
+        vec![
+            col("adrelid", ColumnType::Int4),
+            col("adnum", ColumnType::Int4),
+            col("adbin", ColumnType::Text),
+        ],
+    );
+    let mut rows = Vec::new();
+    for t in db.list_user_tables()? {
+        if let Some(table_schema) = db.get_table(&t)? {
+            let relid = synthetic_oid(&t);
+            for (i, c) in table_schema.columns.iter().enumerate() {
+                if let Some(default) = &c.default {
+                    rows.push(vec![int(relid), int((i + 1) as i32), text(default.clone())]);
+                }
+            }
+        }
+    }
+    Ok((s, rows))
+}
+
+/// `pg_collation`. Keystone has one implicit collation, and it isn't listed.
+/// The empty table lets collation-joining queries run and return no rows.
+fn pg_collation() -> VirtualTable {
+    let s = schema(
+        "pg_collation",
+        vec![
+            col("oid", ColumnType::Int4),
+            col("collname", ColumnType::Text),
+        ],
+    );
+    (s, Vec::new())
 }
 
 fn pg_type() -> VirtualTable {

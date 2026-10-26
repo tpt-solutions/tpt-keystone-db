@@ -150,6 +150,7 @@ fn execute_parsed_inner(
         Stmt::Update(update) => dml::execute_update(update, db, txn, params),
         Stmt::CreateTable(ct) => ddl::execute_create_table(ct, db),
         Stmt::DropTable(dt) => ddl::execute_drop_table(dt, db),
+        Stmt::DropIndex(di) => ddl::execute_drop_index(di, db),
         Stmt::CreateIndex(ci) => ddl::execute_create_index(ci, db),
         Stmt::CreateFunction(cf) => ddl::execute_create_function(cf, db),
         Stmt::CreateSequence(cs) => ddl::execute_create_sequence(cs, db),

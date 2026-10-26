@@ -826,6 +826,8 @@ impl Parser {
         let object = if self.eat(&Token::On) {
             if self.eat(&Token::Database) {
                 GrantObject::Database
+            } else if self.eat(&Token::Topic) {
+                GrantObject::Topic(self.parse_object_name()?)
             } else {
                 self.eat(&Token::Table);
                 GrantObject::Table(self.parse_object_name()?)
@@ -1006,14 +1008,27 @@ impl Parser {
             }
             Token::Index => {
                 self.advance();
-                let _name = self.parse_ident_string()?;
-                anyhow::bail!("DROP INDEX not yet supported")
+                let if_exists = self.peek() == &Token::If && self.peek2() == &Token::Exists;
+                if if_exists {
+                    self.advance();
+                    self.advance();
+                }
+                let name = self.parse_object_name()?;
+                Ok(Stmt::DropIndex(DropIndexStmt { name, if_exists }))
             }
             other => anyhow::bail!("expected TABLE or INDEX after DROP, got {:?}", other),
         }
     }
 
     fn parse_create_index(&mut self) -> anyhow::Result<Stmt> {
+        let if_not_exists = if self.peek() == &Token::If && self.peek2() == &Token::Not {
+            self.advance();
+            self.advance();
+            self.expect(&Token::Exists)?;
+            true
+        } else {
+            false
+        };
         let _name = if self.peek() == &Token::On {
             None
         } else {
@@ -1044,6 +1059,7 @@ impl Parser {
         Ok(Stmt::CreateIndex(CreateIndexStmt {
             table,
             column,
+            if_not_exists,
             name: _name,
             using,
             options,
@@ -1066,8 +1082,9 @@ impl Parser {
         let value = match self.advance().clone() {
             Token::StringLiteral(s) => s,
             Token::Ident(s) => s,
+            Token::IntLiteral(n) => n.to_string(),
             other => anyhow::bail!(
-                "expected a string literal for index option value, got {:?}",
+                "expected a string or integer literal for option value, got {:?}",
                 other
             ),
         };
@@ -1186,8 +1203,15 @@ impl Parser {
             || self.peek() == &Token::Right
             || self.peek() == &Token::Full
             || self.peek() == &Token::Cross
+            || self.peek() == &Token::Comma
         {
             let join_type = match self.peek().clone() {
+                // `FROM a, b` is an implicit CROSS JOIN, as in PostgreSQL. It can
+                // be mixed with explicit joins: `FROM a, b LEFT JOIN c ON ...`.
+                Token::Comma => {
+                    self.advance();
+                    JoinType::Cross
+                }
                 Token::Join => {
                     self.advance();
                     JoinType::Inner
@@ -1231,6 +1255,7 @@ impl Parser {
                 on,
             });
         }
+
 
         Ok(TableWithJoins { primary, joins })
     }
@@ -1413,6 +1438,17 @@ impl Parser {
         self.eat(&Token::In);
         let cursor = self.parse_ident_string()?;
         Ok(FetchStmt { cursor, count })
+    }
+
+    /// A type name in a cast: `text`, or schema-qualified `pg_catalog.text`.
+    /// This engine has one schema, so the qualifier is dropped and the
+    /// last component is kept.
+    fn parse_cast_type_name(&mut self) -> anyhow::Result<String> {
+        let mut name = self.parse_ident_string()?;
+        while self.eat(&Token::Dot) {
+            name = self.parse_ident_string()?;
+        }
+        Ok(name)
     }
 
     fn parse_ident_string(&mut self) -> anyhow::Result<String> {
@@ -1713,7 +1749,7 @@ impl Parser {
                     self.advance();
                     self.advance();
                 }
-                if let Token::Ident(_) = self.peek() {
+                if matches!(self.peek(), Token::Ident(_) | Token::Default) {
                     self.advance();
                 }
                 continue;
@@ -1801,7 +1837,7 @@ impl Parser {
             match self.peek().clone() {
                 Token::DoubleColon => {
                     self.advance();
-                    let ty = self.parse_ident_string()?;
+                    let ty = self.parse_cast_type_name()?;
                     expr = Expr::Cast {
                         expr: Box::new(expr),
                         ty,
@@ -1867,7 +1903,7 @@ impl Parser {
                 if let Token::As = self.peek() {
                     self.advance();
                 }
-                let ty = self.parse_ident_string()?;
+                let ty = self.parse_cast_type_name()?;
                 self.expect(&Token::RParen)?;
                 Ok(Expr::Cast {
                     expr: Box::new(inner),

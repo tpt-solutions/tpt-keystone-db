@@ -201,8 +201,11 @@ fn parses_create_and_drop_index() {
         }
         other => panic!("expected CreateIndex, got {other:?}"),
     }
-    // DROP INDEX is parsed but explicitly rejected — not yet supported.
-    assert!(parse("DROP INDEX idx_a").is_err());
+    // DROP INDEX parses into its own statement (executed against the default name).
+    match parse_ok("DROP INDEX idx_a") {
+        Stmt::DropIndex(d) => assert_eq!(d.name, "idx_a"),
+        other => panic!("expected DropIndex, got {other:?}"),
+    }
 
     match parse_ok("DROP TABLE IF EXISTS t") {
         Stmt::DropTable(s) => {
@@ -697,4 +700,55 @@ fn grant_with_optional_privileges_keyword() {
         Stmt::Grant(g) => assert_eq!(g.privileges, vec![Privilege::Select]),
         other => panic!("expected Stmt::Grant, got {other:?}"),
     }
+}
+
+#[test]
+fn parses_create_index_if_not_exists() {
+    match parse_ok("CREATE INDEX IF NOT EXISTS ON t (c)") {
+        Stmt::CreateIndex(ci) => {
+            assert!(ci.if_not_exists);
+            assert_eq!(ci.table, "t");
+            assert_eq!(ci.column, "c");
+        }
+        other => panic!("expected CreateIndex, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_drop_index_with_and_without_if_exists() {
+    match parse_ok("DROP INDEX t_c_idx") {
+        Stmt::DropIndex(di) => {
+            assert_eq!(di.name, "t_c_idx");
+            assert!(!di.if_exists);
+        }
+        other => panic!("expected DropIndex, got {other:?}"),
+    }
+    match parse_ok("DROP INDEX IF EXISTS t_c_idx") {
+        Stmt::DropIndex(di) => assert!(di.if_exists),
+        other => panic!("expected DropIndex, got {other:?}"),
+    }
+}
+
+#[test]
+fn index_and_topic_options_accept_bare_integers_and_strings() {
+    match parse_ok("CREATE TOPIC events WITH (partitions = 3, retention = '1 hour')") {
+        Stmt::CreateTopic(ct) => {
+            assert!(ct.options.contains(&("partitions".to_string(), "3".to_string())));
+            assert!(ct.options.contains(&("retention".to_string(), "1 hour".to_string())));
+        }
+        other => panic!("expected CreateTopic, got {other:?}"),
+    }
+}
+
+#[test]
+fn collate_pg_catalog_default_parses() {
+    // psql's `\d` sends `COLLATE pg_catalog.default`, where `default` is a keyword.
+    parse_ok("SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname OPERATOR(pg_catalog.~) '^(x)$' COLLATE pg_catalog.default");
+}
+
+#[test]
+fn schema_qualified_cast_type_names_parse() {
+    // psql's `\d` casts to `pg_catalog.text`; the qualifier is dropped.
+    parse_ok("SELECT 1::pg_catalog.text");
+    parse_ok("SELECT CAST(1 AS pg_catalog.text)");
 }

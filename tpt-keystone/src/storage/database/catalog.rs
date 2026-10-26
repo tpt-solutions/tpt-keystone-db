@@ -321,6 +321,108 @@ impl Database {
     }
 
     /// Create a named sequence, persisted like `TableSchema`/`UserFunction`.
+    /// Whether any secondary index of any kind exists on `table.column`.
+    pub fn index_exists(&self, table: &str, column: &str) -> bool {
+        fn has<T>(
+            map: &std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, T>>>,
+            table: &str,
+            column: &str,
+        ) -> bool {
+            map.lock()
+                .unwrap()
+                .get(table)
+                .is_some_and(|cols| cols.contains_key(column))
+        }
+        has(&self.indexes, table, column)
+            || has(&self.geo_indexes, table, column)
+            || has(&self.ts_indexes, table, column)
+            || has(&self.graph_indexes, table, column)
+            || has(&self.json_indexes, table, column)
+            || has(&self.fts_indexes, table, column)
+            || has(&self.vector_indexes, table, column)
+            || has(&self.ivf_pq_indexes, table, column)
+    }
+
+    /// Every `(table, column)` that has a secondary index of any kind.
+    pub fn all_index_pairs(&self) -> Vec<(String, String)> {
+        let mut all = Vec::new();
+        all.extend(self.list_indexes());
+        all.extend(self.list_spatial_indexes());
+        all.extend(self.list_time_indexes());
+        all.extend(self.list_graph_indexes());
+        all.extend(self.list_json_indexes());
+        all.extend(self.list_fts_indexes());
+        all.extend(self.list_vector_indexes());
+        all.extend(self.list_ivfpq_indexes());
+        all
+    }
+
+    /// The user-supplied name recorded for the index on `table.column`, if any.
+    /// Names are kept in `<table>_<column>.name` beside the index files, so
+    /// they are node-local like the indexes themselves.
+    pub fn index_name_of(&self, table: &str, column: &str) -> Option<String> {
+        std::fs::read_to_string(self.local_index_dir.join(format!("{table}_{column}.name")))
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Whether some index already carries the user-supplied `name`.
+    pub fn index_name_taken(&self, name: &str) -> bool {
+        self.all_index_pairs()
+            .iter()
+            .any(|(t, c)| self.index_name_of(t, c).as_deref() == Some(name))
+    }
+
+    /// Records `name` as the user-supplied name of the index on `table.column`.
+    pub fn name_index(&self, table: &str, column: &str, name: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.local_index_dir)?;
+        std::fs::write(
+            self.local_index_dir.join(format!("{table}_{column}.name")),
+            name,
+        )?;
+        Ok(())
+    }
+
+    /// Drops every secondary index on `table.column` (in-memory structures and
+    /// the on-disk files named `<table>_<column>.*`). Returns `false` if there
+    /// was no index to drop.
+    pub fn drop_index(&self, table: &str, column: &str) -> Result<bool> {
+        self.check_writable()?;
+        if !self.index_exists(table, column) {
+            return Ok(false);
+        }
+
+        fn remove<T>(
+            map: &std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, T>>>,
+            table: &str,
+            column: &str,
+        ) {
+            if let Some(cols) = map.lock().unwrap().get_mut(table) {
+                cols.remove(column);
+            }
+        }
+        remove(&self.indexes, table, column);
+        remove(&self.geo_indexes, table, column);
+        remove(&self.ts_indexes, table, column);
+        remove(&self.graph_indexes, table, column);
+        remove(&self.json_indexes, table, column);
+        remove(&self.fts_indexes, table, column);
+        remove(&self.vector_indexes, table, column);
+        remove(&self.ivf_pq_indexes, table, column);
+
+        let stem = format!("{table}_{column}");
+        if let Ok(entries) = std::fs::read_dir(&self.local_index_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        info!(table, column, "index dropped");
+        Ok(true)
+    }
+
     pub fn create_sequence(&self, name: &str, start: i64, increment: i64) -> Result<()> {
         self.check_writable()?;
         let mut sequences = self.sequences.lock().unwrap();

@@ -7,6 +7,7 @@ pub enum Stmt {
     Update(UpdateStmt),
     CreateTable(CreateTableStmt),
     DropTable(DropTableStmt),
+    DropIndex(DropIndexStmt),
     CreateIndex(CreateIndexStmt),
     AlterTable(AlterTableStmt),
     Set(SetStmt),
@@ -186,6 +187,8 @@ pub enum GrantObject {
     Table(String),
     /// `ON DATABASE` — the whole instance.
     Database,
+    /// `ON TOPIC name` — a Flux topic (publish, subscribe, poll).
+    Topic(String),
 }
 
 /// `GRANT ... TO ...` (RBAC DDL, Phase 2 §9).
@@ -311,10 +314,22 @@ pub struct DropTableStmt {
     pub if_exists: bool,
 }
 
+/// `DROP INDEX [IF EXISTS] name`. Indexes are identified by `name` following
+/// the PostgreSQL default `<table>_<column>_idx`, since user-supplied index
+/// names are not stored (see `CreateIndexStmt::name`).
+#[derive(Debug, Clone)]
+pub struct DropIndexStmt {
+    pub name: String,
+    pub if_exists: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateIndexStmt {
     pub table: String,
     pub column: String,
+    /// `CREATE INDEX IF NOT EXISTS`: a no-op when an index already exists on
+    /// `(table, column)`.
+    pub if_not_exists: bool,
     pub name: Option<String>,
     /// `USING <method>` (e.g. `USING SPATIAL`/`USING GIST`/`USING TIME`) —
     /// `None` means the default B-Tree. `SPATIAL`/`GIST` (aliased) select
