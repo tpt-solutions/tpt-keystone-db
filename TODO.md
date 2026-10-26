@@ -493,6 +493,66 @@ node-id/cluster-count text in the GPU path (no glyph atlas), per-instance/data-d
 hardcoded color per pipeline, no uniforms/bind groups), and `GpuVertexStepMode` instancing
 (CPU-expanded quads instead).
 
+## Phase 11 — Docs-refresh findings (2026-10-26): open engine bugs and doc gaps
+
+Found while checking `docs/` against the source and a live node. The docs now describe current
+behaviour; the items below are the code and docs that still need work. Bugs are listed first.
+
+### Bugs (wrong results or silent failures)
+
+- [ ] **Indexed `ST_DWithin` drops rows for radii larger than one grid cell.** With a `SPATIAL` index
+      on `loc`, `ST_DWithin(loc, ST_MakePoint(174.76, -36.85), 3000000)` returns only Auckland. The
+      same query with no index returns Auckland, Wellington and Sydney, which matches
+      `ST_Distance(...) <= 3000000`. The likely cause is the planner's `extract_spatial_predicate`
+      path using only the immediate cell neighbourhood (`s2::neighborhood`) and ignoring the radius.
+      Fix the index path, add a regression test in `geo_tests.rs` that compares indexed and unindexed
+      results across radii, and remove the known-issue note in `docs/sql-reference.md`.
+- [ ] **Unknown column in a table-valued function returns NULL instead of an error.**
+      `SELECT nosuchcol FROM json_path_lookup(...)` returns blank rows. Column resolution against the
+      function's output schema (`executor/graph_fn.rs`) should raise `column "x" does not exist`.
+- [ ] **Pre-MVCC on-disk data is silently unreadable.** The WAL batch-format change (`wal.rs`) makes
+      `replay` stop at the first byte that is not `0xFF`, so an old `wal.log` is ignored without an
+      error. Old SSTables (`sstable.rs` index gained `seq`/`tag`) and old Canopy FTS files
+      (`canopy_index.rs`) fail to decode. Add a format version byte to WAL, SSTable and FTS files.
+      Make `replay` error on an unrecognised first byte rather than returning an empty log. Decide on a
+      migration path for existing `tpt-data/` directories. Until then, `docs/formats/README.md` says
+      nodes must drain their WAL before upgrading.
+- [ ] **Vector distance is squared L2 in `vector_search`/`hybrid_search` but true L2 in
+      `l2_distance()`.** Make them agree. Either return the square root from the index path, or
+      document the squared value as the index's ranking score and rename the column. Update
+      `docs/sql-reference.md` and `docs/tutorials/hybrid-search.md` once decided.
+- [ ] **`IvfPqStorageIndex` retrains on every open**, which contradicts its module doc ("training
+      happens once, at index creation"). Either store the trained model in the `.ivfpq` header, or fix
+      the doc comment and document the reopen cost. `docs/formats/ivf_pq_index.md` already describes the
+      current behaviour.
+- [ ] **`CREATE INDEX IF NOT EXISTS` and `DROP INDEX` are not supported.** `parse_create_index` reads
+      `IF` as the index name. `DROP INDEX` returns "not yet supported". Add both, plus `IF NOT EXISTS` for
+      `CREATE TOPIC`. Then remove the scope-cut notes in `docs/sql-reference.md` and
+      `docs/tutorials/cookbook.md`, and restore idempotence in `docs/tutorials/cookbook.sql`.
+- [ ] **`psql \d <table>` fails** with `unexpected token: Default` on the query psql sends. `\dt` works.
+      Add the missing parser support, then update `docs/sql-reference.md`'s `pg_catalog` section.
+
+### Doc and config gaps
+
+- [ ] **Index and topic option values must be quoted.** `WITH (m = 16)` and `CREATE TOPIC ... WITH
+      (partitions = 3)` fail with "expected a string literal". Decide whether to accept bare numbers
+      (friendlier, and what `docs/` originally showed) or keep the rule and keep the quoted examples
+      in the docs.
+- [ ] **DiskANN has no SQL path.** `storage/diskann_index.rs` is reachable only through the Rust API.
+      Either add `USING DISKANN` to `executor/ddl.rs`, or leave it library-only. `docs/formats/diskann_index.md`
+      already says it is library-only, so update it too if the decision changes.
+- [ ] **`ST_Distance` units for non-POINT geometries.** Only `POINT` was checked (metres, haversine).
+      Confirm the units for `LINESTRING`/`POLYGON`, document them in `docs/sql-reference.md`, and add a
+      unit test.
+- [ ] **Re-measure `@tpt/sdk-edge`'s bundle size** and document the figure. The old "~4.6KB" claim
+      was removed because the current build was not checked.
+- [ ] **Verify on Linux:** io_uring WAL backend (`TPT_IO_URING=1`), and wasmtime trap behaviour under
+      fuel/memory exhaustion (`docs/security_audit_phase12.md`, WASM §2). Both are still open.
+- [ ] **Flux per-topic authorization.** Any authenticated caller can publish to or subscribe to any
+      topic (`docs/security_audit_phase12.md`, §4). Add a topic-level privilege model in `rbac.rs`.
+- [ ] **Explicit `wasmtime::Config` allow-list** in `executor/udf.rs` (currently only `consume_fuel`).
+      Also consider caching the `Engine`/`Module` per function instead of recompiling on every call.
+
 ## Done outside this list (`cfdafce`)
 
 - [x] `tpt-harbor`: ODBC source connector (`sources/odbc.rs`, `SourceKind::Odbc`) — vendor-agnostic
